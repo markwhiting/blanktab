@@ -1,0 +1,12 @@
+.DS_Store
+*.swp
+.env
+.env.*
+
+# Local scratch output (session logs live in data/runs/ and ARE committed)
+.local/
+checkpoints/
+*.ckpt
+*.safetensors
+__pycache__/
+node_modules/
