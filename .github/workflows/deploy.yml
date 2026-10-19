@@ -1,0 +1,49 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Explicit main: when called from the gate, github.sha predates the merges just made.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build app
+        run: npm run build -w app
+        env:
+          CODE_SHA: ${{ steps.sha.outputs.sha }}
+      - name: Assemble knowledge/ (summary and manifest are generated here, never committed)
+        run: |
+          mkdir -p app/dist/knowledge
+          cp knowledge/*.json app/dist/knowledge/
+          npx tsx tools/gate/summary-cli.ts data/runs app/dist/knowledge/summary.json
+          npx tsx tools/gate/manifest.ts knowledge app/dist/knowledge/manifest.json
+        env:
+          CODE_SHA: ${{ steps.sha.outputs.sha }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

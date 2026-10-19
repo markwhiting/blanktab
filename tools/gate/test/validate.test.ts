@@ -154,4 +154,20 @@ describe("validateSessionPr", () => {
   it("rejects an empty PR", () => {
     expect(errs([]).ok).toBe(false)
   })
+  describe("previous-state hardening", () => {
+    it("rejects a previous entry belonging to another learner", () => {
+      const r = errs([file(log(1))], [log(0, { learnerId: "lrn_fedcba9876543210" })])
+      expect(r.ok).toBe(false)
+      expect(r.errors.join("\n")).toContain("previous")
+    })
+    it("rejects any new log when previous already has a final file", () => {
+      const r = errs([file(log(2))], [log(0), log(1, { final: true })])
+      expect(r.ok).toBe(false)
+      expect(r.errors.join("\n")).toContain("final")
+    })
+    it("accepts a heartbeat-only PR after final (not a new log)", () => {
+      const hb: PrFile = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z" }) }
+      expect(errs([hb], [log(0, { final: true })]).ok).toBe(true)
+    })
+  })
 })

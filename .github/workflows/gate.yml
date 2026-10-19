@@ -1,0 +1,41 @@
+name: gate
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  pages: write
+  id-token: write
+concurrency:
+  group: gate
+  cancel-in-progress: false
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      merged: ${{ steps.gate.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: gate
+        run: npx tsx tools/gate/gate.ts data/runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+  # Merges made with GITHUB_TOKEN do not trigger other workflows, so the gate calls deploy itself.
+  deploy:
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.merged != '' && needs.gate.outputs.merged != '0' }}
+    uses: ./.github/workflows/deploy.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

@@ -1,0 +1,26 @@
+name: validate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  validate:
+    if: "${{ startsWith(github.event.pull_request.title, 'run: ') }}"
+    runs-on: ubuntu-latest
+    steps:
+      # Always main's scripts, never the PR's merge ref: PR code is not checked out, let alone executed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsx tools/gate/validate-cli.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

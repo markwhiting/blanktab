@@ -45,6 +45,14 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
 
   if (dirIds.size > 1) errors.push(`all files must be for the same learnerId (found ${[...dirIds].join(", ")})`)
 
+  // previous state must belong to this PR's learner, and a finished session accepts no more logs
+  for (const prev of previous) {
+    for (const id of dirIds) {
+      if (prev.learnerId !== id) { errors.push(`previous log (seq ${prev.seq}) belongs to ${prev.learnerId}, not ${id}`); break }
+    }
+  }
+  if (logs.length > 0 && previous.some(p => p.final)) errors.push("session already has a final file; no further log files are allowed")
+
   // seq: unique and continuing from previous
   const seen = new Set<number>()
   for (const { path, log } of logs) {
