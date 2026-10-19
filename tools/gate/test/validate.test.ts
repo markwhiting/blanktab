@@ -4,7 +4,7 @@ import type { LogFile } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
 const log = (seq: number, over: Partial<LogFile> = {}): LogFile => ({
-  schemaVersion: 1, learnerId: ID, seq, codeSha: "abc123", knowledgeSha: "0".repeat(64),
+  schemaVersion: 1, learnerId: ID, seq, codeSha: "a".repeat(40), knowledgeSha: "0".repeat(64),
   writtenAt: "2026-10-19T12:00:00.000Z", stepsTotal: 100 * (seq + 1), settings: { lr: 0.1, mode: "a" },
   hostSig: { cores: 8, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
   sessionsSeenAtBirth: 0, final: false, ...over,
@@ -130,6 +130,26 @@ describe("validateSessionPr", () => {
   it("rejects overlong settings strings", () => {
     expect(errs([file(log(0, { settings: { s: "a".repeat(201) } }))]).errors.join("\n")).toContain("200")
     expect(errs([file(log(0, { settings: { s: "a".repeat(200) } }))]).ok).toBe(true)
+  })
+  it("rejects payload-carrying writtenAt (log and heartbeat)", () => {
+    const evil = "Jan 1 2026 (" + "x".repeat(100_000) + ")"
+    expect(Number.isNaN(Date.parse(evil))).toBe(false)
+    expect(errs([file(log(0, { writtenAt: evil }))]).errors.join("\n")).toContain("writtenAt")
+    const hb = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: evil }) }
+    expect(errs([hb]).errors.join("\n")).toContain("writtenAt")
+  })
+  it("rejects writtenAt not in toISOString format", () => {
+    for (const w of ["2026-10-19", "2026-10-19T12:00:00Z", "2026-10-19T12:00:00.000+00:00", "2026-13-45T99:99:99.000Z"])
+      expect(errs([file(log(0, { writtenAt: w }))]).errors.join("\n")).toContain("writtenAt")
+  })
+  it("validates codeSha", () => {
+    for (const c of ["a".repeat(41), "g".repeat(40), "A".repeat(40), ""])
+      expect(errs([file(log(0, { codeSha: c }))]).errors.join("\n")).toContain("codeSha")
+    expect(errs([file(log(0, { codeSha: "dev" }))]).ok).toBe(true)
+  })
+  it("validates knowledgeSha", () => {
+    for (const c of ["0".repeat(63), "0".repeat(65), "z".repeat(64)])
+      expect(errs([file(log(0, { knowledgeSha: c }))]).errors.join("\n")).toContain("knowledgeSha")
   })
   it("rejects an empty PR", () => {
     expect(errs([]).ok).toBe(false)

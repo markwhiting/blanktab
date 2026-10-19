@@ -21,7 +21,10 @@ export const LEARNER_ID_RE = /^lrn_[0-9a-f]{16}$/
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
 const isNonNegInt = (v: unknown): v is number => isNum(v) && Number.isInteger(v) && v >= 0
-const isIso = (v: unknown): v is string => typeof v === "string" && v.length > 0 && !Number.isNaN(Date.parse(v))
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/ // exactly what Date.prototype.toISOString emits
+const CODE_SHA_RE = /^([0-9a-f]{40}|dev)$/ // GITHUB_SHA, or "dev" for local builds
+const KNOWLEDGE_SHA_RE = /^[0-9a-f]{64}$/ // sha256 hex
+const isIso = (v: unknown): v is string => typeof v === "string" && ISO_RE.test(v) && !Number.isNaN(Date.parse(v))
 
 const MAX_SETTING_STRING = 200
 const MAX_SETTING_KEYS = 50
@@ -42,8 +45,8 @@ export function parseLogFile(json: unknown): ParseResult {
   if (json.schemaVersion !== 1) return fail("schemaVersion must be 1")
   if (typeof json.learnerId !== "string" || !LEARNER_ID_RE.test(json.learnerId)) return fail("learnerId must be lrn_ + 16 hex chars")
   if (!isNonNegInt(json.seq)) return fail("seq must be a non-negative finite integer")
-  if (typeof json.codeSha !== "string" || json.codeSha === "") return fail("codeSha must be a non-empty string")
-  if (typeof json.knowledgeSha !== "string" || json.knowledgeSha === "") return fail("knowledgeSha must be a non-empty string")
+  if (typeof json.codeSha !== "string" || !CODE_SHA_RE.test(json.codeSha)) return fail("codeSha must be 40 lowercase hex chars or \"dev\"")
+  if (typeof json.knowledgeSha !== "string" || !KNOWLEDGE_SHA_RE.test(json.knowledgeSha)) return fail("knowledgeSha must be 64 lowercase hex chars")
   if (!isIso(json.writtenAt)) return fail("writtenAt must be an ISO time string")
   if (!isNonNegInt(json.stepsTotal)) return fail("stepsTotal must be a non-negative finite integer")
   if (!isObj(json.settings)) return fail("settings must be an object")
