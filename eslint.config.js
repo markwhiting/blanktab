@@ -24,9 +24,21 @@ const wall = (pkg, banned) => ({
   },
 })
 
+// Dynamic import() and require() are invisible to no-restricted-imports; ban them by syntax.
+const specifier = p => `/^(@blanktab\\/${p}(\\/.*)?|.*\\/${p}\\/.*|.*\\/packages\\/${p})$/`
+const dynamicWall = (pkg, banned) => ({
+  files: [`packages/${pkg}/**/*.{ts,tsx,js}`],
+  rules: {
+    "no-restricted-syntax": ["error", ...banned.flatMap(p => [
+      { selector: `ImportExpression > Literal.source[value=${specifier(p)}]`, message: `${pkg} must not import ${p} (package wall).` },
+      { selector: `CallExpression[callee.name='require'] > Literal.arguments:first-child[value=${specifier(p)}]`, message: `${pkg} must not require ${p} (package wall).` },
+    ])],
+  },
+})
+
 export default tseslint.config(
   { ignores: ["node_modules/**", "dist/**", "**/dist/**", ".superpowers/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  ...Object.entries(FORBIDDEN).filter(([, b]) => b.length).map(([p, b]) => wall(p, b)),
+  ...Object.entries(FORBIDDEN).filter(([, b]) => b.length).flatMap(([p, b]) => [wall(p, b), dynamicWall(p, b)]),
 )
