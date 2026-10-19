@@ -34,7 +34,7 @@ const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const HEARTBEAT_KEYS = ["learnerId", "writtenAt"]
 const unknownKey = (o: Record<string, unknown>, allowed: string[], where: string): string | null => {
   const k = Object.keys(o).find(key => !allowed.includes(key))
-  return k === undefined ? null : `unknown key ${JSON.stringify(k)} in ${where}`
+  return k === undefined ? null : `unknown key ${JSON.stringify(k.slice(0, 80))} in ${where}`
 }
 
 export function parseLogFile(json: unknown): ParseResult {
