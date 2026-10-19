@@ -78,10 +78,10 @@ describe("contributor: push access", () => {
 
   it("never overwrites a file already on the branch (crash between PUT and markSent)", async () => {
     const t = await setup({ files: 2 })
-    // Simulate: file 0 landed but was never marked sent.
+    // File 0 landed and was marked sent; file 1 fails with a 503 and is retried.
     t.gh.interceptors.push(r => (r.method === "PUT" && r.url.endsWith("/1.json") ? new Response("{}", { status: 503 }) : undefined))
     await t.c.flush()
-    expect((await t.queue.pending()).length).toBe(2)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([1])
     t.gh.interceptors.length = 0
     await t.c.flush()
     expect(await t.queue.pending()).toEqual([])
@@ -151,7 +151,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     t.gh.interceptors.push(r => (r.method === "PUT" && ++puts === 3 ? new Response('{"message":"Bad credentials"}', { status: 401 }) : undefined))
     await t.c.flush()
     expect(t.last().message).toMatch(/rejected/)
-    expect((await t.queue.pending()).length).toBeGreaterThan(0)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([2, 3, 4, 5]) // 0 and 1 were sent and marked
   })
 
   it("403 with Retry-After: 30 schedules a retry of at least 30 s, queue intact", async () => {
@@ -172,7 +172,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
   it("429 honours X-RateLimit-Reset", async () => {
     const t = await setup()
     const reset = Math.floor(NOW.getTime() / 1000) + 120
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 429, headers: { "X-RateLimit-Reset": String(reset) } }) : undefined))
+    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 429, headers: { "X-RateLimit-Reset": String(reset), "X-RateLimit-Remaining": "0" } }) : undefined))
     await t.c.flush()
     expect(t.scheduled[0]!).toBeGreaterThanOrEqual(120_000)
   })
@@ -246,5 +246,76 @@ describe("contributor: token never leaks (Review Focus 1)", () => {
     await t.c.flush()
     expect(t.statuses.length).toBeGreaterThan(0)
     for (const s of t.statuses) expect(JSON.stringify(s)).not.toContain(TOKEN)
+  })
+})
+
+describe("contributor: review fixes", () => {
+  it("opens a new PR when the earlier one was merged/closed", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+    t.gh.pulls[0]!.state = "closed"
+    await t.queue.put(mkFile(ID, 2))
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(2)
+    expect(t.gh.pulls[1]).toMatchObject({ state: "open", draft: true })
+    expect(await t.queue.pending()).toEqual([])
+  })
+
+  it("does not open a second PR while one is open", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    await t.queue.put(mkFile(ID, 2))
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+  })
+
+  it("403 with x-ratelimit-remaining 0 waits until the reset time", async () => {
+    const t = await setup()
+    const reset = Math.floor(NOW.getTime() / 1000) + 300
+    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }) : undefined))
+    await t.c.flush()
+    expect(t.scheduled[0]!).toBeGreaterThanOrEqual(300_000)
+  })
+
+  it("429 with no hints defaults to at least 60 s; reset is ignored while quota remains", async () => {
+    const t = await setup()
+    const reset = Math.floor(NOW.getTime() / 1000) + 1
+    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 429, headers: { "x-ratelimit-remaining": "40", "x-ratelimit-reset": String(reset) } }) : undefined))
+    await t.c.flush()
+    expect(t.scheduled[0]!).toBeGreaterThanOrEqual(60_000)
+  })
+
+  it("a plain 403 is a permissions error: no auto-retry, queue intact", async () => {
+    const t = await setup()
+    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response('{"message":"Resource not accessible"}', { status: 403, headers: { "x-ratelimit-remaining": "4000" } }) : undefined))
+    await t.c.flush()
+    expect(t.last()).toEqual({ state: "error", message: "Your GitHub token can't write to the repo — check its permissions.", pending: 6 })
+    expect(t.scheduled).toEqual([])
+    expect((await t.queue.pending()).length).toBe(6)
+  })
+
+  it("marks each log sent right after its PUT; the last stays pending until heartbeat and PR succeed", async () => {
+    const t = await setup({ files: 3 })
+    t.gh.interceptors.push(r => (r.method === "PUT" && r.url.endsWith("heartbeat.json") ? new Response("{}", { status: 503 }) : undefined))
+    await t.c.flush()
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([2])
+    expect(t.gh.pulls).toHaveLength(0)
+    t.gh.interceptors.length = 0
+    await t.c.flush()
+    expect(await t.queue.pending()).toEqual([])
+    expect(t.gh.pulls).toHaveLength(1)
+  })
+
+  it("treats a 422 'pull request already exists' (another tab) as success", async () => {
+    const t = await setup({ files: 1 })
+    t.gh.interceptors.push(r => {
+      if (r.method !== "POST" || !r.url.endsWith("/pulls")) return undefined
+      t.gh.pulls.push({ ...JSON.parse(r.body!), state: "open" }) // the other tab won the race
+      return new Response('{"message":"A pull request already exists"}', { status: 422 })
+    })
+    await t.c.flush()
+    expect(t.last()).toMatchObject({ state: "idle", pending: 0 })
+    expect(t.gh.pulls).toHaveLength(1)
   })
 })

@@ -22,6 +22,7 @@ const BACKOFF_MAX_MS = 600_000
 const FORK_POLLS = 10
 const FORK_POLL_MS = 2_000
 const DEFAULT_RATE_LIMIT_MS = 60_000
+const PERMISSION_MESSAGE = "Your GitHub token can't write to the repo — check its permissions."
 
 class Wait extends Error { constructor(readonly ms: number, readonly why: string) { super(why) } }
 
@@ -92,8 +93,22 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
 
   async function ensurePr(api: Api, dest: string, owner: string, learnerId: string): Promise<void> {
     const head = `${owner}:${branchOf(learnerId)}`
-    const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=all`)
-    if (Array.isArray(found.body) && found.body.length > 0) return
+    // Only an OPEN PR counts: once the gate merges or closes one, later logs need a fresh PR.
+    const open = async () => {
+      const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=open`)
+      return Array.isArray(found.body) && found.body.length > 0
+    }
+    if (await open()) return
+    try {
+      await createPr(api, dest, owner, learnerId, head)
+    } catch (e) {
+      // Two tabs share one outbox: the other tab may have opened it first.
+      if (e instanceof GitHubError && e.status === 422 && (await open())) return
+      throw e
+    }
+  }
+
+  async function createPr(api: Api, dest: string, owner: string, learnerId: string, head: string): Promise<void> {
     await api.call("POST", `/repos/${UPSTREAM}/pulls`, {
       title: `run: ${learnerId}`,
       head,
@@ -115,14 +130,18 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     for (const [id, files] of byLearner) {
       files.sort((a, b) => a.seq - b.seq)
       await ensureBranch(api, dest, id)
+      // Each log is marked sent right after its PUT. The last stays queued until the heartbeat and PR
+      // are done, so a failure there is retried instead of leaving a branch with no PR.
+      const last = files[files.length - 1]!
       for (const f of files) {
         status("sending", `Sending session log ${f.seq} of learner ${id}…`, (await queue.pending()).length)
         await putFile(api, dest, id, `${runPath(id)}/${f.seq}.json`, JSON.stringify(f), `log: ${id} #${f.seq}`, false)
+        if (f !== last) await queue.markSent(f.learnerId, f.seq)
       }
       const hb = { learnerId: id, writtenAt: now().toISOString() }
       await putFile(api, dest, id, `${runPath(id)}/heartbeat.json`, JSON.stringify(hb), `heartbeat: ${id}`, true)
-      for (const f of files) await queue.markSent(f.learnerId, f.seq)
       await ensurePr(api, dest, owner, id)
+      await queue.markSent(last.learnerId, last.seq)
     }
   }
 
@@ -142,7 +161,8 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       if (e instanceof GitHubError && e.status === 401) return status("error", REJECTED_MESSAGE, pending)
       let ms: number
       let msg: string
-      if (e instanceof GitHubError && (e.status === 403 || e.status === 429)) {
+      if (e instanceof GitHubError && e.status === 403 && !e.rateLimited) return status("error", PERMISSION_MESSAGE, pending)
+      if (e instanceof GitHubError && e.rateLimited) {
         ms = Math.max(e.retryAfterMs ?? DEFAULT_RATE_LIMIT_MS, 1000)
         msg = `GitHub is limiting requests; retrying in ${Math.ceil(ms / 1000)} s.`
       } else if (e instanceof Wait) {

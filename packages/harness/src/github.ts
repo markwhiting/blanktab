@@ -4,7 +4,7 @@
 const BASE = "https://api.github.com"
 
 export class GitHubError extends Error {
-  constructor(readonly status: number, message: string, readonly retryAfterMs: number | null) {
+  constructor(readonly status: number, message: string, readonly retryAfterMs: number | null, readonly rateLimited = false) {
     super(message)
   }
 }
@@ -16,13 +16,18 @@ export interface Api {
   call(method: string, path: string, body?: unknown, allow?: number[]): Promise<ApiResult>
 }
 
-/** Delay implied by a rate-limit response: Retry-After (seconds) or X-RateLimit-Reset (epoch seconds). */
-export function retryDelayMs(h: Headers, nowMs: number): number | null {
-  const ra = h.get("retry-after")
-  if (ra !== null && ra.trim() !== "" && Number.isFinite(Number(ra))) return Math.max(0, Number(ra)) * 1000
-  const reset = h.get("x-ratelimit-reset")
-  if (reset !== null && reset.trim() !== "" && Number.isFinite(Number(reset))) return Math.max(0, Number(reset) * 1000 - nowMs)
-  return null
+/** Rate-limit verdict for a 403/429. Reset time is trusted only when the quota is exhausted. */
+export function rateLimit(status: number, h: Headers, nowMs: number): { limited: boolean; delayMs: number | null } {
+  const num = (k: string): number | null => {
+    const v = h.get(k)
+    return v !== null && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null
+  }
+  const retryAfter = num("retry-after")
+  if (retryAfter !== null) return { limited: true, delayMs: Math.max(0, retryAfter) * 1000 }
+  const exhausted = h.get("x-ratelimit-remaining") === "0"
+  const reset = num("x-ratelimit-reset")
+  if (exhausted) return { limited: true, delayMs: reset === null ? null : Math.max(0, reset * 1000 - nowMs) }
+  return { limited: status === 429, delayMs: null }
 }
 
 export function createApi(token: string, fetchFn: typeof fetch, now: () => number = Date.now): Api {
@@ -46,8 +51,8 @@ export function createApi(token: string, fetchFn: typeof fetch, now: () => numbe
       let parsed: unknown = null
       try { parsed = await res.json() } catch { /* empty or non-JSON body */ }
       if (res.ok || allow.includes(res.status)) return { status: res.status, body: parsed }
-      const limited = res.status === 403 || res.status === 429
-      throw new GitHubError(res.status, `GitHub answered ${res.status}`, limited ? retryDelayMs(res.headers, now()) : null)
+      const rl = res.status === 403 || res.status === 429 ? rateLimit(res.status, res.headers, now()) : { limited: false, delayMs: null }
+      throw new GitHubError(res.status, `GitHub answered ${res.status}`, rl.delayMs, rl.limited)
     },
   }
 }

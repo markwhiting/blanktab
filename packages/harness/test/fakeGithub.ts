@@ -1,7 +1,7 @@
 // A fake api.github.com: records every request and simulates the endpoints the contributor uses.
 export interface Recorded { url: string; method: string; headers: Record<string, string>; body: string | undefined }
 type Repo = { fork: boolean; parent?: string; branches: Map<string, string>; files: Map<string, { content: string; sha: string }> }
-export interface Pull { head: string; base: string; title: string; draft: boolean; body: string }
+export interface Pull { head: string; base: string; title: string; draft: boolean; body: string; state?: "open" | "closed" }
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } })
@@ -36,10 +36,11 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     if ((m = p.match(/^\/repos\/([^/]+\/[^/]+)\/pulls$/)) && m[1] === UP) {
       if (r.method === "GET") {
         const head = u.searchParams.get("head")
-        return json(200, pulls.filter(x => x.head === head).map(x => ({ ...x, number: 1 })))
+        const want = u.searchParams.get("state") ?? "open"
+        return json(200, pulls.filter(x => x.head === head && (want === "all" || (x.state ?? "open") === want)).map(x => ({ ...x, number: 1 })))
       }
       const b = JSON.parse(r.body ?? "{}") as Pull
-      pulls.push(b)
+      pulls.push({ ...b, state: "open" })
       return json(201, { number: pulls.length })
     }
     if ((m = p.match(/^\/repos\/([^/]+\/[^/]+)\/git\/ref\/heads\/(.+)$/))) {
