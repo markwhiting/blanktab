@@ -41,18 +41,28 @@ describe("validateSessionPr", () => {
     const r = errs([file(log(0, { learnerId: "lrn_fedcba9876543210" }))])
     expect(r.errors.join("\n")).toContain("does not match learnerId")
   })
-  it("rejects files over 1 MB (bytes)", () => {
-    const big = log(0, { settings: { ["é".repeat(600_000)]: 1 } }) // 1.2M bytes, 600k chars
-    const r = errs([file(big)])
-    expect(r.errors.join("\n")).toContain("exceeds 1 MB")
+  const sizeErr = (content: string) => errs([{ path: `data/runs/${ID}/0.json`, content }]).errors.join("\n").includes("exceeds 1 MB")
+  it("rejects content over 1 MB measured in UTF-8 bytes", () => {
+    const content = "é".repeat(600_000) // 600k chars, 1.2M bytes
+    expect(content.length).toBeLessThan(1_048_576)
+    expect(sizeErr(content)).toBe(true)
   })
-  it("accepts a file of exactly 1 MB", () => {
-    const base = JSON.stringify(log(0, { settings: { "": 1 } }))
-    const pad = 1_048_576 - new TextEncoder().encode(base).length
-    const l = log(0, { settings: { ["a".repeat(pad)]: 1 } })
-    const f = file(l)
-    expect(new TextEncoder().encode(f.content).length).toBe(1_048_576)
-    expect(errs([f]).ok).toBe(true)
+  it("size boundary: 1_048_576 bytes passes the size rule, 1_048_577 does not", () => {
+    expect(sizeErr("a".repeat(1_048_576))).toBe(false)
+    expect(sizeErr("a".repeat(1_048_577))).toBe(true)
+    expect(sizeErr("é".repeat(524_288))).toBe(false) // exactly 1_048_576 bytes
+    expect(sizeErr("é".repeat(524_288) + "a")).toBe(true)
+  })
+  it("rejects overlong or illegal settings keys", () => {
+    expect(errs([file(log(0, { settings: { ["a".repeat(65)]: 1 } }))]).ok).toBe(false)
+    expect(errs([file(log(0, { settings: { ["a".repeat(64)]: 1 } }))]).ok).toBe(true)
+    for (const k of ["", "1abc", "a-b", "a b", "é"])
+      expect(errs([file(log(0, { settings: { [k]: 1 } }))]).errors.join("\n")).toContain("settings key")
+  })
+  it("limits settings to 50 keys", () => {
+    const mk = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i]))
+    expect(errs([file(log(0, { settings: mk(51) }))]).errors.join("\n")).toContain("at most 50")
+    expect(errs([file(log(0, { settings: mk(50) }))]).ok).toBe(true)
   })
   it("rejects duplicate seq", () => {
     const r = errs([file(log(0)), { path: `data/runs/${ID}/0.json`, content: JSON.stringify(log(0)) }])

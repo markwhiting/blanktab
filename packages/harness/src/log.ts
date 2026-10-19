@@ -24,6 +24,8 @@ const isNonNegInt = (v: unknown): v is number => isNum(v) && Number.isInteger(v)
 const isIso = (v: unknown): v is string => typeof v === "string" && v.length > 0 && !Number.isNaN(Date.parse(v))
 
 const MAX_SETTING_STRING = 200
+const MAX_SETTING_KEYS = 50
+const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const HEARTBEAT_KEYS = ["learnerId", "writtenAt"]
@@ -45,7 +47,10 @@ export function parseLogFile(json: unknown): ParseResult {
   if (!isIso(json.writtenAt)) return fail("writtenAt must be an ISO time string")
   if (!isNonNegInt(json.stepsTotal)) return fail("stepsTotal must be a non-negative finite integer")
   if (!isObj(json.settings)) return fail("settings must be an object")
-  for (const [k, v] of Object.entries(json.settings)) {
+  const entries = Object.entries(json.settings)
+  if (entries.length > MAX_SETTING_KEYS) return fail(`settings may have at most ${MAX_SETTING_KEYS} keys`)
+  for (const [k, v] of entries) {
+    if (!SETTING_KEY_RE.test(k)) return fail(`settings key ${JSON.stringify(k.slice(0, 80))} is not allowed (must match ${SETTING_KEY_RE})`)
     if (typeof v === "string") {
       if (v.length > MAX_SETTING_STRING) return fail(`settings.${k} string exceeds ${MAX_SETTING_STRING} chars`)
       continue
@@ -55,7 +60,7 @@ export function parseLogFile(json: unknown): ParseResult {
   const h = json.hostSig
   if (!isObj(h)) return fail("hostSig must be an object")
   const hk = unknownKey(h, HOST_KEYS, "hostSig")
-  if (hk) return { ok: false, error: hk }
+  if (hk) return fail(hk)
   if (!isNum(h.cores)) return fail("hostSig.cores must be a finite number")
   if (h.deviceMemoryGb !== null && !isNum(h.deviceMemoryGb)) return fail("hostSig.deviceMemoryGb must be a finite number or null")
   if (typeof h.webgpu !== "boolean") return fail("hostSig.webgpu must be a boolean")
