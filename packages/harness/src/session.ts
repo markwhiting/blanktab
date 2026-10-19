@@ -25,7 +25,6 @@ export async function runSession(
 ): Promise<void> {
   const { world, learner, queue, now, onTick } = deps
   if (!Number.isInteger(cfg.logEverySteps) || cfg.logEverySteps <= 0) throw new Error("logEverySteps must be a positive integer")
-  if (cfg.lifetimeSteps % cfg.logEverySteps !== 0) throw new Error("lifetimeSteps must be a multiple of logEverySteps")
   let seq = cfg.startSeq
   let steps = cfg.startSteps
   while (steps < cfg.lifetimeSteps) {
@@ -33,7 +32,7 @@ export async function runSession(
     world.act(learner.step(obs))
     steps++
     onTick?.({ steps, obs })
-    if (steps % cfg.logEverySteps === 0) {
+    if (steps % cfg.logEverySteps === 0 || steps >= cfg.lifetimeSteps) {
       await queue.put({
         schemaVersion: 1,
         learnerId: cfg.learnerId,

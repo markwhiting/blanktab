@@ -1,13 +1,9 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
 import { openQueue } from "../src/queue"
-import { parseLogFile, type LogFile } from "../src/log"
+import { parseLogFile } from "../src/log"
+import { mkFile } from "./helpers"
 
-export const mkFile = (learnerId: string, seq: number, over: Partial<LogFile> = {}): LogFile => ({
-  schemaVersion: 1, learnerId, seq, codeSha: "dev", knowledgeSha: "0".repeat(64),
-  writtenAt: new Date(0).toISOString(), stepsTotal: (seq + 1) * 500, settings: {},
-  hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 }, sessionsSeenAtBirth: 0, final: false, ...over,
-})
 const A = "lrn_aaaaaaaaaaaaaaaa", B = "lrn_bbbbbbbbbbbbbbbb"
 
 describe("queue", () => {

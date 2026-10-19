@@ -69,8 +69,16 @@ describe("session", { timeout: 60_000 }, () => {
     for (const f of p) expect(parseLogFile(f).ok).toBe(true)
   })
 
-  it("rejects configs that would not land on a log boundary", async () => {
+  it("lifetime not a multiple of logEvery: seq 0 at 500, final seq 1 at 600", async () => {
     const q = await openQueue(new IDBFactory())
-    await expect(runSession(cfgFor("lrn_0123456789abcdef", { lifetimeSteps: 1250 }), deps(q))).rejects.toThrow()
+    const id = "lrn_0123456789abcdef"
+    await runSession(cfgFor(id, { lifetimeSteps: 600, logEverySteps: 500 }), deps(q))
+    const p = await q.pending()
+    expect(p.map(f => [f.seq, f.stepsTotal, f.final])).toEqual([[0, 500, false], [1, 600, true]])
+  })
+
+  it("rejects non-positive-integer logEverySteps", async () => {
+    const q = await openQueue(new IDBFactory())
+    await expect(runSession(cfgFor("lrn_0123456789abcdef", { logEverySteps: 0 }), deps(q))).rejects.toThrow()
   })
 })
