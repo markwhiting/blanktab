@@ -42,14 +42,14 @@ describe("validateSessionPr", () => {
     expect(r.errors.join("\n")).toContain("does not match learnerId")
   })
   it("rejects files over 1 MB (bytes)", () => {
-    const big = log(0, { settings: { s: "é".repeat(600_000) } }) // 1.2M bytes, 600k chars
+    const big = log(0, { settings: { ["é".repeat(600_000)]: 1 } }) // 1.2M bytes, 600k chars
     const r = errs([file(big)])
     expect(r.errors.join("\n")).toContain("exceeds 1 MB")
   })
   it("accepts a file of exactly 1 MB", () => {
-    const base = JSON.stringify(log(0, { settings: { s: "" } }))
+    const base = JSON.stringify(log(0, { settings: { "": 1 } }))
     const pad = 1_048_576 - new TextEncoder().encode(base).length
-    const l = log(0, { settings: { s: "a".repeat(pad) } })
+    const l = log(0, { settings: { ["a".repeat(pad)]: 1 } })
     const f = file(l)
     expect(new TextEncoder().encode(f.content).length).toBe(1_048_576)
     expect(errs([f]).ok).toBe(true)
@@ -95,6 +95,31 @@ describe("validateSessionPr", () => {
   it("rejects a bad heartbeat", () => {
     const r = errs([{ path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID }) }])
     expect(r.errors.join("\n")).toContain("writtenAt")
+  })
+  const withRaw = (mut: (o: Record<string, any>) => void): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const o = JSON.parse(file(log(0)).content); mut(o)
+    return { path: `data/runs/${ID}/0.json`, content: JSON.stringify(o) }
+  }
+  it("rejects unknown top-level keys", () => {
+    expect(errs([withRaw(o => { o.note = "spam" })]).errors.join("\n")).toContain("unknown key")
+  })
+  it("rejects unknown hostSig keys", () => {
+    expect(errs([withRaw(o => { o.hostSig.extra = 1 })]).errors.join("\n")).toContain("unknown key")
+  })
+  it("rejects extra non-finite numbers", () => {
+    const f = withRaw(o => { o.extra = 1 })
+    f.content = f.content.replace('"extra":1', '"extra":1e999')
+    const r = errs([f])
+    expect(r.ok).toBe(false)
+    expect(r.errors.join("\n")).toContain("unknown key")
+  })
+  it("rejects unknown heartbeat keys", () => {
+    const hb = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z", x: 1 }) }
+    expect(errs([hb]).errors.join("\n")).toContain("unknown key")
+  })
+  it("rejects overlong settings strings", () => {
+    expect(errs([file(log(0, { settings: { s: "a".repeat(201) } }))]).errors.join("\n")).toContain("200")
+    expect(errs([file(log(0, { settings: { s: "a".repeat(200) } }))]).ok).toBe(true)
   })
   it("rejects an empty PR", () => {
     expect(errs([]).ok).toBe(false)
