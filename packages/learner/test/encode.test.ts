@@ -60,6 +60,23 @@ describe("encode", () => {
     expect(a.reduce((s, v) => s + v, 0)).toBe(4)
   })
 
+  it("rejects frames whose length does not match the declared dimensions", () => {
+    const short = { ...emptyObservation(), periphery: new Uint8Array(10) }
+    expect(() => obsToInputs(short)).toThrow(RangeError)
+    expect(() => targetsFromObs(short)).toThrow(RangeError)
+    const longFovea = { ...emptyObservation(), fovea: new Uint8Array(32 * 32 * 3 + 1) }
+    expect(() => obsToInputs(longFovea)).toThrow(RangeError)
+    expect(() => targetsFromObs(longFovea)).toThrow(RangeError)
+  })
+
+  it("clamps the cursor to [0,1] and maps non-finite coordinates to 0", () => {
+    const o = emptyObservation()
+    const at = (x: number, y: number) => Array.from(obsToInputs({ ...o, cursor: { x, y } }).proprio.slice(0, 2))
+    expect(at(-0.5, 1.5)).toEqual([0, 1])
+    expect(at(Number.NaN, Number.POSITIVE_INFINITY)).toEqual([0, 0])
+    expect(at(Number.NEGATIVE_INFINITY, 0.5)).toEqual([0, 0.5])
+  })
+
   it("copyLastBaseline is MSE over both targets combined", () => {
     const o = emptyObservation()
     const t = targetsFromObs(o)

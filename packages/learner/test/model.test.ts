@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { add, backward, createCpuBackend, createRng, detach, disposeGraph, getDefaultBackend, gradCheck, mean, tensor } from "@blanktab/tensor"
+import { Adam, add, backward, createCpuBackend, createRng, detach, disposeGraph, getDefaultBackend, gradCheck, mean, tensor } from "@blanktab/tensor"
 import type { Tensor } from "@blanktab/tensor"
 import { PERIPHERY, FOVEA } from "@blanktab/interface"
 import { ACTION_DIM } from "../src/encode"
@@ -73,26 +73,35 @@ describe("model", () => {
     }
   })
 
-  it("leaves liveBuffers unchanged after a forward/backward pass and disposeGraph", () => {
+  it("leaves liveBuffers unchanged over 3 training iterations with a real Adam (backward, step, zeroGrad, disposeGraph)", () => {
     const be = createCpuBackend()
     const m = createModel(be, 1, CPU_WIDTHS)
+    const opt = new Adam([...m.params], { lr: 1e-3 })
     const x = inputs(be)
     const a = oneHot(be)
     let h = m.zeroState()
-    const before = be.stats.liveBuffers
-    const h2 = m.core(x, h)
-    const { logits, value } = m.heads(h2)
-    const p = m.predict(h2, a)
-    const loss = add(add(mean(logits), mean(value)), add(mean(p.periphery), mean(p.fovea)))
-    backward(loss)
-    const next = detach(h2)
-    disposeGraph(loss, [])
-    for (const t of m.params) t.grad?.dispose()
-    h.dispose()
-    h = next
-    // Net change: only the carried state (same count as before: one h out, one h in).
-    expect(be.stats.liveBuffers).toBe(before)
+    const counts: number[] = []
+    for (let i = 0; i < 3; i++) {
+      const h2 = m.core(x, h)
+      const { logits, value } = m.heads(h2)
+      const p = m.predict(h2, a)
+      const loss = add(add(mean(logits), mean(value)), add(mean(p.periphery), mean(p.fovea)))
+      backward(loss)
+      opt.step()
+      opt.zeroGrad()
+      const next = detach(h2)
+      disposeGraph(loss, [])
+      h.dispose()
+      h = next
+      counts.push(be.stats.liveBuffers)
+    }
+    // Steady state from the first iteration: one h out, one h in; Adam moments allocated up front.
+    expect(counts).toEqual([counts[0], counts[0], counts[0]])
+    expect(m.params.every((t) => t.grad === null)).toBe(true)
     h.dispose()
     for (const t of [x.periphery, x.fovea, x.proprio, a]) (t as Tensor).dispose()
+    opt.dispose()
+    m.dispose()
+    expect(be.stats.liveBuffers).toBe(0)
   })
 })

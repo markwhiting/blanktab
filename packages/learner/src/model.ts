@@ -9,17 +9,32 @@ export const GPU_WIDTHS: Widths = { conv1: 16, conv2: 32, enc: 128, hidden: 256 
 /** CPU fallback: half width. */
 export const CPU_WIDTHS: Widths = { conv1: 8, conv2: 16, enc: 64, hidden: 128 }
 
+/**
+ * The learner's network. `core`, `heads` and `predict` build autograd graph nodes (every parameter
+ * requires grad), so a training step frees them with `disposeGraph`; acting/inference must run inside
+ * `noGrad(() => composite(...))` (or dispose every result), per packages/tensor/README.md.
+ */
 export interface Model {
+  /**
+   * Every trainable tensor, in creation order. This order is the checkpoint format: a saved state is
+   * these tensors' data in this order, so never reorder, insert or remove parameters without a format bump.
+   */
   readonly params: readonly Tensor[]
   readonly paramCount: number
   readonly widths: Widths
-  /** Encode the observation and advance the GRU: returns h' [1,hidden]. */
+  /**
+   * Encode the observation and advance the GRU: returns h' [1,hidden].
+   * Inputs: periphery [3,50,80] and fovea [3,32,32] (CHW, 0..1, see obsToInputs), proprio [1,3]; h [1,hidden].
+   */
   core(inp: { periphery: Tensor; fovea: Tensor; proprio: Tensor }, h: Tensor): Tensor
+  /** Policy logits [1,76] (the four action factors concatenated, see ACTION_DIM) and value [1,1]. */
   heads(h: Tensor): { logits: Tensor; value: Tensor }
-  /** Next-frame prediction (sigmoid outputs in 0..1) conditioned on the chosen action. */
+  /** Next-frame prediction (sigmoid outputs in 0..1) conditioned on the chosen action one-hot [1,76]: periphery [1,3000], fovea [1,768] (HWC). */
   predict(h: Tensor, action: Tensor): { periphery: Tensor; fovea: Tensor }
   /** [1,hidden] zeros, caller-owned. */
   zeroState(): Tensor
+  /** Frees every parameter (and any gradient on it). The model must not be used afterwards. */
+  dispose(): void
 }
 
 const PROPRIO = 3
@@ -91,6 +106,14 @@ export function createModel(backend: Backend, seed: number, widths: Widths): Mod
 
     zeroState() {
       return zeros([1, hidden], { backend })
+    },
+
+    dispose() {
+      for (const t of params) {
+        t.grad?.dispose()
+        t.grad = null
+        t.dispose()
+      }
     },
   }
 }

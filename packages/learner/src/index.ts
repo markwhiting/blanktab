@@ -1,3 +1,5 @@
 export { createFlailer } from "./flailer"
 export * from "./encode"
 export * from "./model"
+export * from "./replay"
+export * from "./learner"
