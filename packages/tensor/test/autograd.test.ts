@@ -128,6 +128,19 @@ describe("backward", () => {
     a.grad!.dispose()
     expect(Array.from(await b.grad!.read())).toEqual([1, 1])
   })
+  it("copying a shared gradient to a leaf costs no FLOPs (only real arithmetic is counted)", () => {
+    const be = getDefaultBackend()
+    const a = param(new Float32Array(5), [5])
+    const b = param(new Float32Array(5), [5])
+    const loss = sum(add(a, b))
+    const before = be.stats.flops
+    backward(loss) // sum's backward broadcasts g (5 FLOPs); add passes it to both leaves unchanged
+    expect(be.stats.flops - before).toBe(5)
+    expect(a.grad!.storage).not.toBe(b.grad!.storage)
+    disposeGraph(loss, [])
+    a.grad!.dispose()
+    b.grad!.dispose()
+  })
   it("a leaf reached only through a reshape keeps a live grad", async () => {
     const x = param(new Float32Array([1, 2, 3, 4]), [2, 2])
     const loss = sum(mul(reshape(x, [4]), tensor([1, 2, 3, 4], [4])))

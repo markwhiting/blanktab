@@ -25,7 +25,7 @@ Two things got fixed along the way:
 | Inputs | periphery 3×50×80, fovea 3×32×32, proprioception 3. Fresh inputs and targets are uploaded every step. |
 | Step | forward, MSE on both frame predictions, dummy policy cross-entropy and value MSE, `backward`, `Adam.step`, `zeroGrad`, `disposeGraph`. The GRU state is carried across steps. |
 | Timing | 20 warm-up steps, then 200 timed steps. No readback inside the timed window except the loss after the last step. That read waits for all queued GPU work, so the GPU's own time is included. |
-| Work per step | 55,997,436 FLOPs = **0.056 CU** (1 CU = 10⁹ FLOPs, counted exactly per primitive). Both backends give the same count. |
+| Work per step | 55,997,436 FLOPs = **0.056 CU** (1 CU = 10⁹ FLOPs, counted exactly per primitive). Both backends give the same count. Re-measured 2026-10-20 after gradient copies became 0-FLOP `copy()` (fix wave): unchanged, flopsPerStep 55,997,436, cuPerStep 0.055997436, because this step never copies a shared leaf gradient. |
 
 Model layers: periphery conv 3→16 (k5 s2 p2) → relu → conv 16→32 (k3 s2 p1) → relu → linear 8320→128. Fovea conv 3→16 (k3 s2 p1) → relu → conv 16→32 (k3 s2 p1) → relu → linear 2048→128. Core input = sum of the two plus linear(3→128). GRU 128→256. Heads: 256→3000, 256→768, 256→76 (25+3+3+45), 256→1.
 

@@ -112,7 +112,7 @@ export function backward(loss: Tensor): void {
         t.grad = new Tensor(g.storage, t.shape)
       } else {
         // Still shared with another pending gradient: give the leaf its own copy.
-        t.grad = new Tensor(be.scalar("mul", g.storage, 1), t.shape)
+        t.grad = new Tensor(be.copy(g.storage), t.shape) // a copy, not arithmetic: 0 FLOPs
         release(g)
       }
     }
