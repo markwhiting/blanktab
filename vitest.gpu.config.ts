@@ -6,8 +6,9 @@ import { playwright } from "@vitest/browser-playwright"
 // GPU_HEADED=1 runs headed if a machine's headless Chromium exposes no WebGPU adapter.
 export default defineConfig({
   test: {
-    include: ["**/*.gpu.test.ts"],
-    benchmark: { include: ["**/*.gpu.bench.ts"] },
+    // Rooted at packages/ so copies under .worktrees/ (parallel streams) are never collected.
+    include: ["packages/*/test/**/*.gpu.test.ts"],
+    benchmark: { include: ["packages/*/bench/**/*.gpu.bench.ts"] },
     testTimeout: 60_000,
     // GPU_ALLOW_SOFTWARE=1 lets the suite pass on a software adapter (e.g. SwiftShader in CI); by default it must be hardware.
     // BENCH_WIDTHS (JSON, e.g. '{"hidden":128}') overrides the spike-2 benchmark's default widths.
