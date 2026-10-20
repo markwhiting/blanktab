@@ -283,7 +283,7 @@ The method used (random or UCB) is logged. Rows from other `schemaVersion`s are 
 - **Token type [user]:** whichever type spike 1 shows works with the least access. A classic `public_repo` token is acceptable. **Hard rule [user]:** the token lives only in this browser's `localStorage`. It is never written to IndexedDB, logs, checkpoints, the live layer, telemetry, the repo, or any network destination other than `api.github.com`. Enforce this with a test that scans submitted payloads and checkpoints for the token string.
 - **Shared storage accepted:** all `markwhiting.github.io` projects share one storage origin. The user accepted this risk. All keys are prefixed `blanktab:`.
 
-### 9.4 What a tab submits [user: rolling PRs, logs kept, 0006; agent: mechanics]
+### 9.4 What a tab submits [user: rolling PRs, logs kept, 0006; agent: mechanics; **amended by 0011**: one commit per flush, no heartbeat.json]
 - **Contributors in v1 [agent]:** the owner and invited collaborators; public contribution comes later.
 - **Setup (once per contributor):** if the token's user has push access to `markwhiting/blanktab` (the owner, or a collaborator), branches are pushed to upstream directly. Otherwise the tab ensures a fork exists and pushes there. In both cases, PRs target upstream `main`.
 - **Log stream:** one branch per learner, `run/<learnerId>`, in the contributor's fork, with one draft PR to upstream `main`.
@@ -294,7 +294,7 @@ The method used (random or UCB) is logged. Rows from other `schemaVersion`s are 
   - **What it contains:** a separate branch `knowledge/<learnerId>-<n>` and PR holding its final scorer weights (condition C only).
   - **What else it must include:** a `claim.json` that points at the log files supporting it.
 
-### 9.5 The gate (GitHub Actions) [user: "a simple action that decides what to merge"; agent: rules; resolves Q18, Q7]
+### 9.5 The gate (GitHub Actions) [user: "a simple action that decides what to merge"; agent: rules; resolves Q18, Q7; **amended by 0011**: liveness from newest log, 16-file cap, 7-day max age, dev builds closed, validate not a required check]
 - **`validate.yml` (on `pull_request`):**
   - Declares `permissions: contents: read` explicitly, so it is read-only for same-repo branches as well as forks. It uses no secrets.
   - Runs only `tools/gate/validate` from **`main`'s** copy of the code, against the PR's files *as data*. It never executes PR code.

@@ -470,14 +470,20 @@ export function chooseSettings(k: Knowledge, rng: () => number): Record<string, 
 
 ### Task 9: Go live and verify the real round trip
 
-Every step here is outward-facing. **Get the user's go-ahead before step 1, and report to them after step 5.**
+Every step here is outward-facing. **Get the user's go-ahead before step 1, and report to them after step 6.** (Revised after the final review; see decision 0011.)
 
-- [ ] **Step 1: Create the repo and push.** Run `gh repo create markwhiting/blanktab --public --source . --push`.
-- [ ] **Step 2: Enable Pages.** Settings → Pages → Source: "GitHub Actions". Add branch protection on `main` requiring the `validate` check. Allow the gate's `GITHUB_TOKEN` to merge (Settings → Actions → Workflow permissions: read and write; allow GitHub Actions to create and approve pull requests).
-- [ ] **Step 3: Confirm the deploy.** Wait for `deploy.yml` to finish, then open `https://markwhiting.github.io/blanktab/`. Expected: the page loads and shows "0 sessions before this one".
-- [ ] **Step 4: Run a real session.** Paste a real token with `public_repo` scope and let one session run to completion (3000 steps). Expected: a draft PR `run: lrn_…` appears in `markwhiting/blanktab` with 6 files plus `heartbeat.json`, and `validate` passes.
-- [ ] **Step 5: Close the loop.** Trigger `gate.yml` manually. Expected: the PR is merged, `knowledge/summary.json` on `main` has 1 session, Pages redeploys, and reloading the page shows **"1 session before this one"**.
-- [ ] **Step 6: Record the result** in `docs/research/<date>-loop-live.md`: what happened, timings, and any surprises, such as token type or fork behaviour (this is spike 1's answer). Commit and push with the user's go-ahead.
+- [ ] **Step 1: Put the code on `main`.** Fast-forward local `main` to the reviewed branch head: `git checkout main && git merge --ff-only plan-01-loop`.
+- [ ] **Step 2: Create the repo and push `main`.** Run `gh repo create markwhiting/blanktab --public --source . --remote origin`, then `git push -u origin main`. The push triggers `deploy.yml`; its first run is expected to fail at `configure-pages` because Pages isn't enabled yet.
+- [ ] **Step 3: Configure the repo.**
+  - Enable Pages with source "GitHub Actions": `gh api -X POST repos/markwhiting/blanktab/pages -f build_type=workflow`.
+  - Leave the default Actions settings: read-only `GITHUB_TOKEN`, and Actions not allowed to approve PRs. Every workflow declares its own permissions.
+  - Protect `main` against force-pushes and deletion only. Do **not** add a required status check, require approvals, or require branches to be up to date (decision 0011).
+  - Check the setting for fork-PR workflow approval, so the user knows whether first-time contributors' `validate` runs need a click.
+- [ ] **Step 4: Deploy.** Run `gh workflow run deploy.yml` and wait for it to finish. Open `https://markwhiting.github.io/blanktab/`. Expected: the page loads and shows "0 sessions before this one".
+- [ ] **Step 5: Run a real session.** The user pastes a real classic token with `public_repo` scope and leaves the tab open for one life (about 25 minutes). Expected: one draft PR `run: lrn_…` appears with about 6 log files in at most a few commits, and `validate` passes.
+- [ ] **Step 6: Close the loop.** Run `gh workflow run gate.yml`. Expected: the PR is merged and Pages redeploys. `https://markwhiting.github.io/blanktab/knowledge/summary.json` has 1 session, and reloading the page shows **"1 session before this one"**.
+- [ ] **Step 7 (optional, before inviting others):** repeat step 5 from an account without push access, to exercise the fork path live.
+- [ ] **Step 8: Record the result** in `docs/research/<date>-loop-live.md`: what happened, timings, and surprises. This is spike 1's answer. Commit and push with the user's go-ahead.
 
 ---
 
