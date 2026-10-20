@@ -183,7 +183,8 @@ test("knowledge unreachable: the page says offline and the learner runs anyway",
 
 test("cadence: with a token, a whole life goes to GitHub as one commit, sent when the final log is queued", async ({ page }) => {
   const { gh, githubCalls, commits } = await setup(page, { knowledge: "ok", token: TOKEN })
-  await page.goto(`/learner/?${KNOBS}&testLifetimeCU=8.5&testStepsPerSecond=300`) // a log at 8 CU (not final) and the final one
+  // At the CPU half widths (not tiny): far more compute per step, so 8 CU takes seconds, not a minute.
+  await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testLifetimeCU=8.5&testStepsPerSecond=300") // a log at 8 CU (not final) and the final one
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
   await expect.poll(() => cuLived(page), { timeout: 60_000 }).toBeGreaterThan(8.05) // the non-final log is queued by now
