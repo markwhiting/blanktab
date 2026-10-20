@@ -10,8 +10,11 @@ export interface StartMessage {
   /** Test knobs (never set by the production build): skip WebGPU; a newborn's widths. */
   backend?: "cpu"
   widths?: Widths
+  /** document.hidden when the life starts (then VisibilityMessage on each change): no frames are posted while hidden. */
+  hidden?: boolean
 }
-export type ToWorker = StartMessage
+export interface VisibilityMessage { type: "visibility"; hidden: boolean }
+export type ToWorker = StartMessage | VisibilityMessage
 
 export type FromWorker =
   | { type: "backend"; kind: BackendKind; label: string }

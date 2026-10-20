@@ -100,11 +100,15 @@ async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
   ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, lifetimeCU })
 
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
+  // A hidden page draws nothing: the worker stops posting frames until it is shown again.
+  const visibility = () => worker.postMessage({ type: "visibility", hidden: document.hidden } satisfies ToWorker)
+  document.addEventListener("visibilitychange", visibility)
   let over = false
   /** The learner always runs: whether its life completed or failed, a newborn takes its place. */
   const end = (show: () => void) => {
     if (over) return
     over = true
+    document.removeEventListener("visibilitychange", visibility)
     worker.terminate()
     release()
     show()
@@ -122,7 +126,7 @@ async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
   worker.onerror = e => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
-  worker.postMessage({ type: "start", cfg, ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}) } satisfies ToWorker)
+  worker.postMessage({ type: "start", cfg, hidden: document.hidden, ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}) } satisfies ToWorker)
 }
 
 async function main(ui: Ui): Promise<void> {
@@ -178,7 +182,7 @@ async function main(ui: Ui): Promise<void> {
     ui.notice(`Adopted learner ${adopted.learnerId}: its tab was closed, so this tab lives the rest of its life.`)
     return live(adopted.learnerId, ctx, adopted.release)
   }
-  return own === null ? live(newLearnerId(sessionStorage), ctx) : newborn(ctx)
+  return newborn(ctx)
 }
 
 /**

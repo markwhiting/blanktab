@@ -9,6 +9,7 @@ import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
 import { DEFAULT_MAX_STEPS_PER_SEC, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
+import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 
@@ -19,6 +20,8 @@ const scope = self as unknown as {
 const post = (m: FromWorker, transfer: Transferable[] = []) => scope.postMessage(m, transfer)
 
 const FRAME_MS = 33 // at most ~30 frames a second reach the page
+/** No frames while the page is hidden (the page says when it is). */
+const frames = frameGate(FRAME_MS)
 const RATE_WINDOW_MS = 3000
 
 /** Steps per second over the last RATE_WINDOW_MS. */
@@ -33,14 +36,14 @@ function rateMeter(): (steps: number) => number {
   }
 }
 
-async function start({ cfg, backend: force, widths }: StartMessage): Promise<void> {
+async function start({ cfg, backend: force, widths, hidden }: StartMessage): Promise<void> {
+  frames.setHidden(hidden ?? false)
   const id = cfg.learnerId
   const world = createWorld({ seed: seedsOf(id).world, canvas: new OffscreenCanvas(WORLD.width, WORLD.height) })
   const queue = await openQueue(indexedDB)
   const rate = rateMeter()
   let steps = 0
   let cu = 0
-  let lastFrame = Number.NEGATIVE_INFINITY
 
   const run: RunLife = async (c, chosen, restore) => {
     // Every log file this learner has written comes before its checkpoint, so its curve is the start of the resumed one.
@@ -67,9 +70,7 @@ async function start({ cfg, backend: force, widths }: StartMessage): Promise<voi
         steps = n
         cu = now
         const perSec = rate(n)
-        const t = performance.now()
-        if (t - lastFrame < FRAME_MS) return
-        lastFrame = t
+        if (!frames.due(performance.now())) return
         // Copies: the learner may keep its observation, so its buffers are never transferred away.
         const periphery = obs.periphery.slice(), fovea = obs.fovea.slice()
         post({ type: "frame", steps: n, cu: now, stepsPerSec: perSec, periphery, fovea }, [periphery.buffer, fovea.buffer])
@@ -100,6 +101,7 @@ async function start({ cfg, backend: force, widths }: StartMessage): Promise<voi
 
 let started = false
 scope.onmessage = e => {
+  if (e.data.type === "visibility") { frames.setHidden(e.data.hidden); return }
   if (e.data.type !== "start" || started) return
   started = true
   start(e.data).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))

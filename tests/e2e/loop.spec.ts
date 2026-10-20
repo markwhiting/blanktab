@@ -343,6 +343,23 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
   expect(ids.sort()).toEqual([id, others[0]!.learnerId, others[1]!.learnerId].sort())
 })
 
+test("a hidden page gets no frames; the learner lives on, and frames come back when the page is shown", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
+  const setHidden = (h: boolean) => page.evaluate(hidden => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden })
+    document.dispatchEvent(new Event("visibilitychange"))
+  }, h)
+  await setHidden(true)
+  await page.waitForTimeout(300) // frames already in flight land
+  const frozen = await stepsLived(page)
+  await page.waitForTimeout(1_500) // ~30 steps at 20 steps/s
+  expect(await stepsLived(page)).toBe(frozen)
+  await setHidden(false)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(frozen + 10)
+})
+
 test("an older tab holding the database open: the page says to close other learner tabs", async ({ page, context }) => {
   await setup(page, { knowledge: "ok" })
   // An old page version (database v1, no versionchange handler) open in another tab of this origin.
