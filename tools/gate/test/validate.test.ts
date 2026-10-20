@@ -13,10 +13,17 @@ const file = (l: LogFile, id = ID): PrFile => ({ path: `data/runs/${id}/${l.seq}
 const errs = (files: PrFile[], prev: LogFile[] = []) => validateSessionPr(files, prev)
 
 describe("validateSessionPr", () => {
-  it("accepts seq 0-2 (with heartbeat)", () => {
-    const hb: PrFile = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z" }) }
-    const r = errs([file(log(0)), file(log(1)), file(log(2, { final: true })), hb])
+  it("accepts seq 0-2", () => {
+    const r = errs([file(log(0)), file(log(1)), file(log(2, { final: true }))])
     expect(r).toEqual({ ok: true, errors: [], kind: "log" })
+  })
+  it("heartbeat.json is no longer a session log path (like any other non-log path)", () => {
+    const hb: PrFile = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z" }) }
+    const r = errs([file(log(0)), hb])
+    expect(r.ok).toBe(false)
+    expect(r.kind).toBe("needs-human")
+    expect(r.errors.join("\n")).toContain(`data/runs/${ID}/heartbeat.json: path is not a session log path`)
+    expect(r.errors.join("\n")).not.toContain("heartbeat.json)")
   })
   it("accepts continuing from previous", () => {
     expect(errs([file(log(2))], [log(0), log(1)]).ok).toBe(true)
@@ -102,10 +109,6 @@ describe("validateSessionPr", () => {
     expect(errs([{ path: `data/runs/${ID}/0.json`, content: "{nope" }]).errors.join("\n")).toContain("invalid JSON")
     expect(errs([file(log(0, { schemaVersion: 2 as 1 }))]).errors.join("\n")).toContain("schemaVersion")
   })
-  it("rejects a bad heartbeat", () => {
-    const r = errs([{ path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID }) }])
-    expect(r.errors.join("\n")).toContain("writtenAt")
-  })
   const withRaw = (mut: (o: Record<string, any>) => void): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const o = JSON.parse(file(log(0)).content); mut(o)
     return { path: `data/runs/${ID}/0.json`, content: JSON.stringify(o) }
@@ -123,20 +126,14 @@ describe("validateSessionPr", () => {
     expect(r.ok).toBe(false)
     expect(r.errors.join("\n")).toContain("unknown key")
   })
-  it("rejects unknown heartbeat keys", () => {
-    const hb = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z", x: 1 }) }
-    expect(errs([hb]).errors.join("\n")).toContain("unknown key")
-  })
   it("rejects overlong settings strings", () => {
     expect(errs([file(log(0, { settings: { s: "a".repeat(201) } }))]).errors.join("\n")).toContain("200")
     expect(errs([file(log(0, { settings: { s: "a".repeat(200) } }))]).ok).toBe(true)
   })
-  it("rejects payload-carrying writtenAt (log and heartbeat)", () => {
+  it("rejects payload-carrying writtenAt", () => {
     const evil = "Jan 1 2026 (" + "x".repeat(100_000) + ")"
     expect(Number.isNaN(Date.parse(evil))).toBe(false)
     expect(errs([file(log(0, { writtenAt: evil }))]).errors.join("\n")).toContain("writtenAt")
-    const hb = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: evil }) }
-    expect(errs([hb]).errors.join("\n")).toContain("writtenAt")
   })
   it("rejects writtenAt not in toISOString format", () => {
     for (const w of ["2026-10-19", "2026-10-19T12:00:00Z", "2026-10-19T12:00:00.000+00:00", "2026-13-45T99:99:99.000Z"])
@@ -165,9 +162,9 @@ describe("validateSessionPr", () => {
       expect(r.ok).toBe(false)
       expect(r.errors.join("\n")).toContain("final")
     })
-    it("accepts a heartbeat-only PR after final (not a new log)", () => {
+    it("rejects a heartbeat-only PR after final", () => {
       const hb: PrFile = { path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: "2026-10-19T12:00:00.000Z" }) }
-      expect(errs([hb], [log(0, { final: true })]).ok).toBe(true)
+      expect(errs([hb], [log(0, { final: true })]).ok).toBe(false)
     })
   })
 })

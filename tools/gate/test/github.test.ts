@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { bytesToContent, statusErrors, loadFile } from "../github.ts"
+import { bytesToContent, statusErrors, loadFile, loadPr, MAX_PR_FILES } from "../github.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -38,5 +38,28 @@ describe("loadFile", () => {
     const g = (a: string[]) => a.join(" ").includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
     expect(loadFile(g, "o/r", "a b.json", "sha")).toEqual({ content: "{}" })
     expect(loadFile(() => Buffer.from(JSON.stringify({ type: "symlink", size: 1 })), "o/r", "l", "sha")).toHaveProperty("error")
+  })
+})
+
+describe("loadPr budget", () => {
+  const prJson = (changed_files: number) => JSON.stringify({ base: { ref: "main" }, head: { sha: "s", ref: "run/x", repo: { full_name: "o/r" } }, changed_files })
+  it("caps a session PR at 16 files", () => expect(MAX_PR_FILES).toBe(16))
+  it("more than 16 changed files: a load error from the PR object alone; files are never listed or fetched", () => {
+    const calls: string[] = []
+    const r = loadPr("o/r", 7, a => { calls.push(a.join(" ")); if (a.join(" ").includes("/files") || a.join(" ").includes("contents")) throw new Error("must not list"); return Buffer.from(prJson(17)) })
+    expect(r.loadErrors).toEqual(["PR changes 17 files (limit 16)"])
+    expect(r.files).toEqual([])
+    expect(calls).toEqual(["api repos/o/r/pulls/7"])
+  })
+  it("16 changed files are listed and fetched", () => {
+    const changed = Array.from({ length: 16 }, (_, i) => ({ filename: `data/runs/lrn_0123456789abcdef/${i}.json`, status: "added" }))
+    const r = loadPr("o/r", 7, a => {
+      const j = a.join(" ")
+      if (j.endsWith("pulls/7")) return Buffer.from(prJson(16))
+      if (j.includes("/files")) return Buffer.from(JSON.stringify([changed]))
+      return j.includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
+    })
+    expect(r.loadErrors).toEqual([])
+    expect(r.files).toHaveLength(16)
   })
 })

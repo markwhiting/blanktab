@@ -4,17 +4,18 @@ import { execFileSync } from "node:child_process"
 import type { PrFile } from "./validate.ts"
 
 const MAX_BYTES = 1_048_576
-const MAX_PR_FILES = 500
+/** A whole 3000-step life is 6 logs; anything far beyond that is not a session PR and is not even listed. */
+export const MAX_PR_FILES = 16
 
 export function gh(args: string[]): Buffer {
   return execFileSync("gh", args, { maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] })
 }
 const ghJson = <T>(args: string[]): T => JSON.parse(gh(args).toString("utf8")) as T
 
-export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string; updatedAt: string }
+export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string; updatedAt: string; createdAt: string }
 
 export function listOpenPrs(repo: string): ListedPr[] {
-  return ghJson<ListedPr[]>(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,updatedAt"])
+  return ghJson<ListedPr[]>(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,updatedAt,createdAt"])
 }
 
 export interface LoadedPr { headRef: string; baseRef: string; headSha: string; files: PrFile[]; loadErrors: string[] }
@@ -41,11 +42,17 @@ export function loadFile(ghFn: (args: string[]) => Buffer, headRepo: string, pat
   return c
 }
 
-export function loadPr(repo: string, number: number): LoadedPr {
-  const pr = ghJson<{ base: { ref: string }; head: { sha: string; ref: string; repo: { full_name: string } | null } }>(["api", `repos/${repo}/pulls/${number}`])
+export function loadPr(repo: string, number: number, ghFn: (args: string[]) => Buffer = gh): LoadedPr {
+  const get = <T>(args: string[]): T => JSON.parse(ghFn(args).toString("utf8")) as T
+  const pr = get<{ base: { ref: string }; head: { sha: string; ref: string; repo: { full_name: string } | null }; changed_files?: unknown }>(["api", `repos/${repo}/pulls/${number}`])
   const headSha = pr.head.sha
+  const base = { headRef: pr.head.ref, baseRef: pr.base.ref, headSha }
+  // Budget first, from the PR object alone: an oversized PR is never listed, let alone downloaded.
+  const count = pr.changed_files
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return { ...base, files: [], loadErrors: ["PR file count is unavailable"] }
+  if (count > MAX_PR_FILES) return { ...base, files: [], loadErrors: [`PR changes ${count} files (limit ${MAX_PR_FILES})`] }
   const loadErrors: string[] = []
-  const changed = ghJson<{ filename: string; status: string }[]>(["api", `repos/${repo}/pulls/${number}/files`, "--paginate", "--slurp"]).flat()
+  const changed = get<{ filename: string; status: string }[][]>(["api", `repos/${repo}/pulls/${number}/files`, "--paginate", "--slurp"]).flat()
   loadErrors.push(...statusErrors(changed))
   if (changed.length > MAX_PR_FILES) loadErrors.push(`PR changes ${changed.length} files (limit ${MAX_PR_FILES})`)
   const files: PrFile[] = []
@@ -54,12 +61,12 @@ export function loadPr(repo: string, number: number): LoadedPr {
   else if (changed.length <= MAX_PR_FILES) {
     for (const f of changed) {
       if (f.status !== "added" && f.status !== "modified") continue
-      const c = loadFile(gh, headRepo, f.filename, headSha)
+      const c = loadFile(ghFn, headRepo, f.filename, headSha)
       if ("error" in c) loadErrors.push(`${f.filename}: ${c.error}`)
       else files.push({ path: f.filename, content: c.content })
     }
   }
-  return { headRef: pr.head.ref, baseRef: pr.base.ref, headSha, files, loadErrors }
+  return { ...base, files, loadErrors }
 }
 
 const fence = (s: string) => "```\n" + s.replaceAll("`", "'").slice(0, 3000) + "\n```"

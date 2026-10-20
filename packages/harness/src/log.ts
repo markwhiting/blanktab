@@ -46,7 +46,6 @@ const MAX_SETTING_KEYS = 50
 export const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
-const HEARTBEAT_KEYS = ["learnerId", "writtenAt"]
 const unknownKey = (o: Record<string, unknown>, allowed: string[], where: string): string | null => {
   const k = Object.keys(o).find(key => !allowed.includes(key))
   return k === undefined ? null : `unknown key ${JSON.stringify(k.slice(0, 80))} in ${where}`
@@ -101,14 +100,4 @@ export function parseLogFile(json: unknown): ParseResult {
       final: json.final,
     },
   }
-}
-
-/** Heartbeat file shape: { learnerId, writtenAt }. */
-export function parseHeartbeat(json: unknown): { ok: true; value: { learnerId: string; writtenAt: string } } | { ok: false; error: string } {
-  if (!isObj(json)) return { ok: false, error: "heartbeat must be a JSON object" }
-  const uk = unknownKey(json, HEARTBEAT_KEYS, "heartbeat")
-  if (uk) return { ok: false, error: uk }
-  if (typeof json.learnerId !== "string" || !LEARNER_ID_RE.test(json.learnerId)) return { ok: false, error: "heartbeat learnerId must be lrn_ + 16 hex chars" }
-  if (!isIso(json.writtenAt)) return { ok: false, error: "heartbeat writtenAt must be an ISO time string" }
-  return { ok: true, value: { learnerId: json.learnerId, writtenAt: json.writtenAt } }
 }

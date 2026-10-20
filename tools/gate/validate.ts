@@ -1,10 +1,10 @@
 // Gate validator for session PRs. Runs in Node (GitHub Action) on PR files treated purely as data.
-import { parseLogFile, parseHeartbeat, type LogFile } from "@blanktab/harness/log"
+import { parseLogFile, type LogFile } from "@blanktab/harness/log"
 
 export interface PrFile { path: string; content: string }
 
 const MAX_BYTES = 1_048_576
-const PATH_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\/(\d+\.json|heartbeat\.json)$/
+const PATH_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\/(\d+\.json)$/
 
 export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: boolean; errors: string[]; kind: "log" | "needs-human" } {
   const errors: string[] = []
@@ -18,7 +18,7 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
     const m = PATH_RE.exec(f.path)
     if (!m) {
       kind = "needs-human"
-      errors.push(`${f.path}: path is not a session log path (data/runs/<learnerId>/<n>.json or heartbeat.json)`)
+      errors.push(`${f.path}: path is not a session log path (data/runs/<learnerId>/<n>.json)`)
       continue
     }
     const dirId = m[1]!
@@ -30,12 +30,6 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
     let json: unknown
     try { json = JSON.parse(f.content) } catch { errors.push(`${f.path}: invalid JSON`); continue }
 
-    if (m[2] === "heartbeat.json") {
-      const hb = parseHeartbeat(json)
-      if (!hb.ok) errors.push(`${f.path}: ${hb.error}`)
-      else if (hb.value.learnerId !== dirId) errors.push(`${f.path}: path learnerId ${dirId} does not match learnerId ${hb.value.learnerId} in file`)
-      continue
-    }
     const p = parseLogFile(json)
     if (!p.ok) { errors.push(`${f.path}: ${p.error}`); continue }
     if (p.value.learnerId !== dirId) errors.push(`${f.path}: path learnerId ${dirId} does not match learnerId ${p.value.learnerId} in file`)
