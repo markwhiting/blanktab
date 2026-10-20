@@ -19,7 +19,7 @@ const logV2 = (seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => {
   return {
     ...log(seq), schemaVersion: 2, stepsTotal: 400 * cu, cu, condition: "A", widths: { conv1: 16, conv2: 32, enc: 128, hidden: 256 },
     settings: { lr: 0.001, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, maxStepsPerSec: 30, seed: 7 },
-    curve: [pt(cu * 0.75, 300 * cu), pt(cu, 400 * cu)], skippedUpdates: 0, ...over,
+    curve: [pt(cu * 0.75, 300 * cu), pt(cu, 400 * cu)], skippedUpdates: 0, restores: 0, lostCU: 0, ...over,
   }
 }
 
@@ -41,6 +41,22 @@ describe("validateSessionPr v2", () => {
     expect(msg([file(logV2(0)), file(logV2(1, { cu: 0.5, curve: [] }))])).toContain("cu decreased")
     expect(msg([file(logV2(2, { cu: 1.5, curve: [] }))], [logV2(0), logV2(1)])).toContain("cu decreased")
     expect(errs([file(logV2(1, { cu: 1, curve: [] }))], [logV2(0)]).ok).toBe(true) // equal is not a decrease
+  })
+  it("restores, lostCU and skippedUpdates never decrease across seq (restores stay on the record)", () => {
+    expect(errs([file(logV2(0, { restores: 1, lostCU: 0.5, skippedUpdates: 20 })), file(logV2(1, { restores: 2, lostCU: 0.5, skippedUpdates: 20 }))]).ok).toBe(true)
+    expect(msg([file(logV2(0, { restores: 2 })), file(logV2(1, { restores: 1 }))])).toContain("restores decreased")
+    expect(msg([file(logV2(1, { lostCU: 0.25 }))], [logV2(0, { lostCU: 0.5 })])).toContain("lostCU decreased")
+    expect(msg([file(logV2(0, { skippedUpdates: 5 })), file(logV2(1, { skippedUpdates: 4 }))])).toContain("skippedUpdates decreased")
+  })
+  it("bounds restores (integer 0..1000) and lostCU (finite >= 0); both are required in v2", () => {
+    expect(errs([file(logV2(0, { restores: 1000 }))]).ok).toBe(true)
+    for (const r of [1001, -1, 1.5]) expect(msg([file(logV2(0, { restores: r }))]), String(r)).toContain("restores")
+    for (const l of [-0.1]) expect(msg([file(logV2(0, { lostCU: l }))])).toContain("lostCU")
+    expect(msg([v2raw(o => { delete o.restores })])).toContain("restores")
+    expect(msg([v2raw(o => { delete o.lostCU })])).toContain("lostCU")
+    const f = file(logV2(0, { lostCU: 0.123456 }))
+    f.content = f.content.replace("0.123456", "1e999")
+    expect(msg([f])).toContain("lostCU")
   })
   it("rejects a curve of 65 points; 64 is fine", () => {
     const curve = (n: number) => Array.from({ length: n }, (_, i) => pt(i / 100, i))

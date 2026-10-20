@@ -34,9 +34,16 @@ export interface LogFileV2 extends Omit<LogFileV1, "schemaVersion"> {
   widths: { conv1: number; conv2: number; enc: number; hidden: number }
   /** Since the previous log file, oldest first; finite values only (a point is omitted while a loss is NaN). */
   curve: CurvePoint[]
-  /** Updates skipped for a non-finite loss over the whole life. */
+  /** Updates skipped for a non-finite loss over the whole life, including those lost to restores. Never decreases. */
   skippedUpdates: number
+  /** Times the learner was restored from its checkpoint after RESTORE_AFTER_SKIPS skips in a row. Never decreases. */
+  restores: number
+  /** CU spent after a restored checkpoint and thrown away by the restore (not in `cu`). Never decreases. */
+  lostCU: number
 }
+
+/** Bound on LogFileV2.restores. */
+export const MAX_RESTORES = 1000
 
 export type LogFile = LogFileV1 | LogFileV2
 
@@ -97,7 +104,7 @@ const MAX_SETTING_KEYS = 50
 const MAX_WIDTH = 65_536
 export const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS_V1 = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
-const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates"]
+const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates", "restores", "lostCU"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
 const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss"]
@@ -183,6 +190,8 @@ export function parseLogFile(json: unknown): ParseResult {
     curve.push({ cu: p.cu, steps: p.steps, predLoss: p.predLoss, baselineLoss: p.baselineLoss })
   }
   if (!isNonNegInt(json.skippedUpdates)) return fail("skippedUpdates must be a non-negative finite integer")
+  if (!(isNonNegInt(json.restores) && json.restores <= MAX_RESTORES)) return fail(`restores must be an integer in [0, ${MAX_RESTORES}]`)
+  if (!isNonNeg(json.lostCU)) return fail("lostCU must be a finite number >= 0")
   return {
     ok: true,
     value: {
@@ -193,6 +202,8 @@ export function parseLogFile(json: unknown): ParseResult {
       widths: { conv1: w.conv1 as number, conv2: w.conv2 as number, enc: w.enc as number, hidden: w.hidden as number },
       curve,
       skippedUpdates: json.skippedUpdates,
+      restores: json.restores,
+      lostCU: json.lostCU,
     },
   }
 }

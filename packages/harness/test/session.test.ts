@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
-import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, type Action, type Observation, type WorldView } from "@blanktab/interface"
+import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, WORLD, type Action, type Observation, type WorldView } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, clampSettings, createLearner, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
 import { loadCheckpoint, saveCheckpoint } from "../src/checkpoint"
 import { parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
+import { createWorld } from "@blanktab/world"
+import { createCanvas } from "@napi-rs/canvas"
 import { runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
@@ -16,7 +18,8 @@ const SETTINGS: LearnerSettings = { ...DEFAULT_SETTINGS, lr: 0.5, replayPerSleep
 const cfgFor = (over: Partial<SessionConfig> = {}): SessionConfig => ({
   learnerId: ID, codeSha: "dev", knowledgeSha: "f".repeat(64), sessionsSeenAtBirth: 3,
   hostSig: { cores: 4, deviceMemoryGb: 8, webgpu: false, tabsOnMachine: 1 },
-  seed: 7, widths: TINY, learnerSettings: SETTINGS, ...over,
+  // A checkpoint at every clean sleep unless a test says otherwise (the throttle has its own tests).
+  seed: 7, widths: TINY, learnerSettings: SETTINGS, checkpointEveryMs: 0, ...over,
 })
 
 /** Time stands still unless something sleeps (or a step takes time): pacing is exact and costs no wall time. */
@@ -57,7 +60,7 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; created?: LearnerInit[] }) {
+function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[] }) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
     const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 } }
@@ -76,7 +79,7 @@ function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number
         return NOOP_ACTION
       },
       sleep: async () => { st.stats.sleeps++; st.stats.cu += o.sleepCu ?? 0 },
-      save: async () => { o.saves?.push(st.stats.consecutiveSkips); return structuredClone(st) as unknown as LearnerState },
+      save: async () => { o.saves?.push(st.stats.consecutiveSkips); o.savedSteps?.push(st.stats.steps); return structuredClone(st) as unknown as LearnerState },
       stats: () => ({ ...st.stats }),
       dispose: () => {},
     }
@@ -252,7 +255,7 @@ describe("session v2", { timeout: 60_000 }, () => {
     expect(seen).toBe(true)
     expect(await loadCheckpoint(idb, ID)).toBeUndefined()
     // An orphan checkpoint (say a crash between two writes in older code) is cleared, and nothing runs.
-    await saveCheckpoint(idb, { learnerId: ID, savedAt: "x", steps: 1, cu: 0, seq: 9, curveTail: [], learnerState: {} as LearnerState })
+    await saveCheckpoint(idb, { learnerId: ID, savedAt: "x", steps: 1, cu: 0, seq: 9, curveTail: [], restores: 0, lostCU: 0, lostSkips: 0, learnerState: {} as LearnerState })
     const ticks: number[] = []
     const r = await runSession(cfgFor({ lifetimeCU: 4 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 }), onTick: ({ steps }) => { ticks.push(steps) } }))
     expect(ticks).toEqual([])
@@ -261,16 +264,119 @@ describe("session v2", { timeout: 60_000 }, () => {
     expect((await logsOf(idb)).length).toBe(3)
   })
 
-  it("refuses to resume a learner with log files but no checkpoint, or a checkpoint of another birth", async () => {
+  it("refuses to resume a learner with log files but no checkpoint, or a checkpoint out of step with its log files", async () => {
     const idb = new IDBFactory()
     await (await openQueue(idb)).put(mkFile(ID, 0))
     await expect(runSession(cfgFor(), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 }) }))).rejects.toThrow(/no checkpoint/)
+    for (const seq of [0, 2, 5]) { // only seq 1 (= latest + 1) is consistent
+      await saveCheckpoint(idb, { learnerId: ID, savedAt: "x", steps: 1, cu: 0, seq, curveTail: [], restores: 0, lostCU: 0, lostSkips: 0, learnerState: { seed: 7, widths: TINY, settings: clampSettings(SETTINGS) } as unknown as LearnerState })
+      await expect(runSession(cfgFor(), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 }) })), `seq ${seq}`).rejects.toThrow(/seq/)
+    }
+  })
+
+  it("a resumed learner keeps its own birth facts (seed, widths, settings): the config's are for newborns only", async () => {
+    const run = (idb: IDBFactory, over: Partial<SessionConfig>, stopAt?: number) => runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, ...over }), depsFor(idb, {
+      createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { if (steps === stopAt) throw new Error("reload") },
+    }))
+    const whole = new IDBFactory()
+    await run(whole, {})
     for (const over of [{ seed: 8 }, { widths: { ...TINY, hidden: 32 } }, { learnerSettings: { ...SETTINGS, bufferSize: 99 } }]) {
-      const fresh = new IDBFactory()
-      await expect(runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50 }), depsFor(fresh, {
-        createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { if (steps === 60) throw new Error("reload") },
-      }))).rejects.toThrow("reload")
-      await expect(runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, ...over }), depsFor(fresh, { createLearner: stubFactory({ cuPerStep: 1 / 16 }) }))).rejects.toThrow(/checkpoint/)
+      const idb = new IDBFactory()
+      await expect(run(idb, {}, 60)).rejects.toThrow("reload")
+      await run(idb, over)
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      expect(logs.map(strip)).toEqual((await logsOf(whole)).map(strip))
+      expect(logs.at(-1)).toMatchObject({ widths: TINY, settings: { seed: 7, bufferSize: SETTINGS.bufferSize } })
+    }
+  })
+
+  it("a checkpoint whose learnerState is missing or malformed is a RangeError", async () => {
+    const good = { seed: 7, widths: TINY, settings: clampSettings(SETTINGS) }
+    for (const learnerState of [null, 3, {}, { ...good, seed: -1 }, { ...good, widths: { ...TINY, enc: 0 } }, { ...good, widths: null }, { ...good, settings: null }, { ...good, settings: { ...good.settings, lr: Number.NaN } }]) {
+      const idb = new IDBFactory()
+      await saveCheckpoint(idb, { learnerId: ID, savedAt: "x", steps: 1, cu: 0, seq: 0, curveTail: [], restores: 0, lostCU: 0, lostSkips: 0, learnerState: learnerState as unknown as LearnerState })
+      await expect(runSession(cfgFor(), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 }) })), JSON.stringify(learnerState)).rejects.toThrow(RangeError)
+    }
+  })
+
+  it("drains the world trace after every act, so it never grows", async () => {
+    const world = createWorld({ seed: 1, canvas: createCanvas(WORLD.width, WORLD.height) })
+    const log: string[] = []
+    const counted = {
+      observe: () => world.observe(),
+      act: (a: Action) => { log.push("act"); world.act(a) },
+      drainTrace: () => { log.push("drain"); return world.drainTrace() },
+    }
+    await runSession(cfgFor({ lifetimeCU: 300 / 16, sleepInterval: 50 }), depsFor(new IDBFactory(), { world: counted, createLearner: stubFactory({ cuPerStep: 1 / 16 }) }))
+    expect(log).toEqual(Array.from({ length: 300 }, () => ["act", "drain"]).flat())
+    expect(world.drainTrace()).toEqual([])
+  })
+
+  it("two learners sharing one database: no shared (learnerId, seq), each life continuous", async () => {
+    const idb = new IDBFactory()
+    const B = "lrn_fedcba9876543210"
+    const cfg = { lifetimeCU: 16, sleepInterval: 50 }
+    await Promise.all([
+      runSession(cfgFor(cfg), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16 }) })),
+      runSession(cfgFor({ ...cfg, learnerId: B, seed: 9 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 8 }) })),
+    ])
+    const all = (await (await openQueue(idb)).pending()) as LogFileV2[]
+    expect(new Set(all.map(f => `${f.learnerId}/${f.seq}`)).size).toBe(all.length)
+    const a = all.filter(f => f.learnerId === ID), b = all.filter(f => f.learnerId === B)
+    expect(a.map(f => f.cu)).toEqual([1, 2, 4, 8, 16])
+    expect(b.map(f => f.cu)).toEqual([1, 2, 4, 8, 16])
+    expect(b.map(f => f.settings.seed)).toEqual([9, 9, 9, 9, 9])
+    expectContinuous(a)
+    expectContinuous(b)
+    expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    expect(await loadCheckpoint(idb, B)).toBeUndefined()
+  })
+
+  describe("checkpoint throttle (checkpointEveryMs, default 120 s on the injected clock)", () => {
+    // 10 steps/s on the fake clock: step n starts at (n - 1) * 100 ms; a sleep every 50 steps; crossings at steps 1024, 2048.
+    const throttled = (idb: IDBFactory, o: { skip?: (n: number) => boolean; stopAt?: number; savedSteps?: number[]; checkpointEveryMs?: number } = {}) =>
+      runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: o.checkpointEveryMs }), depsFor(idb, {
+        createLearner: stubFactory({ cuPerStep: 1 / 1024, ...(o.skip ? { skip: o.skip } : {}), ...(o.savedSteps ? { savedSteps: o.savedSteps } : {}) }),
+        onTick: ({ steps }) => { if (steps === o.stopAt) throw new Error("reload") },
+      }))
+
+    it("no sleep checkpoint until 120 s after the last save; crossings save with their log regardless", async () => {
+      const savedSteps: number[] = []
+      await throttled(new IDBFactory(), { savedSteps })
+      // birth; the 1 CU crossing (t = 102.3 s); the 2 CU crossing (t = 204.7 s, < 120 s after it); then the first sleep
+      // 120 s after that: step 3250 (t = 324.9 s); the 4 CU crossing is the end of life (no save, the final log removes it).
+      expect(savedSteps).toEqual([0, 1024, 2048, 3250])
+    })
+
+    it("a save that falls due while skips are outstanding is taken at the first clean sleep", async () => {
+      const savedSteps: number[] = []
+      await throttled(new IDBFactory(), { savedSteps, skip: n => n >= 3245 && n <= 3255 })
+      expect(savedSteps).toEqual([0, 1024, 2048, 3300])
+    })
+
+    it("checkpointEveryMs 0 saves at every clean sleep; a negative or non-finite value is a RangeError", async () => {
+      const savedSteps: number[] = []
+      await throttled(new IDBFactory(), { savedSteps, checkpointEveryMs: 0 })
+      expect(savedSteps.length).toBe(1 + 81 + 2) // birth, every sleep (50..4050), the 1 and 2 CU crossings
+      for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(throttled(new IDBFactory(), { checkpointEveryMs: bad })).rejects.toThrow(RangeError)
+      }
+    })
+
+    for (const stopAt of [1000, 2100, 3260, 4000]) {
+      it(`throttled and interrupted at step ${stopAt}: the resumed life's files equal an uninterrupted life's`, async () => {
+        const whole = new IDBFactory()
+        await throttled(whole)
+        const idb = new IDBFactory()
+        await expect(throttled(idb, { stopAt })).rejects.toThrow("reload")
+        const cp = (await loadCheckpoint(idb, ID))!
+        expect(cp.steps).toBe([0, 1024, 2048, 3250].filter(s => s < stopAt).at(-1))
+        await throttled(idb)
+        const logs = await logsOf(idb)
+        expectContinuous(logs)
+        expect(logs.map(strip)).toEqual((await logsOf(whole)).map(strip))
+      })
     }
   })
 
@@ -300,14 +406,32 @@ describe("session v2", { timeout: 60_000 }, () => {
         createLearner: stubFactory({ cuPerStep: 1 / 16, created, skip: n => poisoned && n >= 120 }),
         onEvent: e => { events.push(e); if (e.type === "restored") poisoned = false },
       }))
-      expect(events).toEqual([{ type: "restored", fromSteps: 139, toSteps: 100 }])
+      expect(events).toEqual([{ type: "restored", fromSteps: 139, toSteps: 100, restores: 1, lostCU: 39 / 16 }])
       expect(created.length).toBe(2)
       expect("state" in created[1]! && (created[1].state as unknown as StubState).stats.steps).toBe(100)
       const logs = await logsOf(idb)
       expectContinuous(logs)
       expect(logs.map(f => f.cu)).toEqual([1, 2, 4, 8, 16])
-      expect(logs.at(-1)!.skippedUpdates).toBe(0) // the restored learner never skipped
+      // Restores stay on the record: the 20 skips and the 39 steps of CU thrown away are still counted.
+      expect(logs.map(f => [f.restores, f.lostCU, f.skippedUpdates])).toEqual([[0, 0, 0], [0, 0, 0], [0, 0, 0], [1, 39 / 16, 20], [1, 39 / 16, 20]])
+      for (const f of logs) expect(f.cu).toBe(f.stepsTotal / 16) // cu is the life the learner lived, lostCU is extra
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a reload right after a restore still has the restore on the record", async () => {
+      const idb = new IDBFactory()
+      let poisoned = true, justRestored = false
+      const deps = () => depsFor(idb, {
+        createLearner: stubFactory({ cuPerStep: 1 / 16, skip: n => poisoned && n >= 120 }),
+        onEvent: e => { if (e.type === "restored") { poisoned = false; justRestored = true } },
+        onTick: () => { if (justRestored) { justRestored = false; throw new Error("reload") } },
+      })
+      await expect(runSession(cfgFor({ lifetimeCU: 16, sleepInterval: 50 }), deps())).rejects.toThrow("reload")
+      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 100, restores: 1, lostCU: 39 / 16, lostSkips: 20 })
+      await runSession(cfgFor({ lifetimeCU: 16, sleepInterval: 50 }), deps())
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      expect(logs.at(-1)).toMatchObject({ restores: 1, lostCU: 39 / 16, skippedUpdates: 20 })
     })
 
     it("a learner that keeps failing after restores stops with an error instead of looping", async () => {

@@ -3,7 +3,7 @@ import type { Observation, WorldView } from "@blanktab/interface"
 import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, TrainableLearner, Widths } from "@blanktab/learner"
 import { deleteCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
-import { MAX_CURVE_POINTS, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MAX_RESTORES, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
 
 /** 2^10 CU. */
@@ -14,6 +14,8 @@ export const DEFAULT_MAX_STEPS_PER_SEC = 30
 export const RESTORE_AFTER_SKIPS = 20
 /** Restores from one checkpoint before the life is given up as failing (no new checkpoint in between). */
 export const MAX_RESTORES_PER_CHECKPOINT = 3
+/** Two minutes: a GPU checkpoint is tens of MB, too much to write at every sleep. */
+export const DEFAULT_CHECKPOINT_EVERY_MS = 120_000
 
 export interface SessionConfig {
   learnerId: string
@@ -21,7 +23,7 @@ export interface SessionConfig {
   knowledgeSha: string
   sessionsSeenAtBirth: number
   hostSig: LogFileV2["hostSig"]
-  /** Birth facts: a resumed learner's checkpoint must match them. */
+  /** Birth facts for a newborn. A resumed learner keeps its own, from its checkpoint's learnerState. */
   seed: number
   widths: Widths
   /** Clamped (clampSettings) before use; the log records the clamped values. */
@@ -32,6 +34,12 @@ export interface SessionConfig {
   sleepInterval?: number
   /** Default DEFAULT_MAX_STEPS_PER_SEC. */
   maxStepsPerSec?: number
+  /**
+   * At a sleep, a checkpoint is saved only if this long (ms, on the injected clock) has passed since the last save.
+   * Default DEFAULT_CHECKPOINT_EVERY_MS; 0 = at every clean sleep. So a reload or restore can lose up to this much
+   * learning (log-file crossings always save, so it never loses a logged one).
+   */
+  checkpointEveryMs?: number
 }
 
 /** What the session needs of a learner (a TrainableLearner has it). */
@@ -46,7 +54,7 @@ const realClock: Clock = { now: () => performance.now(), sleep: ms => new Promis
 export type SessionEvent =
   | { type: "resumed"; steps: number }
   /** After RESTORE_AFTER_SKIPS skipped updates in a row at `fromSteps`, the learner went back to its checkpoint at `toSteps`. */
-  | { type: "restored"; fromSteps: number; toSteps: number }
+  | { type: "restored"; fromSteps: number; toSteps: number; restores: number; lostCU: number }
 
 export interface SessionDeps {
   /** drainTrace, if the world has one, is called after every action (nothing reads the trace yet). */
@@ -100,22 +108,44 @@ function thin(curve: CurvePoint[]): CurvePoint[] {
   return c
 }
 
-const sameSettings = (a: LearnerSettings, b: LearnerSettings) =>
-  (Object.keys(a) as (keyof LearnerSettings)[]).every(k => a[k] === b[k]) && Object.keys(a).length === Object.keys(b).length
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
+
+/** A checkpointed learner's birth facts, from its state. RangeError if they are missing or malformed. */
+function birthOf(state: unknown, id: string): { seed: number; widths: Widths; settings: LearnerSettings } {
+  const fail = (what: string): never => { throw new RangeError(`learner ${id}: the checkpoint's learnerState ${what}`) }
+  if (!isRecord(state)) return fail("is not an object")
+  const { seed, widths, settings } = state
+  if (!(Number.isInteger(seed) && (seed as number) >= 0 && (seed as number) < 2 ** 32)) fail("has no uint32 seed")
+  if (!isRecord(widths) || !WIDTH_KEYS.every(k => Number.isInteger(widths[k]) && (widths[k] as number) >= 1)) fail("has malformed widths")
+  if (!isRecord(settings)) fail("has no settings")
+  let clamped: LearnerSettings
+  try {
+    clamped = clampSettings(settings as unknown as LearnerSettings)
+  } catch (e) {
+    return fail(`has bad settings (${e instanceof Error ? e.message : String(e)})`)
+  }
+  const w = widths as Record<string, number>
+  return { seed: seed as number, widths: { conv1: w.conv1!, conv2: w.conv2!, enc: w.enc!, hidden: w.hidden! }, settings: clamped }
+}
 
 /**
  * Lives one learner's life (or the rest of it) until it has used `lifetimeCU` compute units.
  *
- * - Every `sleepInterval` steps the learner sleeps; a curve point (predLoss vs the copy-last baseline) is added if
- *   both are finite; then a checkpoint is saved.
+ * - Every `sleepInterval` steps the learner sleeps and a curve point (predLoss vs the copy-last baseline) is added if
+ *   both are finite. A checkpoint is saved then if `checkpointEveryMs` have passed since the last save (on the
+ *   injected clock); one that falls due during skips waits for the next clean sleep. A reload or restore therefore
+ *   loses up to `checkpointEveryMs` of learning.
  * - A log file (v2) is queued each time CU crosses the next 2^k (k = 0, 1, ...) and at the end of life, carrying the
  *   curve points since the previous file. Each one is queued in one transaction with the checkpoint of that moment,
  *   so the checkpoint is never behind the latest log file: resuming never reuses a seq or goes back in steps or CU.
  * - No checkpoint is saved (and so no non-final log is written) while the learner has skipped updates outstanding;
- *   after RESTORE_AFTER_SKIPS in a row it is restored from the last checkpoint.
+ *   after RESTORE_AFTER_SKIPS in a row it is restored from the last checkpoint. Restores stay on the record: the log
+ *   counts them (`restores`), the CU they threw away (`lostCU`) and their skipped updates (in `skippedUpdates`).
  * - The final log file removes the checkpoint in the same transaction.
- * - With a checkpoint for this learnerId the life resumes from it (its steps, CU, seq and curve); a learner with log
- *   files but no checkpoint cannot be resumed and throws.
+ * - With a checkpoint for this learnerId the life resumes from it (its steps, CU, seq, curve and birth facts: seed,
+ *   widths and settings come from its learnerState, the config's are for newborns only); a learner with log files but
+ *   no checkpoint cannot be resumed and throws, as does a checkpoint whose seq does not follow the latest log file.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
   const lifetimeCU = cfg.lifetimeCU ?? DEFAULT_LIFETIME_CU
@@ -124,9 +154,11 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   if (!(Number.isFinite(lifetimeCU) && lifetimeCU > 0)) throw new RangeError(`lifetimeCU must be finite and > 0, got ${lifetimeCU}`)
   if (!(Number.isInteger(sleepInterval) && sleepInterval >= 1)) throw new RangeError(`sleepInterval must be an integer >= 1, got ${sleepInterval}`)
   if (!(Number.isFinite(maxStepsPerSec) && maxStepsPerSec > 0)) throw new RangeError(`maxStepsPerSec must be finite and > 0, got ${maxStepsPerSec}`)
-  const settings = clampSettings(cfg.learnerSettings)
+  const checkpointEveryMs = cfg.checkpointEveryMs ?? DEFAULT_CHECKPOINT_EVERY_MS
+  if (!(Number.isFinite(checkpointEveryMs) && checkpointEveryMs >= 0)) throw new RangeError(`checkpointEveryMs must be finite and >= 0, got ${checkpointEveryMs}`)
   const { learnerId: id } = cfg
   const { world, idb, now, onTick, onEvent } = deps
+  const clock = deps.clock ?? realClock
   const queue = await openQueue(idb)
 
   const latest = await queue.latest(id)
@@ -136,34 +168,39 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   }
   let cp = await loadCheckpoint(idb, id)
   if (!cp && latest) throw new Error(`learner ${id} has log files up to seq ${latest.seq} but no checkpoint: its life cannot be resumed`)
-  if (cp) {
-    if (latest && latest.seq >= cp.seq) throw new Error(`learner ${id}: the checkpoint (seq ${cp.seq}) is behind log file ${latest.seq}`)
-    const s = cp.learnerState
-    if (s.seed !== cfg.seed || (Object.keys(cfg.widths) as (keyof Widths)[]).some(k => s.widths?.[k] !== cfg.widths[k]) || !s.settings || !sameSettings(s.settings, settings)) {
-      throw new Error(`learner ${id}: the checkpoint's seed, widths or settings differ from this session's`)
-    }
+  // Every log file is queued with its checkpoint, so the checkpoint's seq is exactly the one after the latest file.
+  if (cp && cp.seq !== (latest?.seq ?? -1) + 1) {
+    throw new Error(`learner ${id}: the checkpoint's seq ${cp.seq} does not follow its latest log file (seq ${latest?.seq ?? "none"})`)
   }
+  const birth = cp ? birthOf(cp.learnerState, id) : { seed: cfg.seed, widths: cfg.widths, settings: clampSettings(cfg.learnerSettings) }
+  const { seed, widths, settings } = birth
 
-  let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed: cfg.seed, widths: cfg.widths, settings })
+  let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed, widths, settings })
   try {
     let steps = cp?.steps ?? 0
     let seq = cp?.seq ?? 0
     let curve: CurvePoint[] = cp ? [...cp.curveTail] : []
     let crossing = nextCrossing(learner.stats().cu)
-    let restores = 0
+    let restoresSinceSave = 0
+    // Restores stay on the record across the whole life (and reloads, through the checkpoint).
+    let restores = cp?.restores ?? 0
+    let lostCU = cp?.lostCU ?? 0
+    let lostSkips = cp?.lostSkips ?? 0
+    let lastSavedAt = clock.now()
     const resumedFrom = cp ? cp.steps : null
     if (resumedFrom !== null) onEvent?.({ type: "resumed", steps: resumedFrom })
 
     const checkpointNow = async (): Promise<Checkpoint> => ({
-      learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve], learnerState: await learner.save(),
+      learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
+      restores, lostCU, lostSkips, learnerState: await learner.save(),
     })
     const logFile = (final: boolean): LogFileV2 => {
       const st = learner.stats()
       return {
         schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha: cfg.knowledgeSha, writtenAt: now().toISOString(),
-        stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed: cfg.seed }, hostSig: { ...cfg.hostSig },
-        sessionsSeenAtBirth: cfg.sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...cfg.widths }, curve: [...curve],
-        skippedUpdates: st.skippedUpdates,
+        stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed }, hostSig: { ...cfg.hostSig },
+        sessionsSeenAtBirth: cfg.sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
+        skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU,
       }
     }
     const addPoint = () => {
@@ -172,14 +209,19 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       if (curve.at(-1)?.steps === steps) return
       curve = thin([...curve, { cu, steps, predLoss, baselineLoss }])
     }
-    const saved = () => { restores = 0 }
+    /** After any save of the learner's current state. */
+    const saved = () => {
+      restoresSinceSave = 0
+      lastSavedAt = clock.now()
+    }
 
     // A newborn's first checkpoint, so there is always one to restore.
     if (!cp) {
       cp = await checkpointNow()
       await saveCheckpoint(idb, cp)
+      saved()
     }
-    const pace = createPacer(maxStepsPerSec, deps.clock ?? realClock)
+    const pace = createPacer(maxStepsPerSec, clock)
 
     while (learner.stats().cu < lifetimeCU) {
       await pace()
@@ -196,7 +238,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       }
       const st = learner.stats()
       if (st.consecutiveSkips >= RESTORE_AFTER_SKIPS) {
-        if (++restores > MAX_RESTORES_PER_CHECKPOINT) {
+        if (restores >= MAX_RESTORES) throw new Error(`learner ${id}: ${MAX_RESTORES} restores, the most a log file may record`)
+        if (++restoresSinceSave > MAX_RESTORES_PER_CHECKPOINT) {
           throw new Error(`learner ${id}: still skipping updates after ${MAX_RESTORES_PER_CHECKPOINT} restores from the checkpoint at step ${cp.steps}`)
         }
         const back = await loadCheckpoint(idb, id)
@@ -205,11 +248,18 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         if (back.seq !== seq) throw new Error(`learner ${id}: the checkpoint's seq ${back.seq} is not the next seq ${seq}`)
         learner.dispose()
         learner = await deps.createLearner({ state: back.learnerState })
-        onEvent?.({ type: "restored", fromSteps: steps, toSteps: back.steps })
+        const now_ = learner.stats()
+        restores++
+        lostCU += st.cu - now_.cu
+        lostSkips += st.skippedUpdates - now_.skippedUpdates
+        // On the record at once, so a reload before the next save does not forget the restore.
+        cp = { ...back, restores, lostCU, lostSkips }
+        await saveCheckpoint(idb, cp)
+        lastSavedAt = clock.now()
+        onEvent?.({ type: "restored", fromSteps: steps, toSteps: back.steps, restores, lostCU })
         steps = back.steps
         curve = [...back.curveTail]
         crossing = nextCrossing(learner.stats().cu)
-        cp = back
         continue
       }
       if (st.cu >= lifetimeCU) break
@@ -222,7 +272,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         cp = await checkpointNow()
         await queue.put(f, { save: cp })
         saved()
-      } else if (checkpointDue) {
+      } else if (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs) {
         cp = await checkpointNow()
         await saveCheckpoint(idb, cp)
         saved()
