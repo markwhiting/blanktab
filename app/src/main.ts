@@ -1,8 +1,8 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, checkToken, chooseSettings, clearToken, createContributor,
-  getOrCreateLearnerId, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken,
+  DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
+  createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, webLock,
   type Knowledge, type LogFile, type Queue,
 } from "@blanktab/harness"
 import { seedsOf, type LifeConfig } from "./life"
@@ -66,26 +66,22 @@ function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConf
 
 /**
  * One tab per learner. Chrome's "Duplicate tab" copies sessionStorage, so two tabs can start with the same
- * learnerId; the Web Lock tells them apart. Resolves to a release function, or null if another tab holds it.
- * Without the Locks API (very old browsers) every tab simply proceeds.
+ * learnerId; the Web Lock (blanktab:learner:<id>, held until the learner's life ends) tells them apart. Resolves to a
+ * release function, or null if another tab holds it. Without the Locks API (very old browsers) every tab simply proceeds.
  */
 function lockLearner(id: string): Promise<(() => void) | null> {
   if (!("locks" in navigator)) return Promise.resolve(() => {})
-  return new Promise(resolve => {
-    void navigator.locks.request(`blanktab:learner:${id}`, { ifAvailable: true }, lock => {
-      if (lock === null) { resolve(null); return }
-      return new Promise<void>(release => resolve(release)) // held until the learner's life ends
-    })
-  })
+  return webLock(navigator.locks)(id)
 }
 
 interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void }
 
 const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
 
-async function live(id: string, ctx: Ctx): Promise<void> {
+/** `held`: this learner's lock, already taken (by the startup sweep). */
+async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
   const { ui, queue, knowledge, queued } = ctx
-  const release = await lockLearner(id)
+  const release = held ?? (await lockLearner(id))
   if (release === null) return newborn(ctx) // another tab is living this learner's life
   const latest = await queue.latest(id)
   if (latest?.final) { release(); return newborn(ctx) } // this tab's learner already finished its life
@@ -167,7 +163,38 @@ async function main(ui: Ui): Promise<void> {
   })
   flush() // logs left by earlier tabs or lives
 
-  await live(getOrCreateLearnerId(sessionStorage), { ui, queue, knowledge, queued: policy.queued })
+  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued }
+  // This tab's own learner (a reload) is locked first, so no other tab's sweep can adopt it meanwhile.
+  const own = storedLearnerId(sessionStorage)
+  const ownLock = own === null ? null : await lockLearner(own)
+  if (own !== null && ownLock !== null) {
+    await sweep(false, own)
+    return live(own, ctx, ownLock)
+  }
+  // A new tab (or a duplicated one, whose learner lives in the original): adopt a closed tab's learner, if any.
+  const adopted = own === null ? await sweep(true) : (await sweep(false), null)
+  if (adopted) {
+    adoptLearnerId(sessionStorage, adopted.learnerId)
+    ui.notice(`Adopted learner ${adopted.learnerId}: its tab was closed, so this tab lives the rest of its life.`)
+    return live(adopted.learnerId, ctx, adopted.release)
+  }
+  return own === null ? live(newLearnerId(sessionStorage), ctx) : newborn(ctx)
+}
+
+/**
+ * Orphaned checkpoints (spec §10): adopts the newest one this tab may if `adopt`, and deletes those nobody will
+ * resume, so they do not fill the disk (sweepCheckpoints). Needs Web Locks to tell orphans from live learners; without
+ * them, and on any error, it does nothing.
+ */
+async function sweep(adopt: boolean, exclude?: string): Promise<{ learnerId: string; release: () => void } | null> {
+  if (!("locks" in navigator)) return null
+  try {
+    const r = await sweepCheckpoints({ idb: indexedDB, tryLock: webLock(navigator.locks), now: () => new Date(), adopt, ...(exclude ? { exclude: [exclude] } : {}) })
+    return r.adopted
+  } catch (e) {
+    console.warn("blanktab: the orphaned-checkpoint sweep failed", e)
+    return null
+  }
 }
 
 const ui = createUi()

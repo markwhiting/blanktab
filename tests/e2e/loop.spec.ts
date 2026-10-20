@@ -297,6 +297,51 @@ test("a reload resumes the learner from its checkpoint; a duplicated tab (same s
   await expect.poll(() => stepsLived(dup)).toBeGreaterThan(0)
 })
 
+test("a closed tab's learner is adopted by the next new tab; surplus and stale orphans are deleted", async ({ page, context }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0) // its birth checkpoint is written
+  // Six more closed tabs' learners: copies of its checkpoint saved 1..5 hours ago, and one 25 hours ago (stale).
+  const others = [1, 2, 3, 4, 5, 25].map(h => ({ learnerId: `lrn_${h.toString(16).padStart(16, "0")}`, hoursAgo: h }))
+  await page.evaluate(({ id, others }) => new Promise<void>((res, rej) => {
+    const req = indexedDB.open("blanktab")
+    req.onerror = () => rej(req.error)
+    req.onsuccess = () => {
+      const db = req.result
+      const get = db.transaction("checkpoints").objectStore("checkpoints").get(id)
+      get.onsuccess = () => {
+        const tx = db.transaction("checkpoints", "readwrite")
+        for (const o of others) tx.objectStore("checkpoints").put({ ...get.result, learnerId: o.learnerId, savedAt: new Date(Date.now() - o.hoursAgo * 3_600_000).toISOString() })
+        tx.oncomplete = () => { db.close(); res() }
+        tx.onerror = () => rej(tx.error)
+      }
+    }
+  }), { id, others })
+  await page.close() // the tab closes mid-life: its learner is an orphan now
+
+  const next = await context.newPage() // a new tab: no learnerId yet
+  await setup(next, { knowledge: "ok" })
+  await next.goto(LONG)
+  await expect(next.getByTestId("learner-id")).toHaveText(id)
+  await expect(next.getByTestId("life")).toContainText(`Adopted learner ${id}`)
+  await expect(next.getByTestId("status")).toContainText("resumed from its checkpoint")
+  expect(await next.evaluate(() => sessionStorage.getItem("blanktab:learnerId"))).toBe(id)
+  await expect.poll(() => stepsLived(next)).toBeGreaterThan(0)
+  await next.screenshot({ path: test.info().outputPath("page-adopted.png"), fullPage: true })
+  // The newest three orphans stay (the adopted one among them); the older ones and the stale one are gone.
+  const ids = await next.evaluate(() => new Promise<string[]>((res, rej) => {
+    const req = indexedDB.open("blanktab")
+    req.onerror = () => rej(req.error)
+    req.onsuccess = () => {
+      const keys = req.result.transaction("checkpoints").objectStore("checkpoints").getAllKeys()
+      keys.onsuccess = () => { req.result.close(); res(keys.result as string[]) }
+    }
+  }))
+  expect(ids.sort()).toEqual([id, others[0]!.learnerId, others[1]!.learnerId].sort())
+})
+
 test("an older tab holding the database open: the page says to close other learner tabs", async ({ page, context }) => {
   await setup(page, { knowledge: "ok" })
   // An old page version (database v1, no versionchange handler) open in another tab of this origin.
