@@ -343,7 +343,7 @@ describe("hideseek pop-up", () => {
     w.drainTrace()
     w.act(PRESS)
     const t = w.drainTrace()
-    expect(t).toContainEqual({ tick: w.tick, room: "hideseek", kind: "click", elementId: "popup-close" })
+    expect(t).toContainEqual({ tick: w.tick, room: "hideseek", kind: "click", elementId: "popup-close", interactive: true, responsive: true })
     expect(t).toContainEqual({ tick: w.tick, room: "hideseek", kind: "respond", elementId: "popup-close" })
     w.act(RELEASE)
     moveTo(w, AWAY.x, AWAY.y)

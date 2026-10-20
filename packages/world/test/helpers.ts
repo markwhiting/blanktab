@@ -2,7 +2,7 @@
 // packages/world) in place of OffscreenCanvas. Vitest browser mode is not used.
 import { createCanvas } from "@napi-rs/canvas"
 import { NOOP_ACTION, PERIPHERY, WORLD, type Action, type Observation } from "@blanktab/interface"
-import { createWorld, type World } from "../src/index"
+import { createWorld, type TraceEvent, type World } from "../src/index"
 
 export type WorldOpts = Omit<Parameters<typeof createWorld>[0], "seed" | "canvas">
 export type TestWorld = World & { screen(): Uint8ClampedArray }
@@ -55,4 +55,11 @@ export function pixelAt(obs: Observation, x: number, y: number): number[] {
 export const rgbAt = (s: Uint8ClampedArray, x: number, y: number) => {
   const i = (y * WORLD.width + x) * 4
   return [s[i]!, s[i + 1]!, s[i + 2]!]
+}
+
+/** A trace event without its tick, for comparing events whose exact tick a multi-step move makes awkward. */
+export function untimed(e: TraceEvent): Omit<TraceEvent, "tick"> {
+  const { tick, ...rest } = e
+  void tick
+  return rest
 }

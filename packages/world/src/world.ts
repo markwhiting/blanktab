@@ -14,7 +14,16 @@ import { toysRoom } from "./rooms/toys"
 import { hideseekRoom } from "./rooms/hideseek"
 import { placesRoom } from "./rooms/places"
 
-/** Privileged; harness only. */
+/**
+ * Privileged; harness only.
+ *
+ * `hover` fires whenever what is under the cursor changes: a different element, the same element with different
+ * `interactive`/`responsive` flags (e.g. the hide-and-seek tab just made active), or nothing at all (no `elementId`,
+ * both flags false). Replaying the hover events therefore reconstructs `state().hovered` at every tick, so time
+ * over elements (M2) can be read from the trace alone. `click` fires for every learner press in the viewport or on
+ * a taskbar icon, with `elementId` = the element under the press (absent on empty space). Both `hover` and `click`
+ * always carry `interactive` and `responsive` as of that tick (false for empty space); no other kind has them.
+ */
 export interface TraceEvent {
   tick: number
   room: RoomKind
@@ -22,6 +31,8 @@ export interface TraceEvent {
   elementId?: string
   value?: number | string
   source?: "learner" | "caregiver" // only on "focus"
+  interactive?: boolean // only, and always, on "hover" and "click"
+  responsive?: boolean // only, and always, on "hover" and "click"
 }
 
 /** Privileged; harness only. */
@@ -31,7 +42,14 @@ export interface PrivilegedState {
   page: string | null
   cursor: { x: number; y: number } // screen pixels
   hovered: ElementInfo | null // includes taskbar icons: id "taskbar:<kind>", interactive & responsive
-  areas: { interactive: number; responsive: number; unresponsive: number } // of the room viewport
+  /**
+   * Fractions of the room viewport (320x184 at (0,0)) covered by the active room's interactive and responsive
+   * elements; `unresponsive` is everything else in the viewport (inert elements and bare background), so
+   * `unresponsive === 1 - responsive`. The taskbar is outside the viewport and not in these areas: hover, click and
+   * `hovered` entries with `taskbar:*` ids (and taskbar-strip hovers outside the viewport) must be excluded from
+   * M2/M3, which compare time and clicks over the viewport against these areas.
+   */
+  areas: { interactive: number; responsive: number; unresponsive: number }
   scroll: { offset: number; max: number; revealedFraction: number } | null
 }
 
@@ -112,10 +130,19 @@ export function createWorld(opts: {
   const iconAt = (x: number, y: number) =>
     slots.findIndex(s => x >= s.iconX && x < s.iconX + ICON.size && y >= ICON.y && y < ICON.y + ICON.size)
 
+  const iconInfo = (i: number): ElementInfo => ({ id: taskbarId(slots[i]!.kind), interactive: true, responsive: true })
   const hoveredInfo = (): ElementInfo | null => {
     if (inView(cx, cy)) return slots[active]!.room.inspect(cx, cy)
     const i = iconAt(cx, cy)
-    return i >= 0 ? { id: taskbarId(slots[i]!.kind), interactive: true, responsive: true } : null
+    return i >= 0 ? iconInfo(i) : null
+  }
+  /** A hover/click event for `info` (null = empty space: no id, both flags false). */
+  const pointerEvent = (kind: "hover" | "click", info: ElementInfo | null): TraceEvent => {
+    const t: TraceEvent = {
+      tick, room: slots[active]!.kind, kind, interactive: info?.interactive ?? false, responsive: info?.responsive ?? false,
+    }
+    if (info) t.elementId = info.id
+    return t
   }
 
   const emit = (slot: Slot, events: RoomEvent[]) => {
@@ -127,13 +154,18 @@ export function createWorld(opts: {
     }
   }
 
-  /** Emits `hover` when the element under the cursor changes (room elements are keyed by room). */
+  /**
+   * Emits `hover` when what is under the cursor changes: element (keyed by room), its flags, or to nothing.
+   * Empty space has one key in every room, so a room switch over background emits nothing.
+   */
   const checkHover = () => {
     const info = hoveredInfo()
-    const key = info ? (inView(cx, cy) ? `${slots[active]!.kind}|${info.id}` : info.id) : null
+    const key = info
+      ? `${inView(cx, cy) ? `${slots[active]!.kind}|` : ""}${info.id}|${info.interactive}|${info.responsive}`
+      : null
     if (key === hoverKey) return
     hoverKey = key
-    if (info) trace.push({ tick, room: slots[active]!.kind, kind: "hover", elementId: info.id })
+    trace.push(pointerEvent("hover", info))
   }
 
   /**
@@ -193,15 +225,12 @@ export function createWorld(opts: {
         held = true
         if (here) {
           pressed = slot
-          const hit = slot.room.inspect(cx, cy) // before the press changes anything
-          const click: TraceEvent = { tick, room: slot.kind, kind: "click" }
-          if (hit) click.elementId = hit.id
-          trace.push(click)
+          trace.push(pointerEvent("click", slot.room.inspect(cx, cy))) // before the press changes anything
           emit(slot, slot.room.press(cx, cy))
         } else {
           const i = iconAt(cx, cy)
           if (i >= 0) {
-            trace.push({ tick, room: slot.kind, kind: "click", elementId: taskbarId(slots[i]!.kind) })
+            trace.push(pointerEvent("click", iconInfo(i)))
             if (i !== active) focus(i, "learner")
           }
         }

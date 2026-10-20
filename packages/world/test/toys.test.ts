@@ -5,7 +5,7 @@ import { layoutToys, toysRoom, ROOM_VIEW, type ToyWidget } from "../src/index"
 import { createGfx } from "../src/gfx"
 import { hashSeed } from "../src/rng"
 import { WORDS } from "../src/words"
-import { PRESS, RELEASE, makeWorld, moveTo, rgbAt } from "./helpers"
+import { PRESS, RELEASE, makeWorld, moveTo, untimed, rgbAt } from "./helpers"
 
 const roomSeed = (seed: number) => hashSeed(seed, "toys")
 const layout = (seed: number) => layoutToys(roomSeed(seed))
@@ -262,18 +262,34 @@ describe("toys: respond, shell click, persistence", () => {
     moveTo(w, mid(b).x, mid(b).y); w.drainTrace()
     w.act(PRESS)
     let t = w.drainTrace()
-    expect(t).toContainEqual({ tick: w.tick, room: "toys", kind: "click", elementId: b.id })
+    expect(t).toContainEqual({ tick: w.tick, room: "toys", kind: "click", elementId: b.id, interactive: true, responsive: true })
     expect(t.some(e => e.kind === "respond" && e.elementId === b.id)).toBe(true)
     w.act(RELEASE)
     moveTo(w, l.x + 1, l.y + 1); w.drainTrace()
     w.act(PRESS)
     t = w.drainTrace()
-    expect(t).toContainEqual({ tick: w.tick, room: "toys", kind: "click", elementId: l.id })
+    expect(t).toContainEqual({ tick: w.tick, room: "toys", kind: "click", elementId: l.id, interactive: false, responsive: false })
     expect(t.some(e => e.kind === "respond")).toBe(false)
     w.act(RELEASE)
     moveTo(w, AWAY.x, AWAY.y); w.drainTrace()
     w.act(PRESS)
-    expect(w.drainTrace().filter(e => e.kind === "click")).toEqual([{ tick: w.tick, room: "toys", kind: "click" }])
+    expect(w.drainTrace().filter(e => e.kind === "click")).toEqual([{ tick: w.tick, room: "toys", kind: "click", interactive: false, responsive: false }])
+  })
+  it("hover fires on a widget, on leaving it for empty space, on coming back, and on an inert label, with flags", () => {
+    const w = toys()
+    const b = first(1, "button"), l = layout(1).labels[0]!
+    const out = { x: b.x - 2, y: mid(b).y } // widgets and labels keep a 6 px gap, so this is background
+    const hovers = () => w.drainTrace().filter(e => e.kind === "hover").map(untimed)
+    moveTo(w, mid(b).x, mid(b).y)
+    expect(hovers().at(-1)).toEqual({ room: "toys", kind: "hover", elementId: b.id, interactive: true, responsive: true })
+    moveTo(w, out.x, out.y)
+    expect(hovers()).toEqual([{ room: "toys", kind: "hover", interactive: false, responsive: false }])
+    moveTo(w, mid(b).x, mid(b).y)
+    const back = hovers()
+    expect(back).toHaveLength(1)
+    expect(back[0]).toMatchObject({ kind: "hover", elementId: b.id, interactive: true, responsive: true })
+    moveTo(w, l.x + 1, l.y + 1)
+    expect(hovers().at(-1)).toEqual({ room: "toys", kind: "hover", elementId: l.id, interactive: false, responsive: false })
   })
   it("a caregiver switch emits no click", () => {
     const w = makeWorld(1, { rooms: ["crib", "toys"] })

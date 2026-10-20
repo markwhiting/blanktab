@@ -5,7 +5,7 @@ import { cribRoom, layoutCrib, ROOM_VIEW, type Shape } from "../src/index"
 import { createGfx } from "../src/gfx"
 import { hashSeed } from "../src/rng"
 import { WORDS } from "../src/words"
-import { PRESS, makeWorld, moveTo, pixelAt } from "./helpers"
+import { PRESS, makeWorld, moveTo, untimed, pixelAt } from "./helpers"
 
 const crib = (seed: number) => makeWorld(seed, { rooms: ["crib"] })
 const shapesOf = (seed: number) => layoutCrib(hashSeed(seed, "crib")).shapes
@@ -48,7 +48,7 @@ describe("crib in the desktop", () => {
     w.act(PRESS)
     expect(w.observe().buttonHeld).toBe(true)
     const trace = w.drainTrace()
-    expect(trace).toContainEqual({ tick: w.tick, room: "crib", kind: "click", elementId: s.id })
+    expect(trace).toContainEqual({ tick: w.tick, room: "crib", kind: "click", elementId: s.id, interactive: true, responsive: true })
     expect(trace).toContainEqual({ tick: w.tick, room: "crib", kind: "respond", elementId: s.id })
     expect(pixelAt(w.observe(), sx, sy)).not.toEqual(before)
   })
@@ -67,7 +67,26 @@ describe("crib in the desktop", () => {
     moveTo(w, 1, 1)
     w.drainTrace()
     w.act(PRESS)
-    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "click" }])
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "click", interactive: false, responsive: false }])
+  })
+
+  it("hover fires on entering a shape, on leaving it for empty space, and on coming back, with flags", () => {
+    const w = crib(1)
+    const s = shapesOf(1)[0]!
+    const c = centre(s)
+    const out = { x: s.x - 2, y: c.y } // shapes keep a 4 px gap, so this is background
+    const hovers = () => w.drainTrace().filter(e => e.kind === "hover").map(untimed)
+    moveTo(w, c.x, c.y)
+    expect(hovers().at(-1)).toEqual({ room: "crib", kind: "hover", elementId: s.id, interactive: true, responsive: true })
+    moveTo(w, out.x, out.y) // a straight horizontal path: inside s, then out
+    expect(hovers()).toEqual([{ room: "crib", kind: "hover", interactive: false, responsive: false }])
+    expect(w.state().hovered).toBeNull()
+    moveTo(w, c.x, c.y)
+    const back = hovers()
+    expect(back).toHaveLength(1)
+    expect(back[0]).toMatchObject({ room: "crib", kind: "hover", elementId: s.id, interactive: true, responsive: true })
+    moveTo(w, c.x + 1, c.y) // still on the same shape: nothing new
+    expect(hovers()).toEqual([])
   })
 
   it("fovea is padded black outside the screen", () => {

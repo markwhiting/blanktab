@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest"
 import { createCanvas } from "@napi-rs/canvas"
 import { WORLD } from "@blanktab/interface"
-import { createWorld, layoutCrib, ROOM_VIEW, type Room, type RoomEvent, type RoomFactory } from "../src/index"
-import { hashSeed } from "../src/rng"
+import { createWorld, layoutCrib, ROOM_VIEW, type ElementInfo, type Room, type RoomEvent, type RoomFactory } from "../src/index"
+import { hashSeed, mulberry32 } from "../src/rng"
 import { WORDS } from "../src/words"
 import { NOOP, PRESS, RELEASE, act, code, makeWorld, moveTo, rgbAt } from "./helpers"
 
@@ -139,9 +139,20 @@ describe("desktop: taskbar", () => {
     moveTo(w, iconCentre(0).x, ICON_Y - 4)
     w.drainTrace()
     w.act(act(code(6, 1))) // south 4 -> onto the icon's top row
-    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "hover", elementId: "taskbar:crib" }])
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "hover", elementId: "taskbar:crib", interactive: true, responsive: true }])
     w.act(act(code(6, 0))) // still on the icon: no new hover
     expect(w.drainTrace()).toEqual([])
+    w.act(act(code(4, 1))) // x 10 -> 6: still on the icon
+    expect(w.drainTrace()).toEqual([])
+    w.act(act(code(4, 1))) // x 6 -> 2: off the icon onto the bare strip, a hover to nothing
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "hover", interactive: false, responsive: false }])
+  })
+  it("a taskbar click carries the icon id and flags", () => {
+    const { w } = two()
+    moveTo(w, iconCentre(0).x, iconCentre(0).y)
+    w.drainTrace()
+    w.act(PRESS)
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "click", elementId: "taskbar:crib", interactive: true, responsive: true }])
   })
   it("a learner click on another icon switches room, emits focus/learner and changes the viewport", () => {
     const { w, s } = two()
@@ -167,11 +178,11 @@ describe("desktop: taskbar", () => {
   })
   it("bringToFront emits focus/caregiver; unknown kinds throw", () => {
     const { w } = two()
-    w.act(NOOP)
+    moveTo(w, 1, 1) // empty space in both rooms, so no hover change on the switch
     w.drainTrace()
     w.bringToFront("toys")
     expect(w.state().room).toBe("toys")
-    expect(w.drainTrace()).toEqual([{ tick: 1, room: "toys", kind: "focus", source: "caregiver" }])
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "toys", kind: "focus", source: "caregiver" }])
     w.bringToFront("toys")
     expect(w.drainTrace()).toEqual([])
     expect(() => w.bringToFront("places")).toThrow(RangeError)
@@ -245,7 +256,7 @@ describe("desktop: input routing", () => {
     w.drainTrace()
     w.act(PRESS)
     expect(w.drainTrace()).toEqual([
-      { tick: w.tick, room: "toys", kind: "click" }, // the shell's click: the stub's inspect finds nothing
+      { tick: w.tick, room: "toys", kind: "click", interactive: false, responsive: false }, // the stub's inspect finds nothing
       { tick: w.tick, room: "toys", kind: "widget", elementId: "w1", value: "press" },
     ])
   })
@@ -310,7 +321,26 @@ describe("desktop: carried from review", () => {
     w.bringToFront("crib")
     expect(w.drainTrace()).toEqual([
       { tick: w.tick, room: "crib", kind: "focus", source: "caregiver" },
-      { tick: w.tick, room: "crib", kind: "hover", elementId: shape.id },
+      { tick: w.tick, room: "crib", kind: "hover", elementId: shape.id, interactive: true, responsive: true },
     ])
+  })
+  it("the hover trace alone reconstructs state().hovered at every tick (random walk, all rooms, carrying)", () => {
+    const w = makeWorld(3)
+    const rnd = mulberry32(99)
+    let fromTrace: ElementInfo | null = null
+    for (let i = 0; i < 1500; i++) {
+      const r = rnd()
+      const button = r < 0.08 ? 1 : r < 0.16 ? 2 : 0
+      w.act(act(Math.floor(rnd() * 25), button, rnd() < 0.1 ? 1 + Math.floor(rnd() * 2) : 0))
+      if (i % 61 === 0) w.bringToFront(w.rooms()[Math.floor(rnd() * 4)]!)
+      for (const e of w.drainTrace()) {
+        if (e.kind !== "hover") continue
+        expect(typeof e.interactive).toBe("boolean")
+        expect(typeof e.responsive).toBe("boolean")
+        fromTrace = e.elementId === undefined ? null : { id: e.elementId, interactive: e.interactive!, responsive: e.responsive! }
+        if (!fromTrace) expect([e.interactive, e.responsive]).toEqual([false, false])
+      }
+      expect(fromTrace).toEqual(w.state().hovered)
+    }
   })
 })
