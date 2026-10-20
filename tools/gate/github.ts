@@ -11,13 +11,13 @@ export function gh(args: string[]): Buffer {
 }
 const ghJson = <T>(args: string[]): T => JSON.parse(gh(args).toString("utf8")) as T
 
-export interface ListedPr { number: number; title: string; headRefName: string }
+export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string; updatedAt: string }
 
 export function listOpenPrs(repo: string): ListedPr[] {
-  return ghJson<ListedPr[]>(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName"])
+  return ghJson<ListedPr[]>(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,updatedAt"])
 }
 
-export interface LoadedPr { headRef: string; headSha: string; files: PrFile[]; loadErrors: string[] }
+export interface LoadedPr { headRef: string; baseRef: string; headSha: string; files: PrFile[]; loadErrors: string[] }
 
 /** Only added/modified files are acceptable; anything else (removed, renamed, copied, changed...) is an error. */
 export function statusErrors(changed: { filename: string; status: string }[]): string[] {
@@ -30,8 +30,19 @@ export function bytesToContent(raw: Buffer): { content: string } | { error: stri
   try { return { content: new TextDecoder("utf-8", { fatal: true }).decode(raw) } } catch { return { error: "file is not valid UTF-8" } }
 }
 
+/** Checks size from contents metadata first, so an oversize file is never downloaded. */
+export function loadFile(ghFn: (args: string[]) => Buffer, headRepo: string, path: string, sha: string): { content: string } | { error: string } {
+  const url = `repos/${headRepo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${sha}`
+  let meta: { type?: string; size?: number }
+  try { meta = JSON.parse(ghFn(["api", url]).toString("utf8")) as { type?: string; size?: number } } catch { return { error: "could not read file metadata" } }
+  if (meta.type !== "file" || typeof meta.size !== "number") return { error: "not a regular file" }
+  if (meta.size > MAX_BYTES) return { error: "file exceeds 1 MB" }
+  const c = bytesToContent(ghFn(["api", "-H", "Accept: application/vnd.github.raw", url]))
+  return c
+}
+
 export function loadPr(repo: string, number: number): LoadedPr {
-  const pr = ghJson<{ head: { sha: string; ref: string; repo: { full_name: string } | null } }>(["api", `repos/${repo}/pulls/${number}`])
+  const pr = ghJson<{ base: { ref: string }; head: { sha: string; ref: string; repo: { full_name: string } | null } }>(["api", `repos/${repo}/pulls/${number}`])
   const headSha = pr.head.sha
   const loadErrors: string[] = []
   const changed = ghJson<{ filename: string; status: string }[]>(["api", `repos/${repo}/pulls/${number}/files`, "--paginate", "--slurp"]).flat()
@@ -43,14 +54,12 @@ export function loadPr(repo: string, number: number): LoadedPr {
   else if (changed.length <= MAX_PR_FILES) {
     for (const f of changed) {
       if (f.status !== "added" && f.status !== "modified") continue
-      const apiPath = f.filename.split("/").map(encodeURIComponent).join("/")
-      const raw = gh(["api", "-H", "Accept: application/vnd.github.raw", `repos/${headRepo}/contents/${apiPath}?ref=${headSha}`])
-      const c = bytesToContent(raw)
+      const c = loadFile(gh, headRepo, f.filename, headSha)
       if ("error" in c) loadErrors.push(`${f.filename}: ${c.error}`)
       else files.push({ path: f.filename, content: c.content })
     }
   }
-  return { headRef: pr.head.ref, headSha, files, loadErrors }
+  return { headRef: pr.head.ref, baseRef: pr.base.ref, headSha, files, loadErrors }
 }
 
 const fence = (s: string) => "```\n" + s.replaceAll("`", "'").slice(0, 3000) + "\n```"

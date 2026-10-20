@@ -13,7 +13,7 @@ const loaded = loadPr(repo, n)
 const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
 const previous = ids.flatMap(id => { try { return readLearnerLogs(join("data/runs", id)) } catch { return [] } })
 const v = validateSessionPr(loaded.files, previous)
-const errors = [...loaded.loadErrors, ...v.errors]
+const errors = [...(loaded.baseRef === "main" ? [] : ["Session PRs must target main."]), ...loaded.loadErrors, ...v.errors]
 if (errors.length > 0) {
   for (const e of errors) console.error(`::error::${e.replace(/[\r\n]+/g, " ").slice(0, 500)}`)
   process.exit(1)

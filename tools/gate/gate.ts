@@ -10,6 +10,10 @@ import { closePr, labelNeedsHuman, listOpenPrs, loadPr, mergePr } from "./github
 export interface OpenPr {
   number: number
   headRef: string
+  /** branch the PR targets; only main is acceptable */
+  baseRef: string
+  /** PR updatedAt, the fallback activity time when there is no heartbeat.json */
+  updatedAt: Date | null
   files: PrFile[]
   previous: LogFile[]
   heartbeatAt: Date | null
@@ -23,12 +27,12 @@ export type GateDecision = { pr: number; action: "merge" | "wait" | "close" | "l
 const STALE_MS = 48 * 3_600_000
 
 /** Time in the PR's own heartbeat.json, or null when absent/unparseable. */
-export function heartbeatFromFiles(files: PrFile[]): Date | null {
+export function heartbeatFromFiles(files: PrFile[], now: Date): Date | null {
   for (const f of files) {
     if (!/^data\/runs\/[^/]+\/heartbeat\.json$/.test(f.path)) continue
     try {
       const hb = parseHeartbeat(JSON.parse(f.content))
-      if (hb.ok) return new Date(hb.value.writtenAt)
+      if (hb.ok) { const t = new Date(hb.value.writtenAt); return t > now ? now : t } // future-dated: clamp
     } catch { /* malformed: treated as no heartbeat */ }
   }
   return null
@@ -43,6 +47,7 @@ function hasFinal(files: PrFile[]): boolean {
 
 export function decide(prs: OpenPr[], now: Date): GateDecision[] {
   return prs.map((pr): GateDecision => {
+    if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
     if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
     const v = validateSessionPr(pr.files, pr.previous)
     if (!v.ok) {
@@ -51,7 +56,7 @@ export function decide(prs: OpenPr[], now: Date): GateDecision[] {
         : { pr: pr.number, action: "close", reason: v.errors.join("\n") }
     }
     if (hasFinal(pr.files)) return { pr: pr.number, action: "merge", reason: "valid, session is final" }
-    const hb = heartbeatFromFiles(pr.files) ?? pr.heartbeatAt
+    const hb = heartbeatFromFiles(pr.files, now) ?? pr.heartbeatAt ?? pr.updatedAt
     if (hb && now.getTime() - hb.getTime() > STALE_MS) return { pr: pr.number, action: "merge", reason: "valid, heartbeat older than 48 h" }
     return { pr: pr.number, action: "wait", reason: hb ? "valid, session still active" : "valid, no heartbeat and not final" }
   })
@@ -68,7 +73,7 @@ function main(): void {
       const loaded = loadPr(repo, listed.number)
       const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })
-      prs.push({ number: listed.number, headRef: loaded.headRef, files: loaded.files, previous, heartbeatAt: null, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
+      prs.push({ number: listed.number, headRef: loaded.headRef, baseRef: listed.baseRefName, updatedAt: new Date(listed.updatedAt), files: loaded.files, previous, heartbeatAt: null, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
     } catch (e) {
       console.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
     }

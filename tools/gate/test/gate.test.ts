@@ -14,7 +14,7 @@ const log = (seq: number, over: Partial<LogFile> = {}): LogFile => ({
 })
 const file = (l: LogFile): PrFile => ({ path: `data/runs/${ID}/${l.seq}.json`, content: JSON.stringify(l) })
 const hbFile = (at: Date): PrFile => ({ path: `data/runs/${ID}/heartbeat.json`, content: JSON.stringify({ learnerId: ID, writtenAt: at.toISOString() }) })
-const pr = (over: Partial<OpenPr> = {}): OpenPr => ({ number: 1, headRef: "run/x", files: [file(log(0))], previous: [], heartbeatAt: null, ...over })
+const pr = (over: Partial<OpenPr> = {}): OpenPr => ({ number: 1, headRef: "run/x", baseRef: "main", updatedAt: null, files: [file(log(0))], previous: [], heartbeatAt: null, ...over })
 
 describe("decide", () => {
   it("valid + final -> merge", () => {
@@ -35,9 +35,9 @@ describe("decide", () => {
     expect(decide([pr({ files: [file(log(0)), hbFile(hoursAgo(1))] })], NOW)[0]!.action).toBe("wait")
   })
   it("heartbeatFromFiles ignores malformed heartbeats", () => {
-    expect(heartbeatFromFiles([{ path: `data/runs/${ID}/heartbeat.json`, content: "{nope" }])).toBeNull()
-    expect(heartbeatFromFiles([file(log(0))])).toBeNull()
-    expect(heartbeatFromFiles([hbFile(hoursAgo(2))])?.toISOString()).toBe(hoursAgo(2).toISOString())
+    expect(heartbeatFromFiles([{ path: `data/runs/${ID}/heartbeat.json`, content: "{nope" }], NOW)).toBeNull()
+    expect(heartbeatFromFiles([file(log(0))], NOW)).toBeNull()
+    expect(heartbeatFromFiles([hbFile(hoursAgo(2))], NOW)?.toISOString()).toBe(hoursAgo(2).toISOString())
   })
   it("invalid -> close with the validator error in the reason", () => {
     const [d] = decide([pr({ files: [file(log(1))] })], NOW)
@@ -48,5 +48,18 @@ describe("decide", () => {
     const [d] = decide([pr({ files: [file(log(0)), { path: "app/src/main.ts", content: "x" }] })], NOW)
     expect(d!.action).toBe("label-needs-human")
     expect(d!.reason).toContain("app/src/main.ts")
+  })
+  it("closes PRs whose base is not main, even if otherwise mergeable", () => {
+    const [d] = decide([pr({ baseRef: "release", files: [file(log(0, { final: true }))] })], NOW)
+    expect(d).toMatchObject({ action: "close", reason: "Session PRs must target main." })
+  })
+  it("without heartbeat.json falls back to the PR updatedAt", () => {
+    expect(decide([pr({ updatedAt: hoursAgo(49) })], NOW)[0]!.action).toBe("merge")
+    expect(decide([pr({ updatedAt: hoursAgo(1) })], NOW)[0]!.action).toBe("wait")
+  })
+  it("a future-dated heartbeat is clamped to now (cannot be stale, cannot wait forever via updatedAt)", () => {
+    const future = new Date(NOW.getTime() + 400 * 24 * 3_600_000)
+    expect(decide([pr({ files: [file(log(0)), hbFile(future)] })], NOW)[0]!.action).toBe("wait")
+    expect(heartbeatFromFiles([hbFile(future)], NOW)?.getTime()).toBe(NOW.getTime())
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { bytesToContent, statusErrors } from "../github.ts"
+import { bytesToContent, statusErrors, loadFile } from "../github.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -23,5 +23,20 @@ describe("bytesToContent", () => {
     const c = bytesToContent(raw) as { content: string }
     const r = validateSessionPr([{ path: "data/runs/lrn_0123456789abcdef/0.json", content: c.content }], [])
     expect(r.errors.join("\n")).toContain("exceeds 1 MB")
+  })
+})
+
+describe("loadFile", () => {
+  const big = JSON.stringify({ type: "file", size: 5_000_000 })
+  it("never downloads a file whose metadata size exceeds 1 MB", () => {
+    const calls: string[][] = []
+    const r = loadFile(a => { calls.push(a); if (a.join(" ").includes("raw")) throw new Error("must not download"); return Buffer.from(big) }, "o/r", "data/runs/x/0.json", "sha")
+    expect(r).toEqual({ error: "file exceeds 1 MB" })
+    expect(calls).toHaveLength(1)
+  })
+  it("downloads raw when within the limit and rejects non-files", () => {
+    const g = (a: string[]) => a.join(" ").includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
+    expect(loadFile(g, "o/r", "a b.json", "sha")).toEqual({ content: "{}" })
+    expect(loadFile(() => Buffer.from(JSON.stringify({ type: "symlink", size: 1 })), "o/r", "l", "sha")).toHaveProperty("error")
   })
 })

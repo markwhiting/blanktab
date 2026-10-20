@@ -13,7 +13,7 @@ jobs:
       # Always main's scripts, never the PR's merge ref: PR code is not checked out, let alone executed.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22
