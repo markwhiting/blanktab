@@ -184,7 +184,7 @@ test("knowledge unreachable: the page says offline and the learner runs anyway",
 test("cadence: with a token, a whole life goes to GitHub as one commit, sent when the final log is queued", async ({ page }) => {
   const { gh, githubCalls, commits } = await setup(page, { knowledge: "ok", token: TOKEN })
   // At the CPU half widths (not tiny): far more compute per step, so 8 CU takes seconds, not a minute.
-  await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testLifetimeCU=8.5&testStepsPerSecond=300") // a log at 8 CU (not final) and the final one
+  await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testLifetimeCU=12&testStepsPerSecond=300") // a log at 8 CU (not final) and the final one, a third of the life later
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
   await expect.poll(() => cuLived(page), { timeout: 60_000 }).toBeGreaterThan(8.05) // the non-final log is queued by now
@@ -196,7 +196,7 @@ test("cadence: with a token, a whole life goes to GitHub as one commit, sent whe
   const files = [0, 1].map(s => gh.file(UP, `run/${id}`, `data/runs/${id}/${s}.json`) as { cu: number; final: boolean })
   expect(files.map(f => f.final)).toEqual([false, true])
   expect(files[0]!.cu).toBeGreaterThanOrEqual(8)
-  expect(files[1]!.cu).toBeGreaterThanOrEqual(8.5)
+  expect(files[1]!.cu).toBeGreaterThanOrEqual(12)
 })
 
 test("token stored: a small 'change token' control clears it and brings the panel back", async ({ page }) => {

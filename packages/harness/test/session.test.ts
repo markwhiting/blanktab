@@ -13,6 +13,7 @@ import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
+const CPU_HALF: Widths = { conv1: 8, conv2: 16, enc: 64, hidden: 128 }
 const SETTINGS: LearnerSettings = { ...DEFAULT_SETTINGS, lr: 0.5, replayPerSleep: 8 } // lr is clamped to 1e-2
 
 const cfgFor = (over: Partial<SessionConfig> = {}): SessionConfig => ({
@@ -226,9 +227,10 @@ describe("session v2", { timeout: 60_000 }, () => {
       })
     }
 
-    it("a real tiny CPU learner in a synthetic world: interrupted, resumed, logs continuous and valid", async () => {
+    it("a real CPU learner in a synthetic world: interrupted, resumed, logs continuous and valid", async () => {
       const idb = new IDBFactory()
-      const cfg = cfgFor({ lifetimeCU: 10, sleepInterval: 50, learnerSettings: { ...DEFAULT_SETTINGS, replayPerSleep: 8, bufferSize: 200 } })
+      // The CPU fallback widths, not TINY: many more FLOPs per op, so the 8 CU crossing comes in a few hundred steps.
+      const cfg = cfgFor({ lifetimeCU: 10, sleepInterval: 50, widths: CPU_HALF, learnerSettings: { ...DEFAULT_SETTINGS, replayPerSleep: 8, bufferSize: 200 } })
       const make = (init: LearnerInit) => createLearner({ backend: createCpuBackend(), ...init })
       let stoppedAt = -1
       await expect(runSession(cfg, depsFor(idb, {
@@ -254,7 +256,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       const curve = logs.flatMap(f => f.curve)
       expect(curve.length).toBeGreaterThan(5)
       for (const p of curve) expect(Number.isFinite(p.predLoss) && Number.isFinite(p.baselineLoss)).toBe(true)
-      expect(logs[1]!.widths).toEqual(TINY)
+      expect(logs[1]!.widths).toEqual(CPU_HALF)
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
     })
   })
