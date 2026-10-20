@@ -14,6 +14,8 @@ import { Tensor, getDefaultBackend, tensor } from "./tensor"
  * differences at steps eps and 2·eps, (4·D(eps) − D(2·eps)) / 3, error O(eps⁴), computed in float64.
  * Each difference is divided by the actual float32 perturbation, not by 2·step.
  *
+ * Keep inputs >= ~0.2 away from relu kinks and log/sqrt domain edges: eps is large (2e-2), so a perturbation that crosses one corrupts the numeric gradient.
+ *
  * Returns max over all input elements of |analytic − numeric| / max(|analytic|, |numeric|, 1e-2·S, 1e-12),
  * where S = max |numeric| over every checked element. The floor is scale-invariant: a function
  * scaled by 1e-4 is judged exactly like the unscaled one, while float32 noise on gradients far

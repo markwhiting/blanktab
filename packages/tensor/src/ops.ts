@@ -253,3 +253,20 @@ export function gatherRows(a: Tensor, idx: Int32Array): Tensor {
   const s: Storage = be.gatherRows(a.storage, rows, cols, idx)
   return record(new Tensor(s, [idx.length, cols]), [a], (g) => [new Tensor(be.scatterAddRows(g.storage, rows, cols, idx), a.shape)])
 }
+
+// ---- convolution support ----
+
+/** x [C,H,W] -> [C*kh*kw, outH*outW] (zero padding); backward is col2im. */
+export function im2col(x: Tensor, kh: number, kw: number, stride: number, pad: number): Tensor {
+  if (x.shape.length !== 3) throw new ShapeError(`im2col: needs a [C,H,W] tensor, got ${fmt(x.shape)}`)
+  if (![kh, kw, stride].every((v) => Number.isInteger(v) && v >= 1) || !Number.isInteger(pad) || pad < 0) {
+    throw new ShapeError(`im2col: invalid kernel ${kh}x${kw}, stride ${stride}, pad ${pad}`)
+  }
+  const [c, h, w] = x.shape as [number, number, number]
+  const outH = Math.floor((h + 2 * pad - kh) / stride) + 1
+  const outW = Math.floor((w + 2 * pad - kw) / stride) + 1
+  if (outH < 1 || outW < 1) throw new ShapeError(`im2col: kernel ${kh}x${kw} does not fit input ${fmt(x.shape)} with pad ${pad}`)
+  const be = x.backend
+  const out = new Tensor(be.im2col(x.storage, c, h, w, kh, kw, stride, pad), [c * kh * kw, outH * outW])
+  return record(out, [x], (g) => [new Tensor(be.col2im(g.storage, c, h, w, kh, kw, stride, pad), x.shape)])
+}
