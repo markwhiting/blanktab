@@ -32,11 +32,15 @@ const outDim = (n: number, k: number, s: number, p: number) => Math.floor((n + 2
 
 export interface BenchModel {
   readonly paramCount: number
+  /** Every trainable parameter, in creation order (stable across backends for the same seed). */
+  readonly params: readonly Tensor[]
   /**
    * One training step: forward, losses, backward, Adam.step, zeroGrad, disposeGraph. Reads nothing
    * back unless `readLoss`, in which case it resolves the step's loss (and waits for the GPU).
+   * `inspectGrads`, if given, is awaited after backward and before Adam.step, with every parameter's
+   * `.grad` populated (tests compare them across backends).
    */
-  step(readLoss?: boolean): Promise<number | null>
+  step(readLoss?: boolean, inspectGrads?: (params: readonly Tensor[]) => Promise<void>): Promise<number | null>
   /** Frees every buffer the model owns (params, optimizer moments, carried state, constants). */
   dispose(): void
 }
@@ -105,8 +109,9 @@ export function createBenchModel(backend: Backend, widths: BenchWidths = DEFAULT
 
   return {
     paramCount,
+    params,
 
-    async step(readLoss = false) {
+    async step(readLoss = false, inspectGrads) {
       if (disposed) throw new Error("BenchModel: step after dispose")
       const f = frames[frameIndex++ % FRAMES]!
       // Per-step inputs: uploaded fresh (as the learner's frames will be) and freed at the end of the step.
@@ -134,6 +139,7 @@ export function createBenchModel(backend: Backend, widths: BenchWidths = DEFAULT
       const loss = add(add(predLoss, policyLoss), valueLoss)
 
       backward(loss)
+      if (inspectGrads) await inspectGrads(params)
       opt.step()
       opt.zeroGrad()
       // Carried state, no gradient through time: copy h2 out of the graph, then free the graph.

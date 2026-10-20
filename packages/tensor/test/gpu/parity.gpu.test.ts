@@ -3,10 +3,11 @@ import {
   Adam, ResourceError, ShapeError, add, backward, conv2d, createCpuBackend, createRng, disposeGraph, getDefaultBackend,
   gruCell, initGru, layerNorm, matmul, mean, mse, randn, reshape, setDefaultBackend, square, sub, tensor,
 } from "../../src/index"
-import type { Backend, BinaryOp, Storage, UnaryOp } from "../../src/index"
+import type { Backend, BinaryOp, Storage, Tensor, UnaryOp } from "../../src/index"
 import { createWebGpuBackend, isSoftwareAdapter } from "../../src/webgpu"
 import type { WebGpuBackend } from "../../src/webgpu"
 import { describeBackendContract } from "../backend-contract"
+import { createBenchModel } from "../../bench/learner-model"
 
 // Runs only in real Chromium via `npm run test:gpu` (vitest.gpu.config.ts).
 
@@ -37,6 +38,44 @@ function relErr(c: Float32Array, g: Float32Array): number {
   }
   return e
 }
+
+/**
+ * Gradient error, max_i |c - g| / max(|c_i|, 1e-2 * max_j |c_j|): relative per element, with a floor
+ * at 1% of the tensor's largest entry so near-zero entries are judged against the tensor's scale.
+ * Unlike a check of weights after one Adam step (≈ lr·sign(g)), this catches a gradient that is
+ * wrong by a constant factor. Non-finite values must match exactly.
+ */
+function gradErr(c: Float32Array, g: Float32Array): number {
+  expect(g.length).toBe(c.length)
+  let maxAbs = 0
+  for (const v of c) maxAbs = Math.max(maxAbs, Math.abs(v))
+  const floor = 1e-2 * maxAbs
+  let e = 0
+  for (let i = 0; i < c.length; i++) {
+    const a = c[i]!
+    const b = g[i]!
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      if (!Object.is(a, b) && !(Number.isNaN(a) && Number.isNaN(b))) return Infinity
+      continue
+    }
+    const d = Math.abs(a - b)
+    const den = Math.max(Math.abs(a), floor)
+    if (den === 0) {
+      if (d !== 0) return Infinity
+      continue
+    }
+    e = Math.max(e, d / den)
+  }
+  return e
+}
+const GRAD_TOL = 1e-3
+
+/** Reads every parameter's gradient (all must be populated). */
+const readGrads = (params: readonly Tensor[]) =>
+  Promise.all(params.map((p, i) => {
+    if (!p.grad) throw new Error(`param ${i} [${p.shape.join(",")}] has no grad`)
+    return p.grad.read()
+  }))
 
 const cpu = createCpuBackend()
 
@@ -244,7 +283,7 @@ describe("webgpu training", () => {
     })
   })
 
-  it("stats.flops and liveBuffers deltas are identical between backends for a conv + layerNorm + GRU training step", async () => {
+  it("conv + layerNorm + GRU training step: identical flops and liveBuffers deltas, matching loss and every parameter gradient", async () => {
     const gpu = requireGpu()
     const step = (be: Backend) =>
       onBackend(be, async () => {
@@ -253,23 +292,27 @@ describe("webgpu training", () => {
         const x = tensor(randn(r, 3 * 10 * 16), [3, 10, 16])
         const cw = u([4, 3 * 5 * 5])
         const cb = u([4, 1])
-        const gamma = u([20])
-        const beta = u([20])
-        const gru = initGru(r, 20, 8)
+        const gamma = u([32])
+        const beta = u([32])
+        const gru = initGru(r, 32, 8)
         const params = [cw, cb, gamma, beta, ...Object.values(gru)]
         const opt = new Adam(params, { lr: 0.01 })
         const f0 = be.stats.flops
         const l0 = be.stats.liveBuffers
         const y = conv2d(x, cw, cb, { kh: 5, kw: 5, stride: 2, pad: 2 }) // [4,5,8]
-        const seq = layerNorm(reshape(y, [8, 20]), gamma, beta)
-        const h = gruCell(seq, tensor(new Float32Array(8 * 8), [8, 8]), gru)
-        const loss = mse(h, tensor(new Float32Array(8 * 8).fill(0.5), [8, 8]))
+        // Rows of 32 straddle the 40-element channels: with rows inside one channel, layerNorm would
+        // cancel the conv bias exactly (true gradient 0, so only roundoff would be compared).
+        const seq = layerNorm(reshape(y, [5, 32]), gamma, beta)
+        // Non-zero h0: with h0 = 0 the recurrent weights and the reset gate get exactly-zero gradients.
+        const h = gruCell(seq, tensor(randn(r, 5 * 8).map((v) => 0.5 * v), [5, 8]), gru)
+        const loss = mse(h, tensor(new Float32Array(5 * 8).fill(0.5), [5, 8]))
         backward(loss)
+        const grads = await readGrads(params)
         opt.step()
         const value = (await loss.read())[0]!
         disposeGraph(loss, [])
         opt.zeroGrad()
-        const out = { flops: be.stats.flops - f0, live: be.stats.liveBuffers - l0, value, cw: await cw.read() }
+        const out = { flops: be.stats.flops - f0, live: be.stats.liveBuffers - l0, value, grads }
         opt.dispose()
         return out
       })
@@ -279,7 +322,50 @@ describe("webgpu training", () => {
     expect(g.flops).toBe(c.flops)
     expect(g.live).toBe(c.live)
     expect(relErr(new Float32Array([c.value]), new Float32Array([g.value]))).toBeLessThanOrEqual(TOL)
-    expect(relErr(c.cw, g.cw)).toBeLessThanOrEqual(TOL)
+    c.grads.forEach((cg, i) => {
+      expect(cg.some((v) => v !== 0), `param ${i} has an all-zero gradient`).toBe(true)
+      expect(gradErr(cg, g.grads[i]!), `grad of param ${i}`).toBeLessThanOrEqual(GRAD_TOL)
+    })
+  })
+
+  it("learner-sized step (bench model): every parameter gradient matches CPU, and losses agree over 10 steps", async () => {
+    // One learner-sized backward records hundreds of passes, so it crosses the 64-pass uniform-ring
+    // auto-flush many times before the gradients are read back.
+    const gpu = requireGpu()
+    const STEPS = 10
+    const run = async (be: Backend) => {
+      const model = createBenchModel(be)
+      const live = be.stats.liveBuffers
+      const grads: Float32Array[][] = []
+      const losses: number[] = []
+      for (let i = 0; i < STEPS; i++) {
+        const loss = await model.step(true, async (params) => void grads.push(await readGrads(params)))
+        losses.push(loss!)
+      }
+      expect(be.stats.liveBuffers, `${be.name} liveBuffers`).toBe(live)
+      const shapes = model.params.map((p) => p.shape)
+      model.dispose()
+      return { grads, losses, shapes }
+    }
+    const c = await run(cpu)
+    const g = await run(gpu)
+    const errs = c.grads.map((step, k) => step.map((cg, i) => gradErr(cg, g.grads[k]![i]!)))
+    console.log("LEARNER_GRAD_ERR (worst per step)", JSON.stringify(errs.map((e) => Number(Math.max(...e).toExponential(2)))))
+    console.log("LEARNER_LOSSES", JSON.stringify({ cpu: c.losses, gpu: g.losses }))
+    // Steps 1-2 are compared: step 1 starts from identical weights; step 2 is the first with h != 0,
+    // so it covers the recurrent weights and the reset gate, whose gradients are exactly 0 when h = 0.
+    // Later steps are not: Adam (≈ lr·sign(g) early on) amplifies float32 roundoff in near-zero
+    // gradients into weight differences of order lr, so CPU and GPU legitimately drift apart.
+    for (const k of [0, 1]) {
+      expect(c.grads[k]!.length).toBe(c.shapes.length)
+      c.grads[k]!.forEach((_, i) => expect(errs[k]![i]!, `step ${k + 1} grad of param ${i} [${c.shapes[i]!.join(",")}]`).toBeLessThanOrEqual(GRAD_TOL))
+    }
+    c.shapes.forEach((shape, i) => {
+      const nonZero = [0, 1].some((k) => c.grads[k]![i]!.some((v) => v !== 0))
+      expect(nonZero, `param ${i} [${shape.join(",")}] has an all-zero gradient in steps 1-2 (comparison would be vacuous)`).toBe(true)
+    })
+    // Losses over 10 steps (Adam updates in between): agree to ~4 significant digits.
+    c.losses.forEach((cl, i) => expect(g.losses[i]!, `loss at step ${i + 1}`).toBeCloseTo(cl, 4))
   })
 
   it("allocating beyond maxStorageBufferBindingSize throws ResourceError naming the size and the limit", () => {
