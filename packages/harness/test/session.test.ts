@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest"
-import { IDBFactory } from "fake-indexeddb"
+import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
 import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, WORLD, type Action, type Observation, type WorldView } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, clampSettings, createLearner, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
 import { loadCheckpoint, saveCheckpoint } from "../src/checkpoint"
-import { parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
+import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
 import { DEFAULT_CHECKPOINT_EVERY_MS, FIRST_LOG_CU, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
@@ -60,7 +60,7 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[] }) {
+function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error } }) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
     const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 } }
@@ -72,6 +72,7 @@ function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number
     }
     return {
       step: async () => {
+        if (o.throwAt && st.stats.steps + 1 === o.throwAt.steps) throw o.throwAt.error
         st.stats.steps++
         st.stats.cu += o.cuPerStep
         if (o.skip?.(st.stats.steps)) { st.stats.skippedUpdates++; st.stats.consecutiveSkips++ } else st.stats.consecutiveSkips = 0
@@ -466,14 +467,20 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(logs.at(-1)).toMatchObject({ restores: 1, lostCU: 39 / 2, skippedUpdates: 20 })
     })
 
-    it("a learner that keeps failing after restores stops with an error instead of looping", async () => {
+    it("a learner that keeps failing after restores stops with an error instead of looping, its life ended on the record", async () => {
       const idb = new IDBFactory()
+      const events: SessionEvent[] = []
       await expect(runSession(cfgFor({ lifetimeCU: 128, sleepInterval: 50 }), depsFor(idb, {
-        createLearner: stubFactory({ cuPerStep: 1 / 2, skip: n => n >= 60 }),
+        createLearner: stubFactory({ cuPerStep: 1 / 2, skip: n => n >= 60 }), onEvent: e => events.push(e),
       }))).rejects.toThrow(/restore/)
       const logs = await logsOf(idb) // whatever was written is valid
-      expect(logs.map(f => f.seq)).toEqual([0, 1]) // the 32 CU crossing (step 64) falls in the skips: never logged
-      for (const f of logs) expect(parseLogFile(f).ok).toBe(true)
+      // The 32 CU crossing (step 64) falls in the skips: never logged. The failed life's final file follows.
+      expect(logs.map(f => f.seq)).toEqual([0, 1, 2])
+      expectContinuous(logs)
+      // From its checkpoint (the sleep at step 50): 3 restores, each throwing away steps 51-79, then the fourth try's.
+      expect(logs[2]).toMatchObject({ final: true, stepsTotal: 50, cu: 25, restores: 3, lostCU: 4 * 29 / 2, skippedUpdates: 80, curve: [{ steps: 50 }] })
+      expect(events.at(-1)).toEqual({ type: "logged", seq: 2, steps: 50, cu: 25, final: true })
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
     })
   })
 
@@ -507,5 +514,129 @@ describe("session v2", { timeout: 60_000 }, () => {
     for (const over of [{ lifetimeCU: 0 }, { lifetimeCU: Number.NaN }, { sleepInterval: 0 }, { sleepInterval: 2.5 }, { maxStepsPerSec: 0 }, { maxStepsPerSec: Number.POSITIVE_INFINITY }]) {
       await expect(runSession(cfgFor(over), depsFor(new IDBFactory(), { createLearner: stubFactory({ cuPerStep: 1 }) })), JSON.stringify(over)).rejects.toThrow(RangeError)
     }
+  })
+
+  describe("a failed life ends on the record: a final log file, and the checkpoint removed with it (invariant 7)", () => {
+    const cfg = cfgFor({ lifetimeCU: 128, sleepInterval: 50 })
+    /** Lives to `stopAt` (a reload): checkpoints at the 8 and 16 CU crossings (steps 16, 32) and at the sleeps. */
+    const interrupted = async (idb: IDBFactory, stopAt: number) => {
+      await expect(runSession(cfg, depsFor(idb, {
+        createLearner: stubFactory({ cuPerStep: 1 / 2 }), onTick: ({ steps }) => { if (steps === stopAt) throw new Error("reload") },
+      }))).rejects.toThrow("reload")
+      return (await loadCheckpoint(idb, ID))!
+    }
+    const valid = (logs: LogFileV2[]) => { for (const f of logs) expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true) }
+
+    it("the learner throwing: the final file is the checkpoint's place in the life; the CU since it is lostCU", async () => {
+      const idb = new IDBFactory()
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, throwAt: { steps: 60, error: new Error("boom") } }) }))).rejects.toThrow("boom")
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      expect(logs.at(-1)).toMatchObject({ seq: 2, final: true, stepsTotal: 50, cu: 25, lostCU: (59 - 50) / 2, restores: 0, widths: TINY, settings: { seed: 7 } })
+      expect(logs.at(-1)!.curve.map(p => p.steps)).toEqual([50])
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it(`${MAX_RESTORES} restores: the most a log file may record`, async () => {
+      const idb = new IDBFactory()
+      const cp = await interrupted(idb, 60)
+      await saveCheckpoint(idb, { ...cp, restores: MAX_RESTORES })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, skip: () => true }) }))).rejects.toThrow(new RegExp(`${MAX_RESTORES} restores`))
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      valid(logs)
+      expect(logs.at(-1)).toMatchObject({ seq: cp.seq, final: true, stepsTotal: 50, restores: MAX_RESTORES, lostCU: 10, skippedUpdates: 20 })
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a checkpoint the learner refuses (a learner state version mismatch, on a real learner)", async () => {
+      const idb = new IDBFactory()
+      const make = (init: LearnerInit) => createLearner({ backend: createCpuBackend(), ...init })
+      const real = cfgFor({ lifetimeCU: 10, sleepInterval: 20, learnerSettings: { ...DEFAULT_SETTINGS, replayPerSleep: 2, bufferSize: 50 } })
+      await expect(runSession(real, depsFor(idb, { createLearner: make, onTick: ({ steps }) => { if (steps === 45) throw new Error("reload") } }))).rejects.toThrow("reload")
+      const cp = (await loadCheckpoint(idb, ID))!
+      expect(cp.steps).toBe(40)
+      await saveCheckpoint(idb, { ...cp, learnerState: { ...cp.learnerState, version: 99 as 1 } })
+      await expect(runSession(real, depsFor(idb, { createLearner: make }))).rejects.toThrow(/version 99/)
+      const logs = await logsOf(idb)
+      expect(logs).toHaveLength(1)
+      valid(logs)
+      expect(logs[0]).toMatchObject({ seq: 0, final: true, stepsTotal: 40, cu: cp.cu, curve: cp.curveTail, widths: TINY, lostCU: 0 })
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a corrupt checkpoint record: the final file repeats the latest log file's counters, at the next seq", async () => {
+      const idb = new IDBFactory()
+      const cp = await interrupted(idb, 60)
+      const before = await logsOf(idb)
+      await saveCheckpoint(idb, { ...cp, steps: -1 })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2 }) }))).rejects.toThrow(RangeError)
+      const logs = await logsOf(idb)
+      expect(logs.slice(0, -1)).toEqual(before)
+      valid(logs)
+      expect(logs.at(-1)).toEqual({ ...before.at(-1)!, seq: 2, final: true, curve: [], writtenAt: expect.any(String) })
+      expect(await loadCheckpoint(idb, ID).catch(() => "still there")).toBeUndefined()
+    })
+
+    it("a corrupt checkpoint and no log file yet: no file (nothing to repeat), the checkpoint is removed", async () => {
+      const idb = new IDBFactory()
+      const cp = await interrupted(idb, 12)
+      expect(await logsOf(idb)).toEqual([])
+      await saveCheckpoint(idb, { ...cp, learnerState: null as unknown as LearnerState })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2 }) }))).rejects.toThrow(RangeError)
+      expect(await logsOf(idb)).toEqual([])
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a full disk (QuotaExceededError on a checkpoint write): the final file still goes in, freeing the checkpoint", async () => {
+      const idb = new IDBFactory()
+      const put = FakeObjectStore.prototype.put
+      let full = false
+      FakeObjectStore.prototype.put = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (full && this.name === "checkpoints") throw new DOMException("the disk is full", "QuotaExceededError")
+        return put.call(this, value, key)
+      } as typeof put
+      try {
+        await expect(runSession(cfg, depsFor(idb, {
+          createLearner: stubFactory({ cuPerStep: 1 / 2 }), onTick: ({ steps }) => { full = steps >= 40 },
+        }))).rejects.toMatchObject({ name: "QuotaExceededError" })
+      } finally {
+        FakeObjectStore.prototype.put = put
+      }
+      const logs = await logsOf(idb)
+      valid(logs)
+      expect(logs.map(f => f.seq)).toEqual([0, 1, 2])
+      // The sleep at step 50 could not save: the life ends at its checkpoint of the 16 CU crossing (step 32).
+      expect(logs.at(-1)).toMatchObject({ seq: 2, final: true, stepsTotal: 32, cu: 16, lostCU: (50 - 32) / 2 })
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a newborn that fails before its first step leaves no file and no checkpoint", async () => {
+      const idb = new IDBFactory()
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, throwAt: { steps: 1, error: new Error("no") } }) }))).rejects.toThrow("no")
+      expect(await logsOf(idb)).toEqual([])
+      expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a failure before the first log file: the final file is seq 0 from the checkpoint", async () => {
+      const idb = new IDBFactory()
+      await expect(runSession(cfgFor({ lifetimeCU: 128, sleepInterval: 5 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, throwAt: { steps: 13, error: new Error("boom") } }) }))).rejects.toThrow("boom")
+      const logs = await logsOf(idb)
+      valid(logs)
+      expect(logs).toEqual([expect.objectContaining({ seq: 0, final: true, stepsTotal: 10, cu: 5, lostCU: 1, sessionsSeenAtBirth: 3, knowledgeSha: "f".repeat(64) })])
+    })
+
+    it("errors the caller recovers from (recoverable), and its own callbacks' errors (a reload), leave the life as it was", async () => {
+      for (const over of [
+        { createLearner: stubFactory({ cuPerStep: 1 / 2, throwAt: { steps: 70, error: new Error("GPU lost") } }), recoverable: (e: unknown) => (e as Error).message === "GPU lost" },
+        { createLearner: stubFactory({ cuPerStep: 1 / 2 }), onTick: ({ steps }: { steps: number }) => { if (steps === 70) throw new Error("GPU lost") } },
+        { createLearner: stubFactory({ cuPerStep: 1 / 2 }), onEvent: (e: SessionEvent) => { if (e.type === "logged" && e.seq === 1) throw new Error("GPU lost") } },
+      ]) {
+        const idb = new IDBFactory()
+        await expect(runSession(cfg, depsFor(idb, over))).rejects.toThrow("GPU lost")
+        expect((await logsOf(idb)).some(f => f.final)).toBe(false)
+        expect(await loadCheckpoint(idb, ID)).toBeDefined()
+      }
+    })
   })
 })

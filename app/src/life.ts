@@ -20,6 +20,12 @@ export interface Restore { reason: string; again: boolean; on: Chosen["kind"] }
  */
 export type RunLife = (cfg: SessionConfig, chosen: Chosen, restore: Restore | null) => Promise<SessionResult>
 
+/**
+ * Whether a run's error is one liveOnBestBackend recovers from (a rejected read on the WebGPU backend): pass it to
+ * runSession as `recoverable`, so such a run is not ended on the record (every other error ends the life there).
+ */
+export const isRecoverable = (chosen: Chosen) => (e: unknown): boolean => chosen.kind === "webgpu" && e instanceof ResourceError
+
 /** The Status line for a session's `resumed` event: a reload, or the restore after a GPU failure. */
 export function resumeStatus(steps: number, restore: Restore | null): string {
   if (!restore) return `resumed from its checkpoint at step ${steps}`
@@ -61,7 +67,8 @@ async function recordRestore(idb: IDBFactory, learnerId: string, cuAtFailure: nu
  *     on the CPU, only slower), for the rest of this tab's life.
  * The failed backend is destroyed first. The restored run's `resumed` event is reported as the restore (resumeStatus).
  * Each restore is on the record (the checkpoint's restores and lostCU) and reported through onStatus. Any other error,
- * and any error on the CPU, ends the life (the page starts a newborn).
+ * and any error on the CPU, ends the life (the page starts a newborn); `run` must pass isRecoverable(chosen) to
+ * runSession, so that those, and only those, are ended on the record with a final log file.
  */
 export async function liveOnBestBackend(cfg: LifeConfig, deps: LifeDeps): Promise<SessionResult> {
   let chosen = await deps.choose()
@@ -73,7 +80,7 @@ export async function liveOnBestBackend(cfg: LifeConfig, deps: LifeDeps): Promis
     try {
       return await deps.run({ ...cfg, widths: chosen.widths, hostSig: { ...cfg.hostSig, webgpu: chosen.kind === "webgpu" } }, chosen, restore)
     } catch (e) {
-      if (chosen.kind !== "webgpu" || !(e instanceof ResourceError)) throw e
+      if (!isRecoverable(chosen)(e) || !(e instanceof Error)) throw e
       gpuFailures++
       const at = await recordRestore(deps.idb, cfg.learnerId, deps.lastCU())
       // Let the failed device go before asking for another (a lost device's memory is not otherwise freed).

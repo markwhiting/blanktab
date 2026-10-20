@@ -6,7 +6,7 @@ import { emptyObservation, PERIPHERY, decodeMove, type Action, type Observation,
 import { createCpuBackend, ResourceError, type Backend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, createLearner, type Widths } from "@blanktab/learner"
 import { openQueue, runSession, type LogFileV2, type SessionConfig } from "@blanktab/harness"
-import { liveOnBestBackend, resumeStatus, type LifeConfig, type RunLife } from "../src/life"
+import { isRecoverable, liveOnBestBackend, resumeStatus, type LifeConfig, type RunLife } from "../src/life"
 import type { Chosen } from "../src/backend"
 
 const ID = "lrn_00000000deadbeef"
@@ -46,12 +46,16 @@ const cfg: LifeConfig = {
   lifetimeCU: LIFETIME_CU, sleepInterval: 4, maxStepsPerSec: 1e6, checkpointEveryMs: 0,
 }
 
-/** `failAt[i]`: the step at which the i-th GPU backend handed out starts failing (undefined: never). */
-function setup(failAt: (number | undefined)[], o: { gpuOnRetry?: boolean } = {}) {
+/**
+ * `failAt[i]`: the step at which the i-th GPU backend handed out starts failing (undefined: never). `cpuFailsAt`: the
+ * CPU backend a life moves to fails the same way at that step.
+ */
+function setup(failAt: (number | undefined)[], o: { gpuOnRetry?: boolean; cpuFailsAt?: number } = {}) {
   const idb = new IDBFactory()
   const gpus: ReturnType<typeof flakyGpu>[] = []
   const statuses: string[] = []
   const backends: string[] = []
+  const cpus: ReturnType<typeof flakyGpu>[] = []
   const choose = async (): Promise<Chosen> => {
     if (gpus.length > 0 && o.gpuOnRetry === false) return { kind: "cpu", backend: createCpuBackend(), widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, label: "CPU at half width · no WebGPU" }
     const backend = flakyGpu()
@@ -66,18 +70,27 @@ function setup(failAt: (number | undefined)[], o: { gpuOnRetry?: boolean } = {})
     labels.push(chosen.label)
     const i = gpus.indexOf(chosen.backend as never)
     const world = stubWorld()
+    const j = cpus.indexOf(chosen.backend as never)
+    // As the worker does: only what liveOnBestBackend recovers from is left off the record.
     return runSession(c, {
-      world, idb, now: () => new Date(),
+      world, idb, now: () => new Date(), recoverable: isRecoverable(chosen),
       createLearner: init => createLearner({ backend: chosen.backend, ...init }),
       onEvent: e => { if (e.type === "resumed") shown.push(resumeStatus(e.steps, restore)) },
       onTick: ({ steps, cu: now }) => {
         cu = now
         if (i >= 0 && failAt[i] !== undefined && steps >= failAt[i]!) gpus[i]!.fail = true
+        if (j >= 0 && o.cpuFailsAt !== undefined && steps >= o.cpuFailsAt) cpus[j]!.fail = true
       },
     })
   }
+  /** The CPU a life moves to: one whose reads can fail too (cpuFailsAt). */
+  const cpu = (widths: Widths): Chosen => {
+    const backend = flakyGpu()
+    cpus.push(backend)
+    return { kind: "cpu", backend, widths, label: "CPU · the GPU failed, same widths" }
+  }
   const life = () => liveOnBestBackend(cfg, {
-    idb, choose, run, lastCU: () => cu,
+    idb, choose, run, lastCU: () => cu, ...(o.cpuFailsAt !== undefined ? { cpu } : {}),
     onBackend: c => backends.push(c.kind), onStatus: s => { statuses.push(s); shown.push(s) },
   })
   const logs = async () => (await (await openQueue(idb)).pending()) as LogFileV2[]
@@ -98,7 +111,9 @@ describe("liveOnBestBackend", { timeout: 60_000 }, () => {
     expect(t.gpus).toHaveLength(2)
     expect(t.backends).toEqual(["webgpu", "webgpu"])
     expect(t.statuses.some(s => /GPU read failed/i.test(s) && /checkpoint/i.test(s))).toBe(true)
-    const final = (await t.logs()).at(-1)!
+    const files = await t.logs()
+    expect(files.filter(f => f.final)).toEqual([files.at(-1)]) // the GPU failure did not end the life on the record
+    const final = files.at(-1)!
     expect(final).toMatchObject({ final: true, widths: TINY, hostSig: { webgpu: true }, restores: 1 })
     expect(final.lostCU).toBeGreaterThan(0) // the work since the checkpoint is on the record
     expect(t.gpus[0]!.destroyed).toBe(1) // the failed device is let go before a new one is asked for
@@ -134,6 +149,16 @@ describe("liveOnBestBackend", { timeout: 60_000 }, () => {
       expect(files[i]!.cu).toBeGreaterThanOrEqual(files[i - 1]!.cu)
       expect(files[i]!.stepsTotal).toBeGreaterThanOrEqual(files[i - 1]!.stepsTotal)
     }
+  })
+
+  it("a failure the life cannot recover from (a rejected read on the CPU) ends it on the record: a final log file", async () => {
+    const t = setup([10, 6], { cpuFailsAt: 30 }) // a GPU failure, a second one (to the CPU), then the CPU fails
+    await expect(t.life()).rejects.toThrow(ResourceError)
+    expect(t.backends).toEqual(["webgpu", "webgpu", "cpu"])
+    const files = await t.logs()
+    expect(files.filter(f => f.final)).toEqual([files.at(-1)])
+    expect(files.at(-1)).toMatchObject({ final: true, widths: TINY, hostSig: { webgpu: false }, restores: 2 })
+    expect(files.at(-1)!.lostCU).toBeGreaterThan(0)
   })
 
   it("errors that are not a GPU failure end the life as before (no retry)", async () => {

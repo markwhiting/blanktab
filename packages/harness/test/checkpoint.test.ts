@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { IDBFactory } from "fake-indexeddb"
+import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
 import { deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
 import { openQueue } from "../src/queue"
 import { openDb } from "../src/db"
@@ -54,6 +54,24 @@ describe("checkpoints", () => {
     await q.put(mkFile(A, 1, { final: true }), { remove: A })
     expect(await loadCheckpoint(idb, A)).toBeUndefined()
     expect((await q.pending()).map(f => f.seq)).toEqual([0, 1])
+  })
+
+  it("a checkpoint write that throws at once (a value that cannot be stored) does not let the log commit alone", async () => {
+    const idb = new IDBFactory()
+    const q = await openQueue(idb)
+    const put = FakeObjectStore.prototype.put
+    FakeObjectStore.prototype.put = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === "checkpoints") throw new DOMException("the disk is full", "QuotaExceededError")
+      return put.call(this, value, key)
+    } as typeof put
+    try {
+      await expect(q.put(mkFile(A, 0), { save: cp(A, 500) })).rejects.toMatchObject({ name: "QuotaExceededError" })
+    } finally {
+      FakeObjectStore.prototype.put = put
+    }
+    expect(await q.pending()).toEqual([])
+    await q.put(mkFile(A, 0), { save: cp(A, 500) }) // and the seq is still free
+    expect((await q.pending()).map(f => f.seq)).toEqual([0])
   })
 
   it("rejects a checkpoint for another learner than the log it travels with", async () => {

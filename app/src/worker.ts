@@ -9,7 +9,7 @@ import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
 import { DEFAULT_MAX_STEPS_PER_SEC, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
-import { liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
+import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 
 const scope = self as unknown as {
@@ -46,7 +46,7 @@ async function start({ cfg, backend: force, widths }: StartMessage): Promise<voi
     // Every log file this learner has written comes before its checkpoint, so its curve is the start of the resumed one.
     const prior: CurvePoint[] = (await queue.files(id)).flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
     return runSession(c, {
-      world, idb: indexedDB, now: () => new Date(),
+      world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen),
       createLearner: async (init): Promise<SessionLearner> => {
         const l = await createLearner({ backend: chosen.backend, ...init })
         const birth = "state" in init ? init.state : init

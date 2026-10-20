@@ -34,9 +34,16 @@ export async function openQueue(idb: IDBFactory): Promise<Queue> {
       const tx = (await openDb(idb)).transaction(checkpoint ? [OUTBOX, CHECKPOINTS] : [OUTBOX], "readwrite")
       const row: Row = { learnerId: f.learnerId, seq: f.seq, sent: false, file: f }
       const finished = done(tx)
-      tx.objectStore(OUTBOX).add(row).onerror = () => { /* surfaces via tx.onabort */ }
-      if (record) tx.objectStore(CHECKPOINTS).put(record)
-      else if (checkpoint && "remove" in checkpoint) tx.objectStore(CHECKPOINTS).delete(checkpoint.remove)
+      try {
+        tx.objectStore(OUTBOX).add(row).onerror = () => { /* surfaces via tx.onabort */ }
+        if (record) tx.objectStore(CHECKPOINTS).put(record)
+        else if (checkpoint && "remove" in checkpoint) tx.objectStore(CHECKPOINTS).delete(checkpoint.remove)
+      } catch (e) {
+        // A request that throws at once (a value that cannot be stored) must not leave the others to commit alone.
+        finished.catch(() => {})
+        tx.abort()
+        throw e
+      }
       await finished
     },
     async pending() {
