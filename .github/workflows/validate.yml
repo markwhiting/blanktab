@@ -5,12 +5,19 @@ on:
 permissions:
   contents: read
   pull-requests: read
+# A tab commits to its PR's branch again and again; only the newest head matters.
+concurrency:
+  group: validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   validate:
     if: "${{ startsWith(github.event.pull_request.title, 'run: ') }}"
     runs-on: ubuntu-latest
     steps:
-      # Always main's scripts, never the PR's merge ref: PR code is not checked out, let alone executed.
+      # Checks out main's scripts rather than the PR's merge ref, so session data is never executed. But under
+      # pull_request a PR that edits this workflow file runs its own version of it: this check proves nothing
+      # about a PR that touches code, and humans must not trust it there. The enforcement is the gate, which
+      # runs from main on a schedule and re-validates every PR itself before merging.
       - uses: actions/checkout@v4
         with:
           ref: main

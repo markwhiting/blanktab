@@ -1,7 +1,12 @@
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
+    # Session-log PRs are checked by validate.yml; running the whole suite for each would waste Actions minutes.
+    paths-ignore: ["data/runs/**"]
+permissions:
+  contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
