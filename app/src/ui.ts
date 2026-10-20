@@ -1,6 +1,7 @@
-// Plain DOM rendering. No framework: a handful of labelled fields and two canvases.
+// Plain DOM rendering. No framework: three tabs, a handful of labelled fields, two canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
-import type { ContributorStatus, Knowledge } from "@blanktab/harness"
+import { REPO, type ContributorStatus, type Knowledge } from "@blanktab/harness"
+import { buildLabel, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel)
@@ -21,7 +22,62 @@ function painter(canvas: HTMLCanvasElement, w: number, h: number): (rgb: Uint8Ar
   }
 }
 
-const fmt = (v: number | string) => (typeof v === "number" ? String(Math.round(v * 1000) / 1000) : v)
+/** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. */
+function setupTabs(): void {
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+  const select = (t: HTMLButtonElement, focus: boolean) => {
+    for (const x of tabs) {
+      const on = x === t
+      x.setAttribute("aria-selected", String(on))
+      x.tabIndex = on ? 0 : -1
+      $(`#${x.getAttribute("aria-controls")!}`).hidden = !on
+    }
+    if (focus) t.focus()
+  }
+  tabs.forEach((t, i) => {
+    t.onclick = () => select(t, false)
+    t.onkeydown = e => {
+      const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0
+      if (d) { e.preventDefault(); select(tabs[(i + d + tabs.length) % tabs.length]!, true) }
+    }
+  })
+}
+
+/** Everything that doesn't depend on the learner: links, repo name, build id. */
+function renderStatic(): void {
+  for (const ul of document.querySelectorAll("[data-links]")) {
+    ul.replaceChildren(...siteLinks(REPO).map(({ label, href }) => {
+      const li = document.createElement("li"), a = document.createElement("a")
+      a.href = href; a.textContent = label; a.target = "_blank"; a.rel = "noopener noreferrer"
+      li.append(a)
+      return li
+    }))
+  }
+  for (const el of document.querySelectorAll("[data-repo]")) el.textContent = `${REPO.owner}/${REPO.name}`
+  const b = buildLabel(__CODE_SHA__, __BUILD_TIME__, REPO), build = byTest("build") as HTMLAnchorElement
+  build.textContent = b.text
+  build.href = b.href
+}
+
+function renderHistory(k: Knowledge): void {
+  const box = byTest("history"), rows = historyRows(k.summary, REPO)
+  box.querySelector("tbody")!.replaceChildren(...rows.map(r => {
+    const tr = document.createElement("tr")
+    const a = document.createElement("a")
+    a.href = r.href; a.textContent = r.learnerId; a.target = "_blank"; a.rel = "noopener noreferrer"
+    const cells: [string, string | Node][] = [["Learner", a], ["Steps", r.steps], ["Final", r.final], ["Setting", r.setting], ["Host", r.host]]
+    for (const [i, [label, c]] of cells.entries()) {
+      const td = document.createElement("td")
+      if (i === 1) td.className = "num"
+      td.dataset.label = label // the stacked mobile layout shows it
+      td.append(c)
+      tr.append(td)
+    }
+    return tr
+  }))
+  box.querySelector("table")!.hidden = rows.length === 0
+  box.querySelector<HTMLElement>(".empty")!.hidden = rows.length > 0
+}
 
 export interface Ui {
   knowledge(k: Knowledge): void
@@ -45,19 +101,21 @@ export function createUi(): Ui {
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   let lifetime = 0
+  setupTabs()
+  renderStatic()
 
   return {
     knowledge(k) {
       byTest("knowledge").textContent = k.offline
         ? "offline: the shared knowledge could not be loaded, so this learner starts from nothing."
         : `loaded (knowledgeSha ${k.manifest.knowledgeSha.slice(0, 12)}…)`
+      renderHistory(k)
     },
     learner({ id, settings, sessionsBefore, lifetimeSteps }) {
       lifetime = lifetimeSteps
       byTest("learner-id").textContent = id
       byTest("sessions").textContent = `${sessionsBefore} session${sessionsBefore === 1 ? "" : "s"} before this one`
-      const entries = Object.entries(settings)
-      byTest("setting").textContent = entries.length ? entries.map(([k, v]) => `${k} = ${fmt(v)}`).join(", ") : "none"
+      byTest("setting").textContent = fmtSettings(settings)
       this.steps(0)
     },
     frame(steps, periphery, fovea) {
@@ -74,10 +132,12 @@ export function createUi(): Ui {
     },
     lifeComplete(id) {
       life.hidden = false
+      life.classList.remove("error")
       life.textContent = `This learner's life is complete (${id}). A newborn takes its place.`
     },
     error(message) {
       life.hidden = false
+      life.classList.add("error")
       life.textContent = `The learner stopped: ${message}`
     },
     tokenPanel(visible) {

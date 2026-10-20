@@ -41,7 +41,7 @@ function devKnowledge(): Plugin {
 
 export default defineConfig(({ mode }) => ({
   base: BASE,
-  define: { __CODE_SHA__: JSON.stringify(codeSha()) },
+  define: { __CODE_SHA__: JSON.stringify(codeSha()), __BUILD_TIME__: JSON.stringify(new Date().toISOString()) },
   plugins: [devKnowledge()],
   worker: { format: "es" },
   build: { outDir: mode === "e2e" ? "dist-e2e" : "dist", emptyOutDir: true, target: "es2022" },

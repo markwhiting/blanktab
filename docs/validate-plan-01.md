@@ -8,7 +8,7 @@ Plan 01's goal: a page served from GitHub Pages runs a learner, sends what happe
    - **Two pictures:** the learner's whole screen (shapes on a light background with a dark bar at the bottom), and a zoomed square around its cursor.
    - **A cursor that moves on its own,** and shapes that sometimes change colour when it clicks them.
    - **"Steps lived" counting up** by about 2 per second, out of 3000.
-   - **"History: N sessions before this one".**
+   - **"Sessions: N sessions before this one"** on the LEARNER tab; the **HISTORY** tab lists those past sessions.
    - **A "Share this learner's logs" panel,** if you haven't added a token yet.
 
 ## 2. Adding a token (3 min)
@@ -24,7 +24,7 @@ Plan 01's goal: a page served from GitHub Pages runs a learner, sends what happe
    - the PR is **merged**;
    - **Actions → deploy** runs green;
    - https://markwhiting.github.io/learner/knowledge/summary.json lists one more session;
-   - reloading the page shows **"History: N+1 sessions before this one"**.
+   - reloading the page shows **"Sessions: N+1 sessions before this one"**, and HISTORY lists the new session first.
 
 ## 4. The safety rules hold (5 min, optional)
 - **Token stays put:** in Chrome DevTools → Network, filter by your token's first few characters. It should appear only in the `Authorization` header of requests to `api.github.com`.

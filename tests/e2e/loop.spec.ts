@@ -249,3 +249,61 @@ test("without the test knob the learner lives at 2 steps a second", async ({ pag
   expect(rate).toBeGreaterThan(1.4)
   expect(rate).toBeLessThan(2.6)
 })
+
+const GH = `https://github.com/${UP}`
+
+test("tabs: LEARNER by default; HISTORY lists past sessions newest first; ABOUT explains and links; links on every tab", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(PAGE)
+  const tab = (name: string) => page.getByRole("tab", { name })
+  await expect(tab("Learner")).toHaveAttribute("aria-selected", "true")
+  await expect(tab("History")).toHaveAttribute("aria-selected", "false")
+  await expect(page.getByTestId("learner-id")).toBeVisible()
+  await expect(page.getByTestId("history")).toBeHidden()
+  await expect(page.getByTestId("build")).toHaveText(/^dev built \d{4}-\d\d-\d\d \d\d:\d\d UTC$/)
+  await expect(page.getByTestId("build")).toHaveAttribute("href", GH)
+
+  const footer = page.getByTestId("footer-links")
+  const footerLinks = async () => footer.getByRole("link").evaluateAll(as => as.map(a => (a as HTMLAnchorElement).href))
+  const expected = [GH, `${GH}/blob/main/docs/specs/2026-10-19-blanktab-v1-design.md`, `${GH}/tree/main/docs/decisions`,
+    `${GH}/blob/main/docs/research/2026-10-16-research-synthesis-v0.1.md`, `${GH}/blob/main/docs/validate-plan-01.md`,
+    `${GH}/pulls`, `${GH}/actions`, `${GH}/tree/main/data/runs`, "https://markwhiting.github.io/life/"]
+  expect(await footerLinks()).toEqual(expected)
+
+  await tab("History").click()
+  await expect(tab("History")).toHaveAttribute("aria-selected", "true")
+  await expect(tab("Learner")).toHaveAttribute("aria-selected", "false")
+  await expect(page.getByTestId("learner-id")).toBeHidden()
+  const rows = page.getByTestId("history").locator("tbody tr")
+  await expect(rows).toHaveCount(2)
+  await expect(rows.nth(0)).toContainText("lrn_bbbbbbbbbbbbbbbb")
+  await expect(rows.nth(1)).toContainText("lrn_aaaaaaaaaaaaaaaa")
+  await expect(rows.nth(0).getByRole("link")).toHaveAttribute("href", `${GH}/tree/main/data/runs/lrn_bbbbbbbbbbbbbbbb`)
+  await expect(rows.nth(0)).toContainText("3000")
+  await expect(rows.nth(0)).toContainText("moveProbability = 0.5")
+  await expect(rows.nth(0)).toContainText("4 cores")
+  await expect(footer).toBeVisible()
+
+  await tab("About").click()
+  await expect(tab("About")).toHaveAttribute("aria-selected", "true")
+  const about = page.getByTestId("about")
+  await expect(about).toBeVisible()
+  await expect(about).toContainText(/only pixels/i)
+  await expect(about).toContainText(/api\.github\.com/)
+  expect(await about.getByRole("link").evaluateAll(as => as.map(a => (a as HTMLAnchorElement).href))).toEqual(expected)
+  await expect(footer).toBeVisible()
+
+  // The learner keeps living while another tab is shown.
+  const before = await stepsLived(page)
+  await tab("Learner").click()
+  await expect(page.getByTestId("learner-id")).toBeVisible()
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(before)
+})
+
+test("HISTORY says so when there are no past sessions", async ({ page }) => {
+  await setup(page, { knowledge: "unreachable" })
+  await page.goto(PAGE)
+  await page.getByRole("tab", { name: "History" }).click()
+  await expect(page.getByTestId("history")).toContainText("No past sessions yet")
+  await expect(page.getByTestId("history").locator("tbody tr")).toHaveCount(0)
+})

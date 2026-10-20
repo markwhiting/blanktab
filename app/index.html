@@ -3,77 +3,264 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>blanktab</title>
+  <meta name="color-scheme" content="light dark">
+  <title>learner</title>
   <link rel="icon" href="data:,">
   <style>
-    body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #1d1d1f; background: #fafafa; }
-    main { max-width: 760px; margin: 0 auto; padding: 24px; }
-    h1 { margin: 0 0 4px; font-size: 1.6rem; }
-    .lede { margin: 0 0 20px; color: #555; }
-    .view { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 20px; }
+    /* Design tokens copied from markwhiting.github.io/life: light by default, dark when the system asks. */
+    :root {
+      --canvas-bg: #f8fafc;
+      --surface: rgba(255, 255, 255, 0.72);
+      --surface-strong: rgba(255, 255, 255, 0.88);
+      --hairline: rgba(0, 0, 0, 0.08);
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent-cyan: #0284c7;
+      --accent-green: #059669;
+      --accent-gold: #d97706;
+      --accent-red: #e11d48;
+      --accent-link: #2563eb;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      --shadow-panel: 0 12px 36px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Georgia Pro", Georgia, serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas-bg: #05070d;
+        --surface: rgba(14, 18, 28, 0.68);
+        --surface-strong: rgba(18, 23, 36, 0.86);
+        --hairline: rgba(255, 255, 255, 0.08);
+        --text: #eef2ff;
+        --muted: #97a3bd;
+        --accent-cyan: #6ad3ff;
+        --accent-green: #49e0b2;
+        --accent-gold: #f4c867;
+        --accent-red: #ff7f8d;
+        --accent-link: #8aa5ff;
+        --shadow-panel: 0 30px 90px rgba(3, 6, 18, 0.42), 0 12px 36px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      }
+    }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      color: var(--text); background: var(--canvas-bg);
+      font-family: var(--sans); font-size: 13px; line-height: 1.45; letter-spacing: 0.01em;
+    }
+    .mono, code { font-family: var(--mono); }
+    code { font-size: 12px; }
+    a { color: var(--accent-link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    :focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; border-radius: 2px; }
+    #app { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* Header strip */
+    header.top-strip { display: flex; flex-wrap: wrap; gap: 4px 22px; align-items: baseline; padding: 12px 14px 10px; }
+    .brand {
+      margin: 0 2px 0 0; font-family: var(--serif); font-style: italic; font-size: 24px; font-weight: 500;
+      letter-spacing: -0.01em; line-height: 1; opacity: 0.92; user-select: none;
+    }
+    .tabs { display: inline-flex; gap: 18px; }
+    .tabs button {
+      position: relative; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px;
+      font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 0; cursor: pointer;
+      transition: color 0.18s var(--ease-out);
+    }
+    .tabs button::after {
+      content: ""; position: absolute; left: 0; right: 0; bottom: 2px; height: 2px; background: var(--accent-cyan);
+      opacity: 0; transition: opacity 0.18s var(--ease-out);
+    }
+    .tabs button:hover, .tabs button[aria-selected="true"] { color: var(--text); }
+    .tabs button[aria-selected="true"] { font-weight: 700; }
+    .tabs button[aria-selected="true"]::after { opacity: 1; }
+    .build {
+      margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 0.02em; opacity: 0.6;
+      transition: opacity 0.2s var(--ease-out), color 0.2s var(--ease-out);
+    }
+    .build:hover { opacity: 1; color: var(--text); text-decoration: none; }
+
+    main { flex: 1 1 auto; padding: 10px 14px 24px; }
+    [role="tabpanel"][hidden] { display: none; }
+    .muted { color: var(--muted); }
+
+    .surface {
+      background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px; box-shadow: var(--shadow-panel);
+      backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%);
+    }
+
+    /* LEARNER */
+    .learner-grid { display: grid; grid-template-columns: max-content minmax(260px, 420px); gap: 24px 32px; align-items: start; }
+    .view { display: flex; gap: 16px; align-items: flex-start; }
     figure { margin: 0; }
-    figcaption { font-size: 0.85rem; color: #555; margin-top: 4px; }
-    canvas { display: block; image-rendering: pixelated; background: #000; border: 1px solid #ccc; }
-    #periphery { width: 320px; height: 200px; }
-    #fovea { width: 128px; height: 128px; }
-    dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 20px; }
-    dt { font-weight: 600; }
-    dd { margin: 0; }
-    code { font-size: 0.9em; }
-    .life { padding: 10px 14px; background: #eef6ee; border: 1px solid #b9d8b9; border-radius: 6px; }
-    .panel { padding: 14px 16px; background: #fff; border: 1px solid #ccc; border-radius: 6px; }
-    .panel h2 { margin: 0 0 6px; font-size: 1.1rem; }
-    .panel ol { margin: 6px 0 10px; padding-left: 20px; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .row input { flex: 1; min-width: 240px; padding: 6px 8px; font: inherit; }
-    .row button { padding: 6px 12px; font: inherit; cursor: pointer; }
-    .error { color: #b00020; margin: 6px 0 0; min-height: 1.5em; }
-    button.link { padding: 0; border: 0; background: none; font: inherit; font-size: 0.85rem; color: #0b57d0; text-decoration: underline; cursor: pointer; }
+    figcaption { margin-top: 6px; font-size: 11px; font-weight: 500; color: var(--muted); }
+    canvas { display: block; image-rendering: pixelated; background: #000; border: 1px solid var(--hairline); border-radius: 6px; }
+    #periphery { width: 560px; height: 350px; }
+    #fovea { width: 160px; height: 160px; }
+    .side { display: grid; gap: 16px; min-width: 0; }
+    dl.stats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-family: var(--mono); font-size: 12px; }
+    dl.stats dt { color: var(--muted); font-weight: 500; }
+    dl.stats dd { margin: 0; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+    .life { margin: 0; padding: 10px 14px; border-left: 3px solid var(--accent-green); border-radius: 0 10px 10px 0; background: var(--surface); }
+    .life.error { border-left-color: var(--accent-red); }
+    .panel { padding: 14px 16px 12px; }
+    .panel h2 { margin: 0 0 6px; font-size: 13px; font-weight: 650; }
+    .panel p, .panel ol { margin: 6px 0; }
+    .panel ol { padding-left: 18px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+    .row label { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .row input {
+      flex: 1; min-width: 180px; padding: 6px 9px; font: inherit; font-family: var(--mono); font-size: 12px; color: var(--text);
+      background: var(--surface-strong); border: 1px solid var(--hairline); border-radius: 8px;
+    }
+    .row button {
+      padding: 6px 12px; font: inherit; font-weight: 600; cursor: pointer; color: #fff; background: var(--accent-cyan);
+      border: 0; border-radius: 8px;
+    }
+    @media (prefers-color-scheme: dark) { .row button { color: #05070d; } }
+    .row button:disabled { opacity: 0.6; cursor: progress; }
+    .error { color: var(--accent-red); margin: 6px 0 0; }
+    .error:empty { margin: 0; }
+    button.link {
+      padding: 0; border: 0; background: none; font: inherit; font-family: var(--sans); font-size: 11px; font-weight: 500;
+      color: var(--accent-link); cursor: pointer;
+    }
+    button.link:hover { text-decoration: underline; }
+
+    /* HISTORY */
+    .table-wrap { overflow-x: auto; max-width: 900px; }
+    table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
+    th {
+      text-align: left; font-family: var(--sans); font-size: 11px; font-weight: 650; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted); padding: 10px 14px 8px; border-bottom: 1px solid var(--hairline);
+    }
+    td { padding: 7px 14px; border-bottom: 1px solid var(--hairline); white-space: nowrap; font-weight: 600; }
+    tbody tr:last-child td { border-bottom: 0; }
+    td.num { text-align: right; }
+    th.num { text-align: right; }
+    .empty { margin: 0; padding: 14px; color: var(--muted); }
+
+    /* ABOUT */
+    .about { max-width: 620px; }
+    .about p { margin: 0 0 12px; font-size: 14px; line-height: 1.6; }
+    .about h2 { margin: 20px 0 8px; font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .about ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+
+    /* Footer strip */
+    footer.bottom-strip { padding: 8px 14px 12px; }
+    footer ul { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; padding: 0; list-style: none; font-size: 11px; font-weight: 500; }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+
+    @media (max-width: 980px) {
+      .learner-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      .view { flex-direction: column; }
+      .view figure:first-child { width: 100%; }
+      #periphery { width: 100%; height: auto; aspect-ratio: 8 / 5; }
+      /* HISTORY as stacked cards: one row per learner, each value labelled. */
+      table thead { display: none; }
+      table tr { display: block; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
+      tbody tr:last-child { border-bottom: 0; }
+      table td { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; border: 0; white-space: normal; text-align: right; }
+      table td::before {
+        content: attr(data-label); font-family: var(--sans); font-size: 11px; font-weight: 650; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--muted); text-align: left;
+      }
+      #fovea { width: 128px; height: 128px; }
+      .build { margin-left: 0; flex-basis: 100%; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <h1>blanktab</h1>
-  <p class="lede">A learner lives in this tab. It sees only pixels and acts only through a cursor. For now it flails at random.</p>
-
-  <div class="view" aria-label="What the learner sees">
-    <figure>
-      <canvas id="periphery" width="80" height="50"></canvas>
-      <figcaption>Periphery: the whole screen at 80×50, shown 4× larger</figcaption>
-    </figure>
-    <figure>
-      <canvas id="fovea" width="32" height="32"></canvas>
-      <figcaption>Fovea: 32×32 around the cursor, 4×</figcaption>
-    </figure>
-  </div>
-
-  <dl>
-    <dt>Learner</dt><dd data-testid="learner-id">starting…</dd>
-    <dt>Steps lived</dt><dd data-testid="steps">0 of …</dd>
-    <dt>History</dt><dd data-testid="sessions">loading…</dd>
-    <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
-    <dt>Chosen setting</dt><dd data-testid="setting">…</dd>
-    <dt>Contribution</dt><dd><span data-testid="contribution">…</span> <button type="button" class="link" data-testid="change-token" hidden>change token</button></dd>
-  </dl>
-
-  <p class="life" data-testid="life" hidden></p>
-
-  <section class="panel" data-testid="token-panel" aria-labelledby="token-title" hidden>
-    <h2 id="token-title">Share this learner's logs</h2>
-    <p>The learner runs either way. Without a GitHub token its logs wait in this browser; with one, they are sent to
-      <code>markwhiting/learner</code> as a pull request, where the next tab can learn from them.</p>
-    <ol>
-      <li><a href="https://github.com/settings/tokens/new?scopes=public_repo&amp;description=learner" target="_blank" rel="noopener noreferrer">Create a classic token with the <code>public_repo</code> scope</a> (the link fills it in).</li>
-      <li>Paste it below. It is kept only in this browser's localStorage and sent only to api.github.com.</li>
-    </ol>
-    <div class="row">
-      <label for="token">GitHub token</label>
-      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…">
-      <button type="button" id="token-save">Check &amp; save</button>
+<div id="app">
+  <header class="top-strip">
+    <h1 class="brand">learner</h1>
+    <div class="tabs" role="tablist" aria-label="View">
+      <button type="button" role="tab" id="tab-learner" aria-controls="panel-learner" aria-selected="true">Learner</button>
+      <button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1">History</button>
+      <button type="button" role="tab" id="tab-about" aria-controls="panel-about" aria-selected="false" tabindex="-1">About</button>
     </div>
-    <p class="error" id="token-error" role="status"></p>
-  </section>
-</main>
+    <a class="build mono" data-testid="build" href="#" target="_blank" rel="noopener noreferrer">build</a>
+  </header>
+
+  <main>
+    <section role="tabpanel" id="panel-learner" aria-labelledby="tab-learner">
+      <div class="learner-grid">
+        <div class="view" aria-label="What the learner sees">
+          <figure>
+            <canvas id="periphery" width="80" height="50"></canvas>
+            <figcaption>Periphery · the whole screen, 80×50 pixels</figcaption>
+          </figure>
+          <figure>
+            <canvas id="fovea" width="32" height="32"></canvas>
+            <figcaption>Fovea · 32×32 around the cursor</figcaption>
+          </figure>
+        </div>
+
+        <div class="side">
+          <dl class="stats">
+            <dt>Learner</dt><dd data-testid="learner-id">starting…</dd>
+            <dt>Steps lived</dt><dd data-testid="steps">0 of …</dd>
+            <dt>Sessions</dt><dd data-testid="sessions">loading…</dd>
+            <dt>Setting</dt><dd data-testid="setting">…</dd>
+            <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
+            <dt>Contribution</dt><dd><span data-testid="contribution">…</span> <button type="button" class="link" data-testid="change-token" hidden>change token</button></dd>
+          </dl>
+
+          <p class="life" data-testid="life" role="status" hidden></p>
+
+          <section class="panel surface" data-testid="token-panel" aria-labelledby="token-title" hidden>
+            <h2 id="token-title">Share this learner's logs</h2>
+            <p>The learner runs either way. Without a GitHub token its logs wait in this browser; with one, they are sent to
+              <code data-repo>the repo</code> as a pull request, where the next tab can learn from them.</p>
+            <ol>
+              <li><a href="https://github.com/settings/tokens/new?scopes=public_repo&amp;description=learner" target="_blank" rel="noopener noreferrer">Create a classic token with the <code>public_repo</code> scope</a> (the link fills it in).</li>
+              <li>Paste it below. It is kept only in this browser's localStorage and sent only to api.github.com.</li>
+            </ol>
+            <div class="row">
+              <label for="token">GitHub token</label>
+              <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…">
+              <button type="button" id="token-save">Check &amp; save</button>
+            </div>
+            <p class="error" id="token-error" role="status"></p>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden>
+      <div class="table-wrap surface" data-testid="history">
+        <table>
+          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" hidden>No past sessions yet. When a learner's logs are merged, its session appears here.</p>
+      </div>
+    </section>
+
+    <section role="tabpanel" id="panel-about" aria-labelledby="tab-about" hidden>
+      <div class="about" data-testid="about">
+        <p>A learner lives in this tab. It starts from nothing, with no pretrained knowledge. It sees only pixels of a small
+          screen and acts only through a cursor. When its life ends, what happened is sent back to GitHub, so later learners
+          can start from what earlier ones found and, over time, do better.</p>
+        <p>For now it flails at random. That is a placeholder: the point of this stage is the loop. A session runs, its logs
+          come back as a pull request, and the next tab sees them.</p>
+        <p>To help, leave the tab open, and add a GitHub token so its logs can be shared. Without a token the learner still
+          runs and its logs wait in this browser.</p>
+        <p>Privacy: the token is kept only in this browser and is sent only to <code>api.github.com</code>. The logs hold the
+          learner's settings and step counts and a coarse description of the machine (cores, memory, WebGPU, open tabs). The
+          pull request is opened under the token's GitHub account.</p>
+        <h2>Links</h2>
+        <ul data-links></ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="bottom-strip">
+    <nav aria-label="Project links"><ul data-testid="footer-links" data-links></ul></nav>
+  </footer>
+</div>
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
