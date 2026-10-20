@@ -46,8 +46,9 @@ export interface PrivilegedState {
    * Fractions of the room viewport (320x184 at (0,0)) covered by the active room's interactive and responsive
    * elements; `unresponsive` is everything else in the viewport (inert elements and bare background), so
    * `unresponsive === 1 - responsive`. The taskbar is outside the viewport and not in these areas: hover, click and
-   * `hovered` entries with `taskbar:*` ids (and taskbar-strip hovers outside the viewport) must be excluded from
-   * M2/M3, which compare time and clicks over the viewport against these areas.
+   * `hovered` entries with `taskbar:*` ids must be excluded from M2/M3, which compare time and clicks over the
+   * viewport against these areas. Caveat: a hover to nothing (no id) does not say whether the cursor is on bare
+   * viewport background or on the bare taskbar strip; `cursor.y >= 184` here tells them apart.
    */
   areas: { interactive: number; responsive: number; unresponsive: number }
   scroll: { offset: number; max: number; revealedFraction: number } | null
