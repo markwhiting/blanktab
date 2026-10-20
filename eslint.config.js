@@ -40,5 +40,9 @@ export default tseslint.config(
   { ignores: ["node_modules/**", "dist/**", "**/dist/**", "app/dist-e2e/**", "test-results/**", "playwright-report/**", ".local/**", ".superpowers/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  { // bench harness scripts run in Node and evaluate snippets in the page
+    files: ["packages/*/bench/**/*.mjs"],
+    languageOptions: { globals: { console: "readonly", process: "readonly", Buffer: "readonly", window: "readonly" } },
+  },
   ...Object.entries(FORBIDDEN).filter(([, b]) => b.length).flatMap(([p, b]) => [wall(p, b), dynamicWall(p, b)]),
 )

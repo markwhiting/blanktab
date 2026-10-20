@@ -3,8 +3,9 @@ import { GLYPH_H, textWidth } from "../font"
 import { ROOM_VIEW, inView, type ElementInfo, type Room, type RoomFactory } from "../room"
 
 export interface PlacesGraph { pages: string[]; links: Record<string, string[]> }
-/** The Places room; `graph()` is a test-only accessor (a fresh copy each call). */
-export type PlacesRoom = Room & { graph(): PlacesGraph }
+export interface PlacesLink { target: string; word: string; x: number; y: number; w: number; h: number }
+/** The Places room; `graph()` and `links()` are test-only accessors (fresh copies each call). */
+export type PlacesRoom = Room & { graph(): PlacesGraph; links(): Record<string, PlacesLink[]> }
 
 type Box = { x: number; y: number; w: number; h: number }
 interface Link extends Box { target: string }
@@ -44,7 +45,8 @@ function build(seed: number, words: readonly string[]) {
     }
   }
   // A distinct link word per target page.
-  const pool = [...words]
+  const pool = [...new Set(words)]
+  if (pool.length < n) throw new RangeError(`places needs ${n} distinct words for its links, got ${pool.length}`)
   for (let i = pool.length - 1; i > 0; i--) { const j = int(0, i); [pool[i], pool[j]] = [pool[j]!, pool[i]!] }
   const linkWord = pool.slice(0, n)
   const word = () => words[int(0, words.length - 1)]!
@@ -159,6 +161,9 @@ export const placesRoom: RoomFactory = (seed, words) => {
     },
     scrollState: () => null,
     page: () => current,
+    links: () => Object.fromEntries(pages.map(p => [p.id, p.links.map(l => ({
+      target: l.target, word: linkWord[ids.indexOf(l.target)]!, x: l.x, y: l.y, w: l.w, h: l.h,
+    }))])),
     graph: () => ({
       pages: [...ids],
       links: Object.fromEntries(ids.map((id, i) => [id, out[i]!.map(t => ids[t]!)])),

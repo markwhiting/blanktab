@@ -1,10 +1,9 @@
 import { describe, it, expect } from "vitest"
-import { placesRoom, ROOM_VIEW, type Room } from "../src/index"
+import { placesRoom, ROOM_VIEW, type PlacesRoom, type Room } from "../src/index"
 import { hashSeed } from "../src/rng"
 import { WORDS } from "../src/words"
-import { makeWorld, clickAt, moveTo, rgbAt } from "./helpers"
+import { makeWorld, clickAt } from "./helpers"
 
-type PlacesRoom = Room & { graph(): { pages: string[]; links: Record<string, string[]> } }
 const make = (seed = 1) => placesRoom(hashSeed(seed, "places"), WORDS) as PlacesRoom
 const draw = (r: Room) => {
   const px = new Map<string, string>()
@@ -43,6 +42,34 @@ describe("places graph", () => {
         l.forEach(t => expect(pages).toContain(t))
       }
     }
+  })
+  it("link words are distinct per page; link boxes are inside the viewport and pairwise disjoint (seeds 1-50)", () => {
+    for (let seed = 1; seed <= 50; seed++) {
+      const links = make(seed).links()
+      for (const [page, ls] of Object.entries(links)) {
+        const words = ls.map(l => l.word)
+        expect(new Set(words).size, `seed ${seed} ${page}`).toBe(words.length)
+        for (const [i, a] of ls.entries()) {
+          expect(a.x).toBeGreaterThanOrEqual(0)
+          expect(a.y).toBeGreaterThanOrEqual(0)
+          expect(a.x + a.w).toBeLessThanOrEqual(ROOM_VIEW.width)
+          expect(a.y + a.h).toBeLessThanOrEqual(ROOM_VIEW.height)
+          for (const b of ls.slice(i + 1)) {
+            const apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y
+            expect(apart, `seed ${seed} ${page} ${a.target}/${b.target}`).toBe(true)
+          }
+        }
+      }
+    }
+  })
+  it("link words are distinct across target pages and the word pool is deduplicated and guarded", () => {
+    // A pool with duplicates still yields distinct link words per page when enough unique words exist.
+    const dup = [...WORDS, ...WORDS]
+    const r = placesRoom(hashSeed(5, "places"), dup) as PlacesRoom
+    for (const ls of Object.values(r.links())) expect(new Set(ls.map(l => l.word)).size).toBe(ls.length)
+    // Fewer unique words than pages: fail loudly rather than reuse a word.
+    const few = ["cat", "dog", "cat", "dog", "cat"]
+    expect(() => placesRoom(hashSeed(1, "places"), few)).toThrow(RangeError)
   })
   it("is deterministic per seed and differs across seeds", () => {
     expect(make(3).graph()).toEqual(make(3).graph())
@@ -100,7 +127,7 @@ describe("places navigation", () => {
   })
   it("a visited link is drawn in a different colour", () => {
     const r = make()
-    const [a, b] = r.graph().links.p0!
+    const [a] = r.graph().links.p0!
     const colorOf = (id: string) => {
       const p = find(r, linkId(id))
       return draw(r).split("|").filter(e => e.startsWith(`t${p.x},`))
@@ -111,7 +138,6 @@ describe("places navigation", () => {
     const bk = find(r, "back")
     r.press(bk.x, bk.y)
     expect(colorOf(a!)).not.toEqual(unvisited)
-    expect(b).toBeDefined()
   })
   it("text is neither interactive nor responsive; areas sum sensibly", () => {
     const r = make()
@@ -144,7 +170,6 @@ describe("places in the desktop", () => {
     expect(w.state().page).toBeNull()
     w.bringToFront("places")
     expect(w.state().page).toBe(t)
-    void moveTo; void rgbAt
   })
   it("pages differ in background tint", () => {
     const r = make()
