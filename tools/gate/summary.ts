@@ -18,6 +18,22 @@ export function readLearnerLogs(dir: string): LogFile[] {
   return out.sort((a, b) => a.seq - b.seq)
 }
 
+/**
+ * The learner's latest loss ratio: predLoss ÷ baselineLoss at the last curve point of its v2 logs (the highest-seq
+ * file with a point), or null if there is none or the ratio is not finite (a zero baseline).
+ */
+export function lossRatio(logs: LogFile[]): number | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const l = logs[i]!
+    if (l.schemaVersion !== 2) continue
+    const p = l.curve[l.curve.length - 1]
+    if (!p) continue
+    const r = p.predLoss / p.baselineLoss
+    return Number.isFinite(r) ? r : null
+  }
+  return null
+}
+
 export function buildSummary(runsDir: string): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
@@ -30,6 +46,8 @@ export function buildSummary(runsDir: string): Summary {
         learnerId: id, settings: last.settings, hostSig: last.hostSig, stepsTotal: last.stepsTotal,
         final: last.final, codeSha: last.codeSha, knowledgeSha: last.knowledgeSha, sessionsSeenAtBirth: last.sessionsSeenAtBirth,
         lastWrittenAt: last.writtenAt,
+        cu: last.schemaVersion === 2 ? last.cu : null,
+        lossRatio: lossRatio(logs),
       })
     }
   }

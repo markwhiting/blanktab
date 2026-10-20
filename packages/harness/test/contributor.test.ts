@@ -192,6 +192,13 @@ describe("contributor: fresh branch after merge (brief item 13)", () => {
     }
   }
 
+  it("once a life's final file is sent, the browser keeps only that file of it", async () => {
+    const t = await setup({ files: 3 })
+    await t.c.flush()
+    expect(await t.queue.pending()).toEqual([])
+    expect((await t.queue.files(ID)).map(f => [f.seq, f.final])).toEqual([[2, true]])
+  })
+
   it("files that are already on main (PR merged before they were marked sent) are marked sent and no PR is opened", async () => {
     const t = await setup({ files: 2 })
     await t.c.flush()
@@ -366,9 +373,13 @@ describe("contributor: token never leaks (Review Focus 1)", () => {
       // dump every IndexedDB record, raw
       const db = await new Promise<IDBDatabase>((res, rej) => { const q = t.idb.open("blanktab"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
       const rows = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("outbox").objectStore("outbox").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
-      expect(rows).toHaveLength(6)
+      expect(rows).toHaveLength(1) // the life went final and was sent: only its final file is kept (prune)
       expect(JSON.stringify(rows)).not.toContain(TOKEN)
-      expect(Array.from(db.objectStoreNames)).toEqual(["outbox"])
+      expect(Array.from(db.objectStoreNames)).toEqual(["checkpointMeta", "checkpoints", "outbox"])
+      const metas = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("checkpointMeta").objectStore("checkpointMeta").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
+      expect(JSON.stringify(metas)).not.toContain(TOKEN)
+      const cps = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("checkpoints").objectStore("checkpoints").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
+      expect(JSON.stringify(cps)).not.toContain(TOKEN)
     }
   })
 

@@ -29,6 +29,17 @@ async function withNavigatorGpu<T>(value: unknown, fn: () => Promise<T>): Promis
 }
 
 describe("webgpu resource hygiene", () => {
+  it("destroy() lets the device go: later reads reject with a ResourceError instead of hanging", async () => {
+    requireGpu()
+    const gpu = await createWebGpuBackend({ powerPreference: "high-performance" })
+    const s = gpu!.upload(Float32Array.of(1, 2, 3))
+    expect(Array.from(await gpu!.read(s))).toEqual([1, 2, 3])
+    const t = gpu!.unary("neg", s) // pending work and trash at the time of destroy
+    gpu!.dispose(s)
+    gpu!.destroy()
+    await expect(gpu!.read(t)).rejects.toBeInstanceOf(ResourceError)
+    gpu!.destroy() // idempotent
+  })
   it("50 learner-sized training steps do not grow the live GPU buffer count", async () => {
     const gpu = requireGpu()
     const before = gpu.stats.liveBuffers

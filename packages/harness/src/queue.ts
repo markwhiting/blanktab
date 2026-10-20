@@ -1,64 +1,123 @@
+import { putCheckpoint, removeCheckpoint, toRecord, type Checkpoint } from "./checkpoint"
+import { CHECKPOINTS, CHECKPOINT_STORES, OUTBOX, done, openDb, result } from "./db"
 import type { LogFile } from "./log"
 
+/** A change to the file's learner's checkpoint, made in the same transaction as the put. */
+export type CheckpointChange = { save: Checkpoint<unknown> } | { remove: string }
+
 export interface Queue {
-  /** Adds a file. Rejects if (learnerId, seq) already exists: a queued file is never overwritten. */
-  put(f: LogFile): Promise<void>
+  /**
+   * Adds a file. Rejects if (learnerId, seq) already exists: a queued file is never overwritten.
+   * With `checkpoint`, also saves or removes that learner's checkpoint, atomically: both happen or neither.
+   */
+  put(f: LogFile, checkpoint?: CheckpointChange): Promise<void>
   /** Unsent files only, ordered by learnerId, then seq. */
   pending(): Promise<LogFile[]>
   markSent(learnerId: string, seq: number): Promise<void>
   /** Highest-seq file for the learner, sent or not (used to resume numbering). */
   latest(learnerId: string): Promise<LogFile | undefined>
+  /** Every file of the learner, sent or not, by seq (the page redraws a resumed learner's curve from them). */
+  files(learnerId: string): Promise<LogFile[]>
+  /**
+   * Deletes the sent files of every learner whose final file has been sent: their lives are over and on GitHub.
+   * The final file itself stays, so latest() still says the life is over (its learnerId is never lived again).
+   * Resolves to the number of files deleted.
+   */
+  prune(): Promise<number>
+  /**
+   * Bounds the unsent files a browser keeps (a visitor with no token never sends any): while more than `max` are
+   * unsent, deletes every unsent file of the learner whose newest file is oldest, then the next. Never touches the
+   * learners in `keep` (this tab's) or any learner with a checkpoint (alive in some tab, or an orphan to adopt).
+   * A dropped learner's unsent final file stays, marked sent, so latest() still says its life is over.
+   * Resolves to the number of files dropped.
+   */
+  capUnsent(max: number, keep: readonly string[]): Promise<number>
 }
+
+/** The most unsent files a browser keeps (Queue.capUnsent). About 25 whole lives. */
+export const MAX_UNSENT = 200
 
 interface Row { learnerId: string; seq: number; sent: boolean; file: LogFile }
 
-const DB = "blanktab"
-const STORE = "outbox"
-
-const done = (tx: IDBTransaction): Promise<void> =>
-  new Promise((res, rej) => {
-    tx.oncomplete = () => res()
-    tx.onerror = () => rej(tx.error)
-    tx.onabort = () => rej(tx.error ?? new Error("transaction aborted"))
-  })
-const result = <T>(r: IDBRequest<T>): Promise<T> =>
-  new Promise((res, rej) => {
-    r.onsuccess = () => res(r.result)
-    r.onerror = () => rej(r.error)
-  })
-
-export function openQueue(idb: IDBFactory): Promise<Queue> {
-  return new Promise((resolve, reject) => {
-    const req = idb.open(DB, 1)
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: ["learnerId", "seq"] })
-    req.onerror = () => reject(req.error)
-    req.onsuccess = () => {
-      const db = req.result
-      const rows = async (): Promise<Row[]> => result(db.transaction(STORE).objectStore(STORE).getAll() as IDBRequest<Row[]>)
-      resolve({
-        async put(f) {
-          const tx = db.transaction(STORE, "readwrite")
-          const row: Row = { learnerId: f.learnerId, seq: f.seq, sent: false, file: f }
-          const finished = done(tx)
-          tx.objectStore(STORE).add(row).onerror = () => { /* surfaces via tx.onabort */ }
-          await finished
-        },
-        async pending() {
-          return (await rows()).filter(r => !r.sent).map(r => r.file)
-        },
-        async markSent(learnerId, seq) {
-          const tx = db.transaction(STORE, "readwrite")
-          const store = tx.objectStore(STORE)
-          const finished = done(tx)
-          const row = await result(store.get([learnerId, seq]) as IDBRequest<Row | undefined>)
-          if (row) store.put({ ...row, sent: true })
-          await finished
-        },
-        async latest(learnerId) {
-          const mine = (await rows()).filter(r => r.learnerId === learnerId)
-          return mine.reduce<Row | undefined>((m, r) => (m === undefined || r.seq > m.seq ? r : m), undefined)?.file
-        },
-      })
-    }
-  })
+/** The database is (re)opened on every call, so a version change that closed the connection does not break the queue. */
+export async function openQueue(idb: IDBFactory): Promise<Queue> {
+  await openDb(idb) // fail early (e.g. an upgrade blocked by an old tab)
+  const rows = async (): Promise<Row[]> => result((await openDb(idb)).transaction(OUTBOX).objectStore(OUTBOX).getAll() as IDBRequest<Row[]>)
+  return {
+    async put(f, checkpoint) {
+      const target = checkpoint === undefined ? undefined : "save" in checkpoint ? checkpoint.save.learnerId : checkpoint.remove
+      if (target !== undefined && target !== f.learnerId) throw new Error(`a checkpoint of learner ${target} cannot travel with a log of ${f.learnerId}`)
+      const record = checkpoint && "save" in checkpoint ? await toRecord(checkpoint.save) : undefined // before the transaction
+      const tx = (await openDb(idb)).transaction(checkpoint ? [OUTBOX, ...CHECKPOINT_STORES] : [OUTBOX], "readwrite")
+      const row: Row = { learnerId: f.learnerId, seq: f.seq, sent: false, file: f }
+      const finished = done(tx)
+      try {
+        tx.objectStore(OUTBOX).add(row).onerror = () => { /* surfaces via tx.onabort */ }
+        if (record) putCheckpoint(tx, record)
+        else if (checkpoint && "remove" in checkpoint) removeCheckpoint(tx, checkpoint.remove)
+      } catch (e) {
+        // A request that throws at once (a value that cannot be stored) must not leave the others to commit alone.
+        finished.catch(() => {})
+        tx.abort()
+        throw e
+      }
+      await finished
+    },
+    async pending() {
+      return (await rows()).filter(r => !r.sent).map(r => r.file)
+    },
+    async markSent(learnerId, seq) {
+      const tx = (await openDb(idb)).transaction(OUTBOX, "readwrite")
+      const store = tx.objectStore(OUTBOX)
+      const finished = done(tx)
+      const row = await result(store.get([learnerId, seq]) as IDBRequest<Row | undefined>)
+      if (row) store.put({ ...row, sent: true })
+      await finished
+    },
+    async latest(learnerId) {
+      const mine = (await rows()).filter(r => r.learnerId === learnerId)
+      return mine.reduce<Row | undefined>((m, r) => (m === undefined || r.seq > m.seq ? r : m), undefined)?.file
+    },
+    async files(learnerId) {
+      return (await rows()).filter(r => r.learnerId === learnerId).sort((a, b) => a.seq - b.seq).map(r => r.file)
+    },
+    async capUnsent(max, keep) {
+      const tx = (await openDb(idb)).transaction([OUTBOX, CHECKPOINTS], "readwrite")
+      const store = tx.objectStore(OUTBOX)
+      const finished = done(tx)
+      const [all, withCheckpoint] = await Promise.all([
+        result(store.getAll() as IDBRequest<Row[]>),
+        result(tx.objectStore(CHECKPOINTS).getAllKeys()),
+      ])
+      const unsent = all.filter(r => !r.sent)
+      const kept = new Set<unknown>([...keep, ...withCheckpoint])
+      const newest = new Map<string, string>()
+      for (const r of unsent) if ((newest.get(r.learnerId) ?? "") < r.file.writtenAt) newest.set(r.learnerId, r.file.writtenAt)
+      const order = [...newest].filter(([id]) => !kept.has(id)).sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)).map(([id]) => id)
+      let count = unsent.length
+      let dropped = 0
+      for (const id of order) {
+        if (count <= max) break
+        for (const r of unsent.filter(x => x.learnerId === id)) {
+          if (r.file.final) store.put({ ...r, sent: true }) // its tombstone: the life is over
+          else store.delete([r.learnerId, r.seq])
+          count--
+          dropped++
+        }
+      }
+      await finished
+      return dropped
+    },
+    async prune() {
+      const tx = (await openDb(idb)).transaction(OUTBOX, "readwrite")
+      const store = tx.objectStore(OUTBOX)
+      const finished = done(tx)
+      const all = await result(store.getAll() as IDBRequest<Row[]>)
+      const over = new Set(all.filter(r => r.sent && r.file.final).map(r => r.learnerId))
+      const gone = all.filter(r => over.has(r.learnerId) && r.sent && !r.file.final)
+      for (const r of gone) store.delete([r.learnerId, r.seq])
+      await finished
+      return gone.length
+    },
+  }
 }

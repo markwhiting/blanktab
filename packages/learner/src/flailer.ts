@@ -7,10 +7,10 @@ const BUTTON_PROBABILITY = 0.05
 export function createFlailer(opts: { seed: number; moveProbability: number }): Learner {
   const rnd = mulberry32(opts.seed)
   return {
-    step(): Action {
+    step(): Promise<Action> {
       const move = rnd() < opts.moveProbability ? 1 + Math.floor(rnd() * (MOVE_OPTIONS - 1)) : 0
       const button = rnd() < BUTTON_PROBABILITY ? 1 + Math.floor(rnd() * (BUTTON_OPTIONS - 1)) : 0
-      return { move, button, scroll: 0, key: 0 }
+      return Promise.resolve({ move, button, scroll: 0, key: 0 })
     },
   }
 }

@@ -30,6 +30,11 @@ export interface WebGpuAdapterInfo {
 export interface WebGpuBackend extends Backend {
   readonly name: "webgpu"
   readonly adapterInfo: WebGpuAdapterInfo
+  /**
+   * Lets the device go (e.g. after a fatal read, before asking for a new one): pending work is dropped, released
+   * buffers are destroyed, then the device. Every later read rejects with a ResourceError. Idempotent.
+   */
+  destroy(): void
 }
 
 /** True for fallback/software adapters (SwiftShader, llvmpipe, ...), which do not exercise a real GPU compiler. */
@@ -133,6 +138,7 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
     pendingErrors.push(validation, oom)
   }
   let lost: string | null = null
+  let destroyed = false
   void device.lost.then((info) => {
     lost = `WebGPU device lost (${info.reason}): ${info.message}`
   })
@@ -277,6 +283,16 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
     name: "webgpu",
     adapterInfo: Object.freeze({ ...adapterInfo }),
     stats,
+    destroy() {
+      if (destroyed) return
+      destroyed = true
+      lost ??= "WebGPU backend destroyed"
+      encoder = null
+      pendingPasses = 0
+      for (const b of trash) b.destroy()
+      trash.length = 0
+      device.destroy()
+    },
     upload: (data) => make(data.length, data),
     zeros: (length) => make(length),
 

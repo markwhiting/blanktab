@@ -1,1 +1,1 @@
-{"schemaVersion":1,"settings":[{"name":"moveProbability","min":0.1,"max":1}]}
+{"schemaVersion":1,"settings":[{"name":"lr","min":0.0003,"max":0.003},{"name":"entropyWeight","min":0.001,"max":0.05},{"name":"curiosityWeight","min":0.5,"max":2},{"name":"bufferSize","min":500,"max":4000},{"name":"replayPerSleep","min":16,"max":128},{"name":"headLrScale","min":0.03,"max":0.3},{"name":"maxStepsPerSec","min":30,"max":30},{"name":"moveProbability","min":0.1,"max":1}]}

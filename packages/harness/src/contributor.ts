@@ -161,6 +161,7 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       // Only now, with the commit and an open PR both in place (or the files already on main), are they sent.
       for (const f of files) await queue.markSent(f.learnerId, f.seq)
     }
+    await queue.prune() // finished lives' files are on GitHub now: the browser need not keep them
   }
 
   async function run(): Promise<void> {

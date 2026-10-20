@@ -27,9 +27,14 @@ describe("historyRows", () => {
     expect(r).toEqual({
       learnerId: "lrn_aaaaaaaaaaaaaaaa",
       href: "https://github.com/markwhiting/learner/tree/main/data/runs/lrn_aaaaaaaaaaaaaaaa",
-      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu",
+      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu", cu: "—", lossRatio: "—",
     })
     expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { settings: {} })] }, REPO)[0]).toMatchObject({ final: "yes", setting: "none", host: "8 cores · webgpu" })
+  })
+  it("shows a learner's compute lived and its last loss ratio (v2 logs), a dash for v1 learners", () => {
+    const [r] = historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: 1024.4567, lossRatio: 0.87654 })] }, REPO)
+    expect(r).toMatchObject({ cu: "1024.457", lossRatio: "0.877" })
+    expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: null, lossRatio: null })] }, REPO)[0]).toMatchObject({ cu: "—", lossRatio: "—" })
   })
 })
 

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest"
 import { validateSessionPr, type PrFile } from "../validate.ts"
-import type { LogFile } from "@blanktab/harness/log"
+import type { CurvePoint, LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
-const log = (seq: number, over: Partial<LogFile> = {}): LogFile => ({
+const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
   schemaVersion: 1, learnerId: ID, seq, codeSha: "a".repeat(40), knowledgeSha: "0".repeat(64),
   writtenAt: "2026-10-19T12:00:00.000Z", stepsTotal: 100 * (seq + 1), settings: { lr: 0.1, mode: "a" },
   hostSig: { cores: 8, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
@@ -11,6 +11,96 @@ const log = (seq: number, over: Partial<LogFile> = {}): LogFile => ({
 })
 const file = (l: LogFile, id = ID): PrFile => ({ path: `data/runs/${id}/${l.seq}.json`, content: JSON.stringify(l) })
 const errs = (files: PrFile[], prev: LogFile[] = []) => validateSessionPr(files, prev)
+
+const pt = (cu: number, steps: number, predLoss = 0.02, baselineLoss = 0.025): CurvePoint => ({ cu, steps, predLoss, baselineLoss })
+/** A v2 file: CU doubles with seq (seq 0 at 1 CU), 400 steps per CU. */
+const logV2 = (seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => {
+  const cu = 2 ** seq
+  return {
+    ...log(seq), schemaVersion: 2, stepsTotal: 400 * cu, cu, condition: "A", widths: { conv1: 16, conv2: 32, enc: 128, hidden: 256 },
+    settings: { lr: 0.001, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, maxStepsPerSec: 30, seed: 7 },
+    curve: [pt(cu * 0.75, 300 * cu), pt(cu, 400 * cu)], skippedUpdates: 0, restores: 0, lostCU: 0, ...over,
+  }
+}
+
+describe("validateSessionPr v2", () => {
+  const v2raw = (mut: (o: Record<string, any>) => void, seq = 0): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const o = JSON.parse(JSON.stringify(logV2(seq))); mut(o)
+    return { path: `data/runs/${ID}/${seq}.json`, content: JSON.stringify(o) }
+  }
+  const msg = (files: PrFile[], prev: LogFile[] = []) => errs(files, prev).errors.join("\n")
+  it("accepts a valid v2 PR, alone and continuing from previous v2 (or v1) files", () => {
+    expect(errs([file(logV2(0)), file(logV2(1)), file(logV2(2, { final: true }))])).toEqual({ ok: true, errors: [], kind: "log" })
+    expect(errs([file(logV2(2))], [logV2(0), logV2(1)]).ok).toBe(true)
+    expect(errs([file(logV2(0, { curve: [] }))]).ok).toBe(true)
+  })
+  it("v1 files still validate", () => {
+    expect(errs([file(log(0)), file(log(1, { final: true }))]).ok).toBe(true)
+  })
+  it("rejects cu that decreases across seq, within the PR and against previous files", () => {
+    expect(msg([file(logV2(0)), file(logV2(1, { cu: 0.5, curve: [] }))])).toContain("cu decreased")
+    expect(msg([file(logV2(2, { cu: 1.5, curve: [] }))], [logV2(0), logV2(1)])).toContain("cu decreased")
+    expect(errs([file(logV2(1, { cu: 1, curve: [] }))], [logV2(0)]).ok).toBe(true) // equal is not a decrease
+  })
+  it("restores, lostCU and skippedUpdates never decrease across seq (restores stay on the record)", () => {
+    expect(errs([file(logV2(0, { restores: 1, lostCU: 0.5, skippedUpdates: 20 })), file(logV2(1, { restores: 2, lostCU: 0.5, skippedUpdates: 20 }))]).ok).toBe(true)
+    expect(msg([file(logV2(0, { restores: 2 })), file(logV2(1, { restores: 1 }))])).toContain("restores decreased")
+    expect(msg([file(logV2(1, { lostCU: 0.25 }))], [logV2(0, { lostCU: 0.5 })])).toContain("lostCU decreased")
+    expect(msg([file(logV2(0, { skippedUpdates: 5 })), file(logV2(1, { skippedUpdates: 4 }))])).toContain("skippedUpdates decreased")
+  })
+  it("bounds restores (integer 0..1000) and lostCU (finite >= 0); both are required in v2", () => {
+    expect(errs([file(logV2(0, { restores: 1000 }))]).ok).toBe(true)
+    for (const r of [1001, -1, 1.5]) expect(msg([file(logV2(0, { restores: r }))]), String(r)).toContain("restores")
+    for (const l of [-0.1]) expect(msg([file(logV2(0, { lostCU: l }))])).toContain("lostCU")
+    expect(msg([v2raw(o => { delete o.restores })])).toContain("restores")
+    expect(msg([v2raw(o => { delete o.lostCU })])).toContain("lostCU")
+    const f = file(logV2(0, { lostCU: 0.123456 }))
+    f.content = f.content.replace("0.123456", "1e999")
+    expect(msg([f])).toContain("lostCU")
+  })
+  it("rejects a curve of 65 points; 64 is fine", () => {
+    const curve = (n: number) => Array.from({ length: n }, (_, i) => pt(i / 100, i))
+    expect(msg([file(logV2(0, { curve: curve(65) }))])).toContain("at most 64")
+    expect(errs([file(logV2(0, { curve: curve(64) }))]).ok).toBe(true)
+  })
+  it("rejects a NaN, an infinity or a negative number in the curve", () => {
+    for (const [bad, why] of [["NaN", "invalid JSON"], ["1e999", "curve[0]"], ["-1e999", "curve[0]"], ["-0.5", "curve[0]"], ["null", "curve[0]"], ["\"0.1\"", "curve[0]"]]) {
+      const f = file(logV2(0, { curve: [pt(0.5, 200, 0.0123456)] }))
+      f.content = f.content.replace("0.0123456", bad!)
+      expect(msg([f]), bad).toContain(why)
+    }
+    // JSON.stringify turns NaN into null: still rejected.
+    expect(msg([file(logV2(0, { curve: [pt(0.5, 200, Number.NaN)] }))])).toContain("curve[0]")
+  })
+  it("rejects malformed curve points and v2 fields", () => {
+    expect(msg([v2raw(o => { o.curve[0].extra = 1 })])).toContain("unknown key")
+    expect(msg([v2raw(o => { delete o.curve[0].steps })])).toContain("curve[0]")
+    expect(msg([v2raw(o => { o.curve = {} })])).toContain("curve must be an array")
+    expect(msg([v2raw(o => { o.curve = [pt(0.9, 360), pt(0.5, 380)] })])).toContain("goes back")
+    expect(msg([v2raw(o => { o.curve = [pt(2, 360)] })])).toContain("ahead")
+    expect(msg([v2raw(o => { o.curve = [pt(0.5, 401)] })])).toContain("ahead")
+    expect(msg([v2raw(o => { o.cu = -1 })])).toContain("cu must be")
+    expect(msg([v2raw(o => { delete o.cu })])).toContain("cu must be")
+    expect(msg([v2raw(o => { o.condition = "B" })])).toContain("condition")
+    expect(msg([v2raw(o => { o.widths.extra = 1 })])).toContain("unknown key")
+    expect(msg([v2raw(o => { o.widths.hidden = 0 })])).toContain("widths.hidden")
+    expect(msg([v2raw(o => { o.widths.enc = 1e9 })])).toContain("widths.enc")
+    expect(msg([v2raw(o => { o.skippedUpdates = 1.5 })])).toContain("skippedUpdates")
+    expect(msg([v2raw(o => { o.note = "spam" })])).toContain("unknown key")
+  })
+  it("v2 keys are not allowed on a v1 file", () => {
+    expect(msg([withRawV1(o => { o.cu = 1 })])).toContain("unknown key")
+  })
+  it("the settings rules (keys, values, count) apply to v2", () => {
+    expect(msg([file(logV2(0, { settings: { "a-b": 1 } }))])).toContain("settings key")
+    expect(msg([file(logV2(0, { settings: Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`k${i}`, i])) }))])).toContain("at most 50")
+  })
+})
+
+const withRawV1 = (mut: (o: Record<string, any>) => void): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const o = JSON.parse(file(log(0)).content); mut(o)
+  return { path: `data/runs/${ID}/0.json`, content: JSON.stringify(o) }
+}
 
 describe("validateSessionPr", () => {
   it("accepts seq 0-2", () => {
@@ -107,7 +197,7 @@ describe("validateSessionPr", () => {
   })
   it("rejects invalid JSON and bad schema", () => {
     expect(errs([{ path: `data/runs/${ID}/0.json`, content: "{nope" }]).errors.join("\n")).toContain("invalid JSON")
-    expect(errs([file(log(0, { schemaVersion: 2 as 1 }))]).errors.join("\n")).toContain("schemaVersion")
+    expect(errs([file(log(0, { schemaVersion: 3 as 1 }))]).errors.join("\n")).toContain("schemaVersion")
   })
   const withRaw = (mut: (o: Record<string, any>) => void): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const o = JSON.parse(file(log(0)).content); mut(o)

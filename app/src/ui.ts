@@ -1,7 +1,8 @@
-// Plain DOM rendering. No framework: three tabs, a handful of labelled fields, two canvases and a table.
+// Plain DOM rendering. No framework: three tabs, a handful of labelled fields, three canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
-import { REPO, type ContributorStatus, type Knowledge } from "@blanktab/harness"
-import { buildLabel, fmtSettings, historyRows, siteLinks } from "./site"
+import { REPO, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
+import { appendPoints, ratioText, sparkline } from "./curve"
+import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel)
@@ -20,6 +21,40 @@ function painter(canvas: HTMLCanvasElement, w: number, h: number): (rgb: Uint8Ar
     }
     ctx.putImageData(img, 0, 0)
   }
+}
+
+/** Compute units as shown: three decimals below 10 CU, one above. */
+const fmtCU = (cu: number) => (cu < 10 ? cu.toFixed(3) : cu.toFixed(1))
+
+/** The loss curve: both series on one scale, the learner's guesses solid, the lazy guess dashed over them. */
+function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): void {
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return
+  const dpr = globalThis.devicePixelRatio || 1
+  const w = canvas.clientWidth || canvas.width, h = canvas.clientHeight || canvas.height
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr)
+    canvas.height = Math.round(h * dpr)
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+  const css = getComputedStyle(canvas)
+  const line = (pts: [number, number][], color: string, dash: number[]) => {
+    if (pts.length === 0) return
+    ctx.beginPath()
+    ctx.setLineDash(dash)
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1.75
+    ctx.lineJoin = "round"
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)))
+    if (pts.length === 1) ctx.lineTo(pts[0]![0] + 0.01, pts[0]![1])
+    ctx.stroke()
+  }
+  const { pred, base } = sparkline(points, w, h, 4)
+  // The lazy guess goes on top, dashed: where the learner is no better than it, the two lines coincide and both still show.
+  line(pred, css.getPropertyValue("--curve-pred").trim() || "teal", [])
+  line(base, css.getPropertyValue("--curve-base").trim() || "orange", [5, 4])
+  canvas.dataset.points = String(points.length)
 }
 
 /** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. */
@@ -65,10 +100,12 @@ function renderHistory(k: Knowledge): void {
     const tr = document.createElement("tr")
     const a = document.createElement("a")
     a.href = r.href; a.textContent = r.learnerId; a.target = "_blank"; a.rel = "noopener noreferrer"
-    const cells: [string, string | Node][] = [["Learner", a], ["Steps", r.steps], ["Final", r.final], ["Setting", r.setting], ["Host", r.host]]
+    const cells: [string, string | Node][] = [
+      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Loss ratio", r.lossRatio], ["Final", r.final], ["Setting", r.setting], ["Host", r.host],
+    ]
     for (const [i, [label, c]] of cells.entries()) {
       const td = document.createElement("td")
-      if (i === 1) td.className = "num"
+      if (i >= 1 && i <= 3) td.className = "num"
       td.dataset.label = label // the stacked mobile layout shows it
       td.append(c)
       tr.append(td)
@@ -81,9 +118,18 @@ function renderHistory(k: Knowledge): void {
 
 export interface Ui {
   knowledge(k: Knowledge): void
-  learner(o: { id: string; settings: Record<string, number | string>; sessionsBefore: number; lifetimeSteps: number }): void
-  frame(steps: number, periphery: Uint8Array, fovea: Uint8Array): void
-  steps(steps: number): void
+  learner(o: { id: string; sessionsBefore: number; lifetimeCU: number }): void
+  /** The settings the learner runs with (as the worker reports them). */
+  settings(settings: Record<string, number | string>): void
+  backend(label: string): void
+  frame(f: { steps: number; cu: number; stepsPerSec: number; periphery: Uint8Array; fovea: Uint8Array }): void
+  progress(steps: number, cu: number): void
+  /** `reset`: these points are the whole curve so far; otherwise they are added to it. */
+  curve(points: CurvePoint[], reset: boolean): void
+  /** The latest thing that happened to the learner (resumed, restored, moved to the CPU). */
+  status(message: string): void
+  /** A note in the life line that is not an error (e.g. a learner that cannot be resumed, a blocked database). */
+  notice(message: string): void
   contribution(s: ContributorStatus): void
   lifeComplete(id: string): void
   error(message: string): void
@@ -100,7 +146,9 @@ export function createUi(): Ui {
   const paintFovea = painter($("#fovea"), FOVEA.width, FOVEA.height)
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
+  const curveCanvas = byTest("curve") as HTMLCanvasElement
   let lifetime = 0
+  let curve: CurvePoint[] = []
   setupTabs()
   renderStatic()
 
@@ -111,20 +159,45 @@ export function createUi(): Ui {
         : `loaded (knowledgeSha ${k.manifest.knowledgeSha.slice(0, 12)}…)`
       renderHistory(k)
     },
-    learner({ id, settings, sessionsBefore, lifetimeSteps }) {
-      lifetime = lifetimeSteps
+    learner({ id, sessionsBefore, lifetimeCU }) {
+      lifetime = lifetimeCU
       byTest("learner-id").textContent = id
       byTest("sessions").textContent = `${sessionsBefore} session${sessionsBefore === 1 ? "" : "s"} before this one`
-      byTest("setting").textContent = fmtSettings(settings)
-      this.steps(0)
+      byTest("setting").textContent = "…"
+      byTest("backend").textContent = "choosing…"
+      byTest("rate").textContent = "…"
+      byTest("status").textContent = "newborn"
+      this.progress(0, 0)
+      this.curve([], true)
     },
-    frame(steps, periphery, fovea) {
+    settings(settings) {
+      byTest("setting").textContent = fmtSettings(settings)
+    },
+    backend(label) {
+      byTest("backend").textContent = label
+    },
+    frame({ steps, cu, stepsPerSec, periphery, fovea }) {
       paintPeriphery(periphery)
       paintFovea(fovea)
-      this.steps(steps)
+      this.progress(steps, cu)
+      byTest("rate").textContent = `${stepsPerSec.toFixed(1)} steps/s`
     },
-    steps(steps) {
-      byTest("steps").textContent = `${steps} of ${lifetime}`
+    progress(steps, cu) {
+      byTest("steps").textContent = String(steps)
+      byTest("cu").textContent = `${fmtCU(cu)} of ${fmt(lifetime)} CU`
+    },
+    curve(points, reset) {
+      curve = appendPoints(reset ? [] : curve, points)
+      drawCurve(curveCanvas, curve)
+      byTest("ratio").textContent = ratioText(curve)
+    },
+    status(message) {
+      byTest("status").textContent = message
+    },
+    notice(message) {
+      life.hidden = false
+      life.classList.remove("error")
+      life.textContent = message
     },
     contribution(s) {
       const waiting = s.pending > 0 ? ` (${s.pending} log${s.pending === 1 ? "" : "s"} waiting in this browser)` : ""

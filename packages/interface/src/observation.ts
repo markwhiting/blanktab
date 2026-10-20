@@ -21,5 +21,5 @@ export function emptyObservation(): Observation {
 // The learner-facing world surface. Nothing privileged crosses it.
 export interface WorldView { observe(): Observation; act(a: Action): void }
 
-// The learner surface the harness drives.
-export interface Learner { step(o: Observation): Action }
+// The learner surface the harness drives. Async because GPU learners await readback of policy logits.
+export interface Learner { step(o: Observation): Promise<Action> }

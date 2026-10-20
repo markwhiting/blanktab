@@ -10,9 +10,9 @@ export function stubStorage(init: Record<string, string> = {}): Storage {
   }
 }
 
-import type { LogFile } from "../src/log"
+import type { LogFileV1 } from "../src/log"
 
-export const mkFile = (learnerId: string, seq: number, over: Partial<LogFile> = {}): LogFile => ({
+export const mkFile = (learnerId: string, seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
   schemaVersion: 1, learnerId, seq, codeSha: "dev", knowledgeSha: "0".repeat(64),
   writtenAt: new Date(0).toISOString(), stepsTotal: (seq + 1) * 500, settings: {},
   hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 }, sessionsSeenAtBirth: 0, final: false, ...over,

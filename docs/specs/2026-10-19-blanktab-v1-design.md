@@ -132,7 +132,7 @@ The key set and magnitudes are config entries versioned with `schemaVersion`, so
 
 There is no external reward. Goal-directed behaviour is out of scope for v1 (§11).
 
-### 5.5 Architecture and plasticity tiers [agent; resolves Q13]
+### 5.5 Architecture and plasticity tiers [agent; resolves Q13; **amended by 0013**: residual predictor, head lr scale, relative curiosity, TBPTT-1]
 - **Encoders:** two small conv nets, periphery → 128-d and fovea → 128-d. Convs are implemented as im2col plus matmul.
 - **Core:** a GRU with a 256-d state. This is the *working memory* tier.
 - **Heads:** frame predictor (MLP decoders), policy, value.

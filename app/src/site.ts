@@ -13,7 +13,13 @@ export const fmtSettings = (settings: Record<string, number | string>) => {
   return entries.length ? entries.map(([k, v]) => `${k} = ${fmt(v)}`).join(", ") : "none"
 }
 
-export interface HistoryRow { learnerId: string; href: string; steps: string; final: string; setting: string; host: string }
+export interface HistoryRow {
+  learnerId: string; href: string; steps: string; final: string; setting: string; host: string
+  /** Compute lived (CU) and the last loss ratio (predLoss ÷ the lazy guess's), "—" for a v1 (flailer) learner. */
+  cu: string; lossRatio: string
+}
+
+const orDash = (v: number | null | undefined) => (typeof v === "number" ? fmt(v) : "—")
 
 /**
  * Past sessions, newest first by lastWrittenAt (ISO strings sort as times). Rows without it (older summaries)
@@ -38,6 +44,8 @@ export function historyRows(summary: Summary, repo: Repo): HistoryRow[] {
       final: s.final ? "yes" : "no",
       setting: fmtSettings(s.settings),
       host: `${s.hostSig.cores} cores · ${s.hostSig.webgpu ? "webgpu" : "no webgpu"}`,
+      cu: orDash(s.cu),
+      lossRatio: orDash(s.lossRatio),
     }))
 }
 

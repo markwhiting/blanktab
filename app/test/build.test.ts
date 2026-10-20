@@ -1,10 +1,11 @@
-// The deploy contract: the production build ignores ?testLifetime, ships no knowledge/, and stamps CODE_SHA.
+// The deploy contract: the production build ignores every ?test* knob, ships no knowledge/, and stamps CODE_SHA.
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { build } from "vite"
+import { TEST_KNOBS } from "../src/params"
 
 const APP = fileURLToPath(new URL("..", import.meta.url))
 const SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -30,14 +31,20 @@ describe("production build", { timeout: 120_000 }, () => {
   })
   afterAll(() => rmSync(out, { recursive: true, force: true }))
 
-  it("drops the test-only knobs", () => {
+  it("drops every test-only knob", () => {
     expect(js.length).toBeGreaterThan(0)
+    expect(TEST_KNOBS.length).toBeGreaterThan(0)
+    for (const knob of TEST_KNOBS) expect(js).not.toContain(knob)
+    expect(js).not.toMatch(/["'`]test[A-Z][A-Za-z]*["'`]/) // nor any other ?test… knob name
     expect(js).not.toContain("testLifetime")
-    expect(js).not.toContain("testStepsPerSecond")
   })
   it("ships no knowledge/ of its own and builds the worker", () => {
     expect(files(out).some(f => f.includes(`${join(out, "knowledge")}`))).toBe(false)
     expect(files(out).filter(f => /worker.*\.js$/.test(f))).toHaveLength(1)
+  })
+  it("the worker carries the real learner on WebGPU (its WGSL kernels), not the flailer", () => {
+    const worker = files(out).filter(f => /worker.*\.js$/.test(f)).map(f => readFileSync(f, "utf8")).join("\n")
+    expect(worker).toContain("@compute")
   })
   it("stamps CODE_SHA", () => {
     expect(js).toContain(SHA)

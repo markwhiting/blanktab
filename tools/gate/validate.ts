@@ -58,6 +58,11 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   const prevLast = prevSorted[prevSorted.length - 1]
   let expected = prevLast ? prevLast.seq + 1 : 0
   let lastSteps = prevLast ? prevLast.stepsTotal : -Infinity
+  // From schema v2 on, these never decrease across seq (v1 files carry none and are skipped). restores, lostCU and
+  // skippedUpdates keep restores on the record: a restore cannot hide the learning it threw away.
+  const MONOTONIC = ["cu", "restores", "lostCU", "skippedUpdates"] as const
+  const lastV2 = Object.fromEntries(MONOTONIC.map(k => [k, -Infinity])) as Record<(typeof MONOTONIC)[number], number>
+  for (const p of prevSorted) if (p.schemaVersion === 2) for (const k of MONOTONIC) lastV2[k] = Math.max(lastV2[k], p[k])
   const reported = new Set<number>()
   for (const { path, log } of sorted) {
     if (reported.has(log.seq)) continue // duplicate already reported
@@ -69,6 +74,12 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
     expected++
     if (log.stepsTotal < lastSteps) errors.push(`${path}: stepsTotal decreased (${log.stepsTotal} < ${lastSteps})`)
     lastSteps = Math.max(lastSteps, log.stepsTotal)
+    if (log.schemaVersion === 2) {
+      for (const k of MONOTONIC) {
+        if (log[k] < lastV2[k]) errors.push(`${path}: ${k} decreased (${log[k]} < ${lastV2[k]})`)
+        lastV2[k] = Math.max(lastV2[k], log[k])
+      }
+    }
   }
 
   // final: at most one, and it has the highest seq
