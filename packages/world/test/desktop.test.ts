@@ -48,14 +48,13 @@ describe("desktop: privileged leakage (Review Focus 1)", () => {
 describe("desktop: construction", () => {
   it("defaults to every implemented room, starting at the first", () => {
     const w = makeWorld(1)
-    expect(w.rooms()).toEqual(["crib", "toys", "hideseek"])
+    expect(w.rooms()).toEqual(["crib", "toys", "hideseek", "places"])
     expect(w.state().room).toBe("crib")
   })
   it("rejects duplicate kinds, unknown/unimplemented kinds, empty lists and a start outside the list", () => {
     const canvas = createCanvas(WORLD.width, WORLD.height)
     expect(() => createWorld({ seed: 1, canvas, rooms: ["crib", "crib"] })).toThrow(RangeError)
     expect(() => createWorld({ seed: 1, canvas, rooms: [] })).toThrow(RangeError)
-    expect(() => createWorld({ seed: 1, canvas, rooms: ["places"] })).toThrow(RangeError)
     expect(() => createWorld({ seed: 1, canvas, rooms: ["nope" as "crib"] })).toThrow(RangeError)
     expect(() => createWorld({ seed: 1, canvas, rooms: ["crib"], start: "toys" })).toThrow(RangeError)
   })

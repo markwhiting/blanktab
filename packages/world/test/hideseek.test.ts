@@ -451,7 +451,7 @@ describe("hideseek persistence (Review Focus 2) and determinism", () => {
     expect(run(1)).toEqual(run(1))
     expect(run(1).obs).not.toEqual(run(2).obs)
   })
-  it("is a default room after toys", () => {
-    expect(makeWorld(1).rooms()).toEqual(["crib", "toys", "hideseek"])
+  it("is a default room after toys, before places", () => {
+    expect(makeWorld(1).rooms()).toEqual(["crib", "toys", "hideseek", "places"])
   })
 })

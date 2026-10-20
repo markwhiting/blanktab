@@ -12,6 +12,7 @@ import {
 import { cribRoom } from "./rooms/crib"
 import { toysRoom } from "./rooms/toys"
 import { hideseekRoom } from "./rooms/hideseek"
+import { placesRoom } from "./rooms/places"
 
 /** Privileged; harness only. */
 export interface TraceEvent {
@@ -51,7 +52,7 @@ export interface CanvasLike {
 }
 
 /** Built-in rooms. A kind is "implemented" once it has an entry here. */
-const FACTORIES: Partial<Record<RoomKind, RoomFactory>> = { crib: cribRoom, toys: toysRoom, hideseek: hideseekRoom }
+const FACTORIES: Partial<Record<RoomKind, RoomFactory>> = { crib: cribRoom, toys: toysRoom, hideseek: hideseekRoom, places: placesRoom }
 
 const DOWN = WORLD.width / PERIPHERY.width // 4
 const ICON = { x0: 4, size: 12, gap: 4, y: WORLD.height - TASKBAR_HEIGHT + 2 } as const
