@@ -20,3 +20,4 @@ playwright-report/
 # Local agent harness state
 .claude/scheduled_tasks.lock
 .superpowers/
+.worktrees/
