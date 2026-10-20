@@ -18,6 +18,12 @@ export interface Queue {
   latest(learnerId: string): Promise<LogFile | undefined>
   /** Every file of the learner, sent or not, by seq (the page redraws a resumed learner's curve from them). */
   files(learnerId: string): Promise<LogFile[]>
+  /**
+   * Deletes the sent files of every learner whose final file has been sent: their lives are over and on GitHub.
+   * The final file itself stays, so latest() still says the life is over (its learnerId is never lived again).
+   * Resolves to the number of files deleted.
+   */
+  prune(): Promise<number>
 }
 
 interface Row { learnerId: string; seq: number; sent: boolean; file: LogFile }
@@ -63,6 +69,17 @@ export async function openQueue(idb: IDBFactory): Promise<Queue> {
     },
     async files(learnerId) {
       return (await rows()).filter(r => r.learnerId === learnerId).sort((a, b) => a.seq - b.seq).map(r => r.file)
+    },
+    async prune() {
+      const tx = (await openDb(idb)).transaction(OUTBOX, "readwrite")
+      const store = tx.objectStore(OUTBOX)
+      const finished = done(tx)
+      const all = await result(store.getAll() as IDBRequest<Row[]>)
+      const over = new Set(all.filter(r => r.sent && r.file.final).map(r => r.learnerId))
+      const gone = all.filter(r => over.has(r.learnerId) && r.sent && !r.file.final)
+      for (const r of gone) store.delete([r.learnerId, r.seq])
+      await finished
+      return gone.length
     },
   }
 }

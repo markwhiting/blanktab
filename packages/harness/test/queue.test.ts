@@ -40,4 +40,16 @@ describe("queue", () => {
     await expect(q.put(mkFile(A, 0, { stepsTotal: 1 }))).rejects.toThrow()
     expect((await q.pending())[0]!.stepsTotal).toBe(500)
   })
+  it("prune deletes the sent files of learners whose final file was sent, keeping that final file", async () => {
+    const C = "lrn_cccccccccccccccc"
+    const q = await openQueue(new IDBFactory())
+    for (const f of [mkFile(A, 0), mkFile(A, 1), mkFile(A, 2, { final: true }), mkFile(B, 0), mkFile(B, 1, { final: true }), mkFile(C, 0), mkFile(C, 1)]) await q.put(f)
+    for (const [id, seq] of [[A, 0], [A, 1], [A, 2], [B, 0], [C, 0], [C, 1]] as const) await q.markSent(id, seq)
+    expect(await q.prune()).toBe(2)
+    expect((await q.files(A)).map(f => f.seq)).toEqual([2]) // A's life is over and on GitHub
+    expect((await q.latest(A))?.final).toBe(true) // ...and still known to be over
+    expect((await q.files(B)).map(f => f.seq)).toEqual([0, 1]) // B's final file is not sent yet
+    expect((await q.files(C)).map(f => f.seq)).toEqual([0, 1]) // C is still living
+    expect(await q.prune()).toBe(0)
+  })
 })
