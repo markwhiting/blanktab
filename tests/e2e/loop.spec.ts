@@ -123,7 +123,7 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   await expect(panel).toBeHidden()
   expect(githubCalls()[0]?.url).toBe("https://api.github.com/user") // checkToken ran before the token was used
 
-  // The life goes final below 1 CU (2^0), so its one log file is the final one: data/runs/<id>/0.json, in one PR.
+  // The life goes final below the first crossing (8 CU = 2^3), so its one log file is the final one: data/runs/<id>/0.json, in one PR.
   await expect(page.getByText("This learner's life is complete")).toBeVisible({ timeout: 30_000 })
   const pulls = () => githubCalls().filter(r => r.method === "POST" && r.url === `https://api.github.com/repos/${UP}/pulls` && JSON.parse(r.body ?? "{}").head === `markwhiting:run/${id}`)
   await expect.poll(() => pulls().length, { timeout: 30_000 }).toBe(1)
@@ -183,19 +183,19 @@ test("knowledge unreachable: the page says offline and the learner runs anyway",
 
 test("cadence: with a token, a whole life goes to GitHub as one commit, sent when the final log is queued", async ({ page }) => {
   const { gh, githubCalls, commits } = await setup(page, { knowledge: "ok", token: TOKEN })
-  await page.goto(`/learner/?${KNOBS}&testLifetimeCU=2.5&testStepsPerSecond=300`) // logs at 1 and 2 CU (not final) and the final one
+  await page.goto(`/learner/?${KNOBS}&testLifetimeCU=8.5&testStepsPerSecond=300`) // a log at 8 CU (not final) and the final one
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
-  await expect.poll(() => cuLived(page), { timeout: 60_000 }).toBeGreaterThan(2.05) // two non-final logs are queued by now
-  expect(githubCalls().filter(r => r.method !== "GET")).toEqual([]) // ...and nothing was written for them
+  await expect.poll(() => cuLived(page), { timeout: 60_000 }).toBeGreaterThan(8.05) // the non-final log is queued by now
+  expect(githubCalls().filter(r => r.method !== "GET")).toEqual([]) // ...and nothing was written for it
   await expect(page.getByText("This learner's life is complete")).toBeVisible({ timeout: 60_000 })
   await expect.poll(() => gh.pulls.length, { timeout: 30_000 }).toBe(1)
   expect(commits()).toHaveLength(1)
-  expect(gh.prFiles(gh.pulls[0]!)).toEqual([0, 1, 2].map(s => `data/runs/${id}/${s}.json`))
-  const files = [0, 1, 2].map(s => gh.file(UP, `run/${id}`, `data/runs/${id}/${s}.json`) as { cu: number; final: boolean })
-  expect(files.map(f => f.final)).toEqual([false, false, true])
-  expect(files[0]!.cu).toBeGreaterThanOrEqual(1)
-  expect(files[1]!.cu).toBeGreaterThanOrEqual(2)
+  expect(gh.prFiles(gh.pulls[0]!)).toEqual([0, 1].map(s => `data/runs/${id}/${s}.json`))
+  const files = [0, 1].map(s => gh.file(UP, `run/${id}`, `data/runs/${id}/${s}.json`) as { cu: number; final: boolean })
+  expect(files.map(f => f.final)).toEqual([false, true])
+  expect(files[0]!.cu).toBeGreaterThanOrEqual(8)
+  expect(files[1]!.cu).toBeGreaterThanOrEqual(8.5)
 })
 
 test("token stored: a small 'change token' control clears it and brings the panel back", async ({ page }) => {

@@ -2,6 +2,7 @@
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, done, openDb, result } from "./db"
 import { KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
+import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
  * Where a learner's life stands: enough to resume it after a reload. Every log file is queued together with the
@@ -51,20 +52,46 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (!("learnerState" in r)) fail("no learnerState")
 }
 
+/**
+ * The record a checkpoint is stored as: its learner state packed (pack.ts: the replay frames gzip-compressed).
+ * Done before the transaction opens, since an IndexedDB transaction does not survive an await on anything else.
+ */
+export async function toRecord<S>(c: Checkpoint<S>): Promise<Checkpoint<unknown>> {
+  return { ...c, learnerState: await packLearnerState(c.learnerState) }
+}
+
 export async function saveCheckpoint<S>(idb: IDBFactory, c: Checkpoint<S>): Promise<void> {
+  const record = await toRecord(c)
   const tx = (await openDb(idb)).transaction(CHECKPOINTS, "readwrite")
   const finished = done(tx)
-  tx.objectStore(CHECKPOINTS).put(c)
+  tx.objectStore(CHECKPOINTS).put(record)
   await finished
 }
 
-/** The learner's latest checkpoint, or undefined. Throws RangeError for a malformed record. */
-export async function loadCheckpoint<S = LearnerState>(idb: IDBFactory, learnerId: string): Promise<Checkpoint<S> | undefined> {
+/** A learner's checkpoint record as stored (learner state still packed), or undefined. Not checked. */
+export async function readCheckpointRecord(idb: IDBFactory, learnerId: string): Promise<unknown> {
   const db = await openDb(idb)
-  const c = await result(db.transaction(CHECKPOINTS).objectStore(CHECKPOINTS).get(learnerId) as IDBRequest<unknown>)
+  return result(db.transaction(CHECKPOINTS).objectStore(CHECKPOINTS).get(learnerId) as IDBRequest<unknown>)
+}
+
+/** The learnerIds that have a checkpoint (without reading any). */
+export async function checkpointIds(idb: IDBFactory): Promise<string[]> {
+  const db = await openDb(idb)
+  return (await result(db.transaction(CHECKPOINTS).objectStore(CHECKPOINTS).getAllKeys())).filter((k): k is string => typeof k === "string")
+}
+
+/** The learner's latest checkpoint, or undefined. Throws RangeError for a malformed record (or undecodable frames). */
+export async function loadCheckpoint<S = LearnerState>(idb: IDBFactory, learnerId: string): Promise<Checkpoint<S> | undefined> {
+  const c = await readCheckpointRecord(idb, learnerId)
   if (c === undefined) return undefined
   checkCheckpoint(c, learnerId)
-  return c as Checkpoint<S>
+  let learnerState: unknown
+  try {
+    learnerState = await unpackLearnerState(c.learnerState)
+  } catch (e) {
+    throw new RangeError(`checkpoint for ${learnerId}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
+  }
+  return { ...c, learnerState } as Checkpoint<S>
 }
 
 /** Whether the learner has a checkpoint, without reading it (a GPU learner's is tens of MB). */

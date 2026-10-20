@@ -14,8 +14,10 @@ export const DEFAULT_MAX_STEPS_PER_SEC = 30
 export const RESTORE_AFTER_SKIPS = 20
 /** Restores from one checkpoint before the life is given up as failing (no new checkpoint in between). */
 export const MAX_RESTORES_PER_CHECKPOINT = 3
-/** Two minutes: a GPU checkpoint is tens of MB, too much to write at every sleep. */
-export const DEFAULT_CHECKPOINT_EVERY_MS = 120_000
+/** Five minutes: a GPU checkpoint is tens of MB, too much to write at every sleep. */
+export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
+/** The first log crossing, 2^3 CU: a young life writes no log files (and their checkpoints) in a burst. */
+export const FIRST_LOG_CU = 8
 
 export interface SessionConfig {
   learnerId: string
@@ -97,9 +99,9 @@ export function createPacer(maxStepsPerSec: number, clock: Clock = realClock): (
   }
 }
 
-/** The smallest power of two above `cu` (the next log crossing), at least 1 = 2^0. */
+/** The smallest power of two above `cu` (the next log crossing), at least FIRST_LOG_CU = 2^3. */
 export function nextCrossing(cu: number): number {
-  let t = 1
+  let t = FIRST_LOG_CU
   while (t <= cu) t *= 2
   return t
 }
@@ -139,7 +141,7 @@ function birthOf(state: unknown, id: string): { seed: number; widths: Widths; se
  *   both are finite. A checkpoint is saved then if `checkpointEveryMs` have passed since the last save (on the
  *   injected clock); one that falls due during skips waits for the next clean sleep. A reload or restore therefore
  *   loses up to `checkpointEveryMs` of learning.
- * - A log file (v2) is queued each time CU crosses the next 2^k (k = 0, 1, ...) and at the end of life, carrying the
+ * - A log file (v2) is queued each time CU crosses the next 2^k (k = 3, 4, ...: FIRST_LOG_CU) and at the end of life, carrying the
  *   curve points since the previous file. Each one is queued in one transaction with the checkpoint of that moment,
  *   so the checkpoint is never behind the latest log file: resuming never reuses a seq or goes back in steps or CU.
  * - No checkpoint is saved (and so no non-final log is written) while the learner has skipped updates outstanding;

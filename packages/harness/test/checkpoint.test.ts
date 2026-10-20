@@ -4,6 +4,11 @@ import { deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type C
 import { openQueue } from "../src/queue"
 import { openDb } from "../src/db"
 import { mkFile } from "./helpers"
+import { emptyObservation, PERIPHERY, decodeMove, type Action, type Observation } from "@blanktab/interface"
+import { createCpuBackend } from "@blanktab/tensor"
+import { DEFAULT_SETTINGS, createLearner, type LearnerState } from "@blanktab/learner"
+import { CHECKPOINTS, result } from "../src/db"
+import { packLearnerState, unpackLearnerState } from "../src/pack"
 
 const A = "lrn_aaaaaaaaaaaaaaaa", B = "lrn_bbbbbbbbbbbbbbbb"
 const cp = (learnerId: string, steps: number): Checkpoint<{ w: Float32Array }> => ({
@@ -117,5 +122,119 @@ describe("the database connection", () => {
     expect(await loadCheckpoint(idb, A)).toBeUndefined()
     await saveCheckpoint(idb, cp(A, 2))
     expect((await loadCheckpoint(idb, A))?.steps).toBe(2)
+  })
+})
+
+/** A tiny stream whose frames depend on the actions (a bright patch the cursor moves). */
+function stream() {
+  let x = 40, y = 25, t = 0
+  return {
+    observe(): Observation {
+      const o = emptyObservation()
+      o.periphery.fill(30 + (t++ % 5))
+      o.periphery.fill(220, (y * PERIPHERY.width + x) * 3, (y * PERIPHERY.width + x) * 3 + 3)
+      o.fovea.fill(x % 7 * 30)
+      o.cursor = { x: x / (PERIPHERY.width - 1), y: y / (PERIPHERY.height - 1) }
+      o.buttonHeld = t % 3 === 0
+      return o
+    },
+    act(a: Action) {
+      const { dx, dy } = decodeMove(a.move)
+      x = Math.min(PERIPHERY.width - 1, Math.max(0, x + Math.sign(dx)))
+      y = Math.min(PERIPHERY.height - 1, Math.max(0, y + Math.sign(dy)))
+    },
+  }
+}
+const TINY = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
+const rawRecord = async (idb: IDBFactory, id: string) =>
+  result((await openDb(idb)).transaction(CHECKPOINTS).objectStore(CHECKPOINTS).get(id) as IDBRequest<Checkpoint<Record<string, unknown>>>)
+const learnerCp = (learnerState: LearnerState): Checkpoint => ({ ...cp(A, learnerState.stats.steps), seq: 0, learnerState })
+
+describe("checkpoint frames (write volume)", { timeout: 60_000 }, () => {
+  async function lived(steps: number) {
+    const world = stream()
+    const l = await createLearner({ backend: createCpuBackend(), seed: 3, widths: TINY, settings: { ...DEFAULT_SETTINGS, bufferSize: 100, replayPerSleep: 4 } })
+    for (let i = 0; i < steps; i++) {
+      world.act(await l.step(world.observe()))
+      if (i % 25 === 24) await l.sleep()
+    }
+    return { l, world }
+  }
+
+  it("stores the replay frames gzip-compressed, once per distinct observation, and loads the state back exactly", async () => {
+    const { l } = await lived(120)
+    const state = await l.save()
+    l.dispose()
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, learnerCp(state))
+    const stored = (await rawRecord(idb, A))!.learnerState
+    const frames = stored.frames as { codec: string; count: number; data: Uint8Array }
+    expect(frames.codec).toBe("gzip")
+    expect(frames.count).toBe(state.replay.length + 1) // the transitions share their frames: n + 1 observations
+    expect(frames.data.byteLength).toBeLessThan((frames.count * (state.replay[0]!.obs.periphery.length + state.replay[0]!.obs.fovea.length)) / 10)
+    const back = (await loadCheckpoint(idb, A))!.learnerState
+    expect(back).toEqual(state)
+    for (let i = 1; i < back.replay.length; i++) expect(back.replay[i]!.obs).toBe(back.replay[i - 1]!.next)
+    expect(back.last!.obs).toBe(back.replay.at(-1)!.next)
+  })
+
+  it("a learner resumed from a stored (packed) checkpoint goes on bit-identically to one resumed from its unstored state", async () => {
+    const { l, world } = await lived(60)
+    const state = await l.save()
+    l.dispose()
+    const idb = new IDBFactory()
+    await (await openQueue(idb)).put({ ...mkFile(A, 0) }, { save: learnerCp(state) }) // the log + checkpoint path packs too
+    expect(((await rawRecord(idb, A))!.learnerState.frames as { codec: string }).codec).toBe("gzip")
+    const fromDb = await createLearner({ backend: createCpuBackend(), state: (await loadCheckpoint(idb, A))!.learnerState })
+    const direct = await createLearner({ backend: createCpuBackend(), state })
+    for (let i = 0; i < 60; i++) {
+      const o = world.observe()
+      const [a, b] = [await fromDb.step(o), await direct.step(o)]
+      expect(a).toEqual(b)
+      world.act(a)
+      if (i % 25 === 24) { await fromDb.sleep(); await direct.sleep() }
+    }
+    expect(await fromDb.save()).toEqual(await direct.save())
+    fromDb.dispose()
+    direct.dispose()
+  })
+
+  it("without CompressionStream the frames are stored raw, and still load exactly", async () => {
+    const { l } = await lived(30)
+    const state = await l.save()
+    l.dispose()
+    const saved = globalThis.CompressionStream
+    try {
+      Object.defineProperty(globalThis, "CompressionStream", { value: undefined, configurable: true, writable: true })
+      const idb = new IDBFactory()
+      await saveCheckpoint(idb, learnerCp(state))
+      expect(((await rawRecord(idb, A))!.learnerState.frames as { codec: string }).codec).toBe("raw")
+      expect((await loadCheckpoint(idb, A))!.learnerState).toEqual(state)
+    } finally {
+      Object.defineProperty(globalThis, "CompressionStream", { value: saved, configurable: true, writable: true })
+    }
+  })
+
+  it("checkpoints written before packing (raw learner states) still load; anything that is not a learner state is stored as is", async () => {
+    const { l } = await lived(10)
+    const state = await l.save()
+    l.dispose()
+    expect(await unpackLearnerState(state)).toBe(state)
+    for (const odd of [{}, null, { replay: [{ obs: 1 }], last: null }, { w: Float32Array.of(1) }]) expect(await packLearnerState(odd)).toBe(odd)
+    expect(await unpackLearnerState(await packLearnerState(state))).toEqual(state)
+  })
+
+  it("a corrupt packed frame buffer is a RangeError on load", async () => {
+    const { l } = await lived(30)
+    const state = await l.save()
+    l.dispose()
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, learnerCp(state))
+    const rec = (await rawRecord(idb, A))!
+    const frames = rec.learnerState.frames as { data: Uint8Array }
+    const tx = (await openDb(idb)).transaction(CHECKPOINTS, "readwrite")
+    tx.objectStore(CHECKPOINTS).put({ ...rec, learnerState: { ...rec.learnerState, frames: { ...frames, data: frames.data.slice(0, 20) } } })
+    await new Promise(r => { tx.oncomplete = r })
+    await expect(loadCheckpoint(idb, A)).rejects.toThrow(RangeError)
   })
 })

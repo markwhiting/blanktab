@@ -1,4 +1,4 @@
-import type { Checkpoint } from "./checkpoint"
+import { toRecord, type Checkpoint } from "./checkpoint"
 import { CHECKPOINTS, OUTBOX, done, openDb, result } from "./db"
 import type { LogFile } from "./log"
 
@@ -30,12 +30,13 @@ export async function openQueue(idb: IDBFactory): Promise<Queue> {
     async put(f, checkpoint) {
       const target = checkpoint === undefined ? undefined : "save" in checkpoint ? checkpoint.save.learnerId : checkpoint.remove
       if (target !== undefined && target !== f.learnerId) throw new Error(`a checkpoint of learner ${target} cannot travel with a log of ${f.learnerId}`)
+      const record = checkpoint && "save" in checkpoint ? await toRecord(checkpoint.save) : undefined // before the transaction
       const tx = (await openDb(idb)).transaction(checkpoint ? [OUTBOX, CHECKPOINTS] : [OUTBOX], "readwrite")
       const row: Row = { learnerId: f.learnerId, seq: f.seq, sent: false, file: f }
       const finished = done(tx)
       tx.objectStore(OUTBOX).add(row).onerror = () => { /* surfaces via tx.onabort */ }
-      if (checkpoint && "save" in checkpoint) tx.objectStore(CHECKPOINTS).put(checkpoint.save)
-      else if (checkpoint) tx.objectStore(CHECKPOINTS).delete(checkpoint.remove)
+      if (record) tx.objectStore(CHECKPOINTS).put(record)
+      else if (checkpoint && "remove" in checkpoint) tx.objectStore(CHECKPOINTS).delete(checkpoint.remove)
       await finished
     },
     async pending() {
