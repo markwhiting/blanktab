@@ -38,18 +38,19 @@ const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
   (await l.readParams()).every((p) => p.every(Number.isFinite))
 
 describe("learner", () => {
-  // Several seeds must pass (task brief + controller ruling): after 1,500 steps the action-conditioned predictor
-  // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha).
+  // Several seeds must pass (task brief + controller rulings): after 3,000 steps the action-conditioned predictor
+  // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha). Measured predLoss/baselineLoss at
+  // 3,000 steps (default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
   for (const seed of [1, 2, 3]) {
-    it(`learns to predict the next frame better than copy-last (seed ${seed})`, async () => {
-      const { learner } = await run({ seed, steps: 1500 })
+    it(`learns to predict the next frame better than copy-last after 3000 steps (seed ${seed})`, async () => {
+      const { learner } = await run({ seed, steps: 3000 })
       const s = learner.stats()
       expect(Number.isFinite(s.predLoss) && Number.isFinite(s.baselineLoss)).toBe(true)
       expect(s.predLoss).toBeLessThan(s.baselineLoss)
-      expect(s.steps).toBe(1500)
+      expect(s.steps).toBe(3000)
       expect(s.skippedUpdates).toBe(0)
       learner.dispose()
-    }, 60_000)
+    }, 90_000) // ~18-20 s each on an M-series CPU; generous for slower CI machines
   }
 
   it("is deterministic: same seed and stream give identical actions and losses", async () => {
