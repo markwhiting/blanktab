@@ -1,7 +1,7 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, done, openDb, result } from "./db"
-import type { CurvePoint } from "./log"
+import { KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
 
 /**
  * Where a learner's life stands: enough to resume it after a reload. Every log file is queued together with the
@@ -23,6 +23,12 @@ export interface Checkpoint<S = LearnerState> {
   lostCU: number
   /** Skipped updates thrown away by those restores (added to the learner's own count in LogFileV2.skippedUpdates). */
   lostSkips: number
+  /**
+   * Birth facts the log files repeat (LogFileV2.knowledgeSha, sessionsSeenAtBirth), so a life resumed before its first
+   * log keeps them. Absent in checkpoints written before they were added.
+   */
+  knowledgeSha?: string
+  sessionsSeenAtBirth?: number
   learnerState: S
 }
 
@@ -40,6 +46,8 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (!isNonNeg(r.cu) || !isNonNeg(r.lostCU)) fail("cu and lostCU must be finite numbers >= 0")
   if (!isNonNegInt(r.restores) || !isNonNegInt(r.lostSkips)) fail("restores and lostSkips must be non-negative integers")
   if (!Array.isArray(r.curveTail)) fail("curveTail must be an array")
+  if (r.knowledgeSha !== undefined && !(typeof r.knowledgeSha === "string" && KNOWLEDGE_SHA_RE.test(r.knowledgeSha))) fail("knowledgeSha must be 64 lowercase hex chars")
+  if (r.sessionsSeenAtBirth !== undefined && !isNonNegInt(r.sessionsSeenAtBirth)) fail("sessionsSeenAtBirth must be a non-negative integer")
   if (!("learnerState" in r)) fail("no learnerState")
 }
 

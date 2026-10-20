@@ -499,7 +499,7 @@ describe("learner", () => {
       expect(be.stats.liveBuffers).toBe(afterFirstSleep)
       learner.dispose()
       expect(be.stats.liveBuffers).toBe(0)
-    }, 25_000)
+    }, 60_000) // ~26-28 s on a loaded M-series CPU (controller ruling: 60 s)
 
     it("consecutiveSkips counts skipped updates in a row, and restoring the last checkpoint clears it", async () => {
       // Same white-box poisoning as the skip test above: a NaN in headP's bias makes every prediction loss non-finite.

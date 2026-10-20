@@ -50,8 +50,8 @@ async function hostSig(): Promise<LifeConfig["hostSig"]> {
 }
 
 /**
- * Birth facts are fixed for a learner's whole life. A resumed learner's seed, widths and learner settings come from
- * its checkpoint (the session ignores these); its knowledgeSha, sessionsSeenAtBirth and speed cap from its latest log.
+ * Birth facts are fixed for a learner's whole life. A resumed learner's seed, widths, learner settings, knowledgeSha
+ * and sessionsSeenAtBirth come from its checkpoint (the session prefers them to these); its speed cap from its latest log.
  */
 function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConfig, "knowledgeSha" | "sessionsSeenAtBirth" | "learnerSettings" | "maxStepsPerSec"> {
   const fresh = birthSettings(chooseSettings(knowledge, Math.random))

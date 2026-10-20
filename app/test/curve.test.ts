@@ -18,12 +18,17 @@ describe("sparkline", () => {
     expect(s.base[0]![1]).toBeCloseTo(38 - (0.1 / 0.3) * 36)
     expect(s.pred[1]![1]).toBeCloseTo(38 - (0.2 / 0.3) * 36)
   })
-  it("one point, or flat losses, sit in the middle instead of dividing by zero", () => {
+  it("x starts at birth (0 CU), not at the first point", () => {
+    const s = sparkline([pt(5, 0.4, 0.2), pt(10, 0.3, 0.2)], 100, 40, 2)
+    expect(s.pred.map(p => p[0])).toEqual([50, 98])
+  })
+  it("one point sits at its CU, flat losses mid-height, all without dividing by zero", () => {
     const one = sparkline([pt(3, 0.2, 0.2)], 100, 40, 2)
-    expect(one.pred).toEqual([[50, 20]])
-    expect(one.base).toEqual([[50, 20]])
+    expect(one.pred).toEqual([[98, 20]])
+    expect(one.base).toEqual([[98, 20]])
     const flat = sparkline([pt(1, 0.2, 0.2), pt(1, 0.2, 0.2)], 100, 40, 2)
-    for (const [x, y] of [...flat.pred, ...flat.base]) { expect(Number.isFinite(x)).toBe(true); expect(y).toBe(20) }
+    for (const [x, y] of [...flat.pred, ...flat.base]) { expect(x).toBe(98); expect(y).toBe(20) }
+    expect(sparkline([pt(0, 0.2, 0.3)], 100, 40, 2).pred[0]![0]).toBe(50)
   })
 })
 
@@ -31,10 +36,12 @@ describe("ratioText", () => {
   it("says nothing until there is a point", () => {
     expect(ratioText([])).toBe("no guesses measured yet")
   })
-  it("gives the last point's predLoss / baselineLoss in plain words", () => {
-    expect(ratioText([pt(1, 0.5, 0.5), pt(2, 0.44, 0.5)])).toBe("0.88 (its guesses are 12% less wrong than the lazy guess)")
-    expect(ratioText([pt(2, 0.6, 0.5)])).toBe("1.2 (its guesses are 20% more wrong than the lazy guess)")
-    expect(ratioText([pt(2, 0.5, 0.5)])).toBe("1 (its guesses are as wrong as the lazy guess)")
+  it("gives the last point's predLoss / baselineLoss to 3 significant digits, in plain words", () => {
+    expect(ratioText([pt(1, 0.5, 0.5), pt(2, 0.44, 0.5)])).toBe("0.880 (its guesses are 12% less wrong than the lazy guess)")
+    expect(ratioText([pt(2, 0.6, 0.5)])).toBe("1.20 (its guesses are 20% more wrong than the lazy guess)")
+    expect(ratioText([pt(2, 0.5, 0.5)])).toBe("1.00 (its guesses are about as wrong as the lazy guess)")
+    expect(ratioText([pt(2, 0.4985, 0.5)])).toBe("0.997 (its guesses are about as wrong as the lazy guess)")
+    expect(ratioText([pt(2, 0.495, 0.5)])).toBe("0.990 (its guesses are 1% less wrong than the lazy guess)")
   })
   it("survives a zero baseline", () => {
     expect(ratioText([pt(2, 0.1, 0)])).toBe("no guesses measured yet")

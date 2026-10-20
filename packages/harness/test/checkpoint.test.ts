@@ -60,10 +60,13 @@ describe("checkpoints", () => {
 
   it("rejects a malformed checkpoint record on load", async () => {
     const idb = new IDBFactory()
-    for (const bad of [{ steps: -1 }, { seq: 1.5 }, { cu: Number.NaN }, { curveTail: null }, { savedAt: 3 }, { restores: -1 }, { restores: undefined }, { lostCU: Number.NaN }, { lostSkips: 0.5 }]) {
+    for (const bad of [{ steps: -1 }, { seq: 1.5 }, { cu: Number.NaN }, { curveTail: null }, { savedAt: 3 }, { restores: -1 }, { restores: undefined }, { lostCU: Number.NaN }, { lostSkips: 0.5 }, { knowledgeSha: "nope" }, { sessionsSeenAtBirth: -2 }]) {
       await saveCheckpoint(idb, { ...cp(A, 1), ...bad } as unknown as Checkpoint)
       await expect(loadCheckpoint(idb, A)).rejects.toThrow(/checkpoint/)
     }
+    // Birth facts are optional (checkpoints written before they were added) but checked when present.
+    await saveCheckpoint(idb, { ...cp(A, 1), knowledgeSha: "a".repeat(64), sessionsSeenAtBirth: 2 })
+    expect(await loadCheckpoint(idb, A)).toMatchObject({ knowledgeSha: "a".repeat(64), sessionsSeenAtBirth: 2 })
   })
 
   it("upgrades a v1 database (outbox only): queued logs survive and the checkpoint store appears", async () => {

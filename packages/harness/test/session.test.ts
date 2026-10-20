@@ -282,6 +282,20 @@ describe("session v2", { timeout: 60_000 }, () => {
     }
   })
 
+  it("resumed before its first log file, a learner keeps the knowledgeSha and sessionsSeenAtBirth it was born with", async () => {
+    const idb = new IDBFactory()
+    const run = (over: Partial<SessionConfig>, stopAt?: number) => runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 5, ...over }), depsFor(idb, {
+      createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { if (steps === stopAt) throw new Error("reload") },
+    }))
+    await expect(run({}, 10)).rejects.toThrow("reload") // the first log file would be at step 16 (1 CU)
+    expect(await logsOf(idb)).toEqual([])
+    expect(await loadCheckpoint(idb, ID)).toMatchObject({ knowledgeSha: "f".repeat(64), sessionsSeenAtBirth: 3 })
+    await run({ knowledgeSha: "e".repeat(64), sessionsSeenAtBirth: 9 }) // the knowledge changed before the reload
+    const logs = await logsOf(idb)
+    expect(logs.length).toBeGreaterThan(1)
+    for (const f of logs) expect(f).toMatchObject({ knowledgeSha: "f".repeat(64), sessionsSeenAtBirth: 3 })
+  })
+
   it("a resumed learner keeps its own birth facts (seed, widths, settings): the config's are for newborns only", async () => {
     const run = (idb: IDBFactory, over: Partial<SessionConfig>, stopAt?: number) => runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, ...over }), depsFor(idb, {
       createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { if (steps === stopAt) throw new Error("reload") },

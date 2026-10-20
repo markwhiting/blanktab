@@ -9,7 +9,7 @@ import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
 import { DEFAULT_MAX_STEPS_PER_SEC, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
-import { liveOnBestBackend, seedsOf, type RunLife } from "./life"
+import { liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 
 const scope = self as unknown as {
@@ -42,7 +42,7 @@ async function start({ cfg, backend: force, widths }: StartMessage): Promise<voi
   let cu = 0
   let lastFrame = Number.NEGATIVE_INFINITY
 
-  const run: RunLife = async (c, chosen) => {
+  const run: RunLife = async (c, chosen, restore) => {
     // Every log file this learner has written comes before its checkpoint, so its curve is the start of the resumed one.
     const prior: CurvePoint[] = (await queue.files(id)).flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
     return runSession(c, {
@@ -79,7 +79,7 @@ async function start({ cfg, backend: force, widths }: StartMessage): Promise<voi
           steps = e.steps
           cu = e.cu
           post({ type: "curve", points: [...prior, ...e.curveTail], reset: true })
-          post({ type: "status", message: `resumed from its checkpoint at step ${e.steps}` })
+          post({ type: "status", message: resumeStatus(e.steps, restore) })
         } else if (e.type === "restored") {
           post({ type: "status", message: `its updates kept failing at step ${e.fromSteps}: restored from its checkpoint at step ${e.toSteps} (${e.restores} restore${e.restores === 1 ? "" : "s"} so far)` })
         } else if (e.type === "logged") {

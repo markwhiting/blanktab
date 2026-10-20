@@ -6,7 +6,7 @@ import { emptyObservation, PERIPHERY, decodeMove, type Action, type Observation,
 import { createCpuBackend, ResourceError, type Backend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, createLearner, type Widths } from "@blanktab/learner"
 import { openQueue, runSession, type LogFileV2, type SessionConfig } from "@blanktab/harness"
-import { liveOnBestBackend, type LifeConfig, type RunLife } from "../src/life"
+import { liveOnBestBackend, resumeStatus, type LifeConfig, type RunLife } from "../src/life"
 import type { Chosen } from "../src/backend"
 
 const ID = "lrn_00000000deadbeef"
@@ -32,9 +32,9 @@ function stubWorld(): WorldView {
 }
 
 /** A CPU backend posing as a GPU: once `fail` is set, every read rejects the way a lost WebGPU device does. */
-function flakyGpu(): Backend & { fail: boolean } {
+function flakyGpu(): Backend & { fail: boolean; destroyed: number; destroy(): void } {
   // Patched in place: tensors reach their backend through their storages, which point at this very object.
-  const b = Object.assign(createCpuBackend(), { fail: false })
+  const b = Object.assign(createCpuBackend(), { fail: false, destroyed: 0, destroy: () => { b.destroyed++ } })
   const read = b.read.bind(b)
   b.read = s => (b.fail ? Promise.reject(new ResourceError("WebGPU read failed: device lost")) : read(s))
   return b
@@ -47,23 +47,29 @@ const cfg: LifeConfig = {
 }
 
 /** `failAt[i]`: the step at which the i-th GPU backend handed out starts failing (undefined: never). */
-function setup(failAt: (number | undefined)[]) {
+function setup(failAt: (number | undefined)[], o: { gpuOnRetry?: boolean } = {}) {
   const idb = new IDBFactory()
-  const gpus: (Backend & { fail: boolean })[] = []
+  const gpus: ReturnType<typeof flakyGpu>[] = []
   const statuses: string[] = []
   const backends: string[] = []
   const choose = async (): Promise<Chosen> => {
+    if (gpus.length > 0 && o.gpuOnRetry === false) return { kind: "cpu", backend: createCpuBackend(), widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, label: "CPU at half width · no WebGPU" }
     const backend = flakyGpu()
     gpus.push(backend)
     return { kind: "webgpu", backend, widths: TINY, label: "WebGPU (fake)" }
   }
   let cu = 0
-  const run: RunLife = (c: SessionConfig, chosen: Chosen) => {
+  const labels: string[] = []
+  /** What the page's Status line ends up showing, as the worker sets it. */
+  const shown: string[] = []
+  const run: RunLife = (c: SessionConfig, chosen: Chosen, restore) => {
+    labels.push(chosen.label)
     const i = gpus.indexOf(chosen.backend as never)
     const world = stubWorld()
     return runSession(c, {
       world, idb, now: () => new Date(),
       createLearner: init => createLearner({ backend: chosen.backend, ...init }),
+      onEvent: e => { if (e.type === "resumed") shown.push(resumeStatus(e.steps, restore)) },
       onTick: ({ steps, cu: now }) => {
         cu = now
         if (i >= 0 && failAt[i] !== undefined && steps >= failAt[i]!) gpus[i]!.fail = true
@@ -71,12 +77,18 @@ function setup(failAt: (number | undefined)[]) {
     })
   }
   const life = () => liveOnBestBackend(cfg, {
-    idb, choose, cpu: () => ({ kind: "cpu", backend: createCpuBackend(), widths: TINY, label: "CPU" }), run, lastCU: () => cu,
-    onBackend: c => backends.push(c.kind), onStatus: s => statuses.push(s),
+    idb, choose, run, lastCU: () => cu,
+    onBackend: c => backends.push(c.kind), onStatus: s => { statuses.push(s); shown.push(s) },
   })
   const logs = async () => (await (await openQueue(idb)).pending()) as LogFileV2[]
-  return { life, logs, gpus, statuses, backends }
+  return { life, logs, gpus, statuses, backends, labels, shown }
 }
+
+describe("resumeStatus", () => {
+  it("a plain resume (reload)", () => {
+    expect(resumeStatus(250, null)).toBe("resumed from its checkpoint at step 250")
+  })
+})
 
 describe("liveOnBestBackend", { timeout: 60_000 }, () => {
   it("a rejected GPU read restores the life from its checkpoint once, on a fresh GPU backend; the life completes", async () => {
@@ -89,6 +101,19 @@ describe("liveOnBestBackend", { timeout: 60_000 }, () => {
     const final = (await t.logs()).at(-1)!
     expect(final).toMatchObject({ final: true, widths: TINY, hostSig: { webgpu: true }, restores: 1 })
     expect(final.lostCU).toBeGreaterThan(0) // the work since the checkpoint is on the record
+    expect(t.gpus[0]!.destroyed).toBe(1) // the failed device is let go before a new one is asked for
+    expect(t.gpus[1]!.destroyed).toBe(0)
+    // The Status line keeps saying why: the resume after the restore is reported as the restore.
+    expect(t.shown.at(-1)).toMatch(/^A GPU read failed \(WebGPU read failed: device lost\); restored from the checkpoint at step \d+ on WebGPU$/)
+  })
+
+  it("if no GPU is offered after the first failure, the life goes on the CPU at the same widths, labelled honestly", async () => {
+    const t = setup([10], { gpuOnRetry: false })
+    await t.life()
+    expect(t.backends).toEqual(["webgpu", "cpu"])
+    expect(t.labels.at(-1)).toMatch(/the GPU failed/)
+    expect((await t.logs()).at(-1)).toMatchObject({ widths: TINY, hostSig: { webgpu: false } })
+    expect(t.shown.at(-1)).toMatch(/restored from the checkpoint at step \d+ on the CPU at the same widths$/)
   })
 
   it("a second rejected GPU read moves the life to the CPU at the same widths; hostSig.webgpu says so", async () => {
@@ -97,7 +122,10 @@ describe("liveOnBestBackend", { timeout: 60_000 }, () => {
     expect(r.cu).toBeGreaterThanOrEqual(LIFETIME_CU)
     expect(t.gpus).toHaveLength(2) // restored on the GPU once, then no more GPU
     expect(t.backends).toEqual(["webgpu", "webgpu", "cpu"])
+    expect(t.labels.at(-1)).toMatch(/the GPU failed/)
     expect(t.statuses.some(s => /CPU/.test(s))).toBe(true)
+    expect(t.gpus.map(g => g.destroyed)).toEqual([1, 1])
+    expect(t.shown.at(-1)).toMatch(/^A GPU read failed again \(.*\); restored from the checkpoint at step \d+ on the CPU at the same widths$/)
     const files = await t.logs()
     const final = files.at(-1)!
     expect(final).toMatchObject({ final: true, widths: TINY, hostSig: { webgpu: false }, restores: 2 })

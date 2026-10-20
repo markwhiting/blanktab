@@ -17,28 +17,27 @@ export function appendPoints(curve: readonly CurvePoint[], points: readonly Curv
 export type Polyline = [number, number][]
 
 /**
- * Canvas coordinates of both series in a w×h box with `pad` pixels of margin: x is compute lived (CU), y one scale
- * shared by both losses (higher loss = higher up), so the gap between the lines is the learning. A single x or a flat
- * loss is drawn mid-box.
+ * Canvas coordinates of both series in a w×h box with `pad` pixels of margin: x is compute lived from birth (0 CU) to
+ * the newest point, y one scale shared by both losses (higher loss = higher up), so the gap between the lines is the
+ * learning. Points all at 0 CU, or a flat loss, are drawn mid-box.
  */
 export function sparkline(points: readonly CurvePoint[], w: number, h: number, pad = 2): { pred: Polyline; base: Polyline } {
   if (points.length === 0) return { pred: [], base: [] }
   const xs = points.map(p => p.cu)
   const ys = points.flatMap(p => [p.predLoss, p.baselineLoss])
-  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys)
+  const x0 = 0, x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys)
   const x = (v: number) => (x1 > x0 ? pad + ((v - x0) / (x1 - x0)) * (w - 2 * pad) : w / 2)
   const y = (v: number) => (y1 > y0 ? h - pad - ((v - y0) / (y1 - y0)) * (h - 2 * pad) : h / 2)
   return { pred: points.map(p => [x(p.cu), y(p.predLoss)]), base: points.map(p => [x(p.cu), y(p.baselineLoss)]) }
 }
 
-const round = (v: number, digits: number) => String(Math.round(v * 10 ** digits) / 10 ** digits)
-
-/** The last point's predLoss ÷ baselineLoss, said in plain words. */
+/** The last point's predLoss ÷ baselineLoss (3 significant digits), said in plain words. */
 export function ratioText(points: readonly CurvePoint[]): string {
   const p = points.at(-1)
   if (!p || !(p.baselineLoss > 0) || !Number.isFinite(p.predLoss)) return "no guesses measured yet"
   const r = p.predLoss / p.baselineLoss
-  const pct = Math.round(Math.abs(1 - r) * 100)
-  const words = pct === 0 ? "as wrong as" : r < 1 ? `${pct}% less wrong than` : `${pct}% more wrong than`
-  return `${round(r, 2)} (its guesses are ${words} the lazy guess)`
+  const off = Math.abs(1 - r)
+  const pct = Math.max(1, Math.round(off * 100))
+  const words = off < 0.01 ? "about as wrong as" : r < 1 ? `${pct}% less wrong than` : `${pct}% more wrong than`
+  return `${r.toPrecision(3)} (its guesses are ${words} the lazy guess)`
 }

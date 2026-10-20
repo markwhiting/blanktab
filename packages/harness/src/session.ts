@@ -147,7 +147,8 @@ function birthOf(state: unknown, id: string): { seed: number; widths: Widths; se
  *   counts them (`restores`), the CU they threw away (`lostCU`) and their skipped updates (in `skippedUpdates`).
  * - The final log file removes the checkpoint in the same transaction.
  * - With a checkpoint for this learnerId the life resumes from it (its steps, CU, seq, curve and birth facts: seed,
- *   widths and settings come from its learnerState, the config's are for newborns only); a learner with log files but
+ *   widths and settings from its learnerState, knowledgeSha and sessionsSeenAtBirth from the checkpoint; the config's
+ *   are for newborns only); a learner with log files but
  *   no checkpoint cannot be resumed and throws, as does a checkpoint whose seq does not follow the latest log file.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
@@ -177,6 +178,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   }
   const birth = cp ? birthOf(cp.learnerState, id) : { seed: cfg.seed, widths: cfg.widths, settings: clampSettings(cfg.learnerSettings) }
   const { seed, widths, settings } = birth
+  // Also birth facts: a resumed life keeps the ones its checkpoint carries (older checkpoints do not; then the config's).
+  const knowledgeSha = cp?.knowledgeSha ?? cfg.knowledgeSha
+  const sessionsSeenAtBirth = cp?.sessionsSeenAtBirth ?? cfg.sessionsSeenAtBirth
 
   let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed, widths, settings })
   try {
@@ -195,14 +199,14 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
 
     const checkpointNow = async (): Promise<Checkpoint> => ({
       learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
-      restores, lostCU, lostSkips, learnerState: await learner.save(),
+      restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, learnerState: await learner.save(),
     })
     const logFile = (final: boolean): LogFileV2 => {
       const st = learner.stats()
       return {
-        schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha: cfg.knowledgeSha, writtenAt: now().toISOString(),
+        schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
         stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed }, hostSig: { ...cfg.hostSig },
-        sessionsSeenAtBirth: cfg.sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
+        sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
         skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU,
       }
     }
