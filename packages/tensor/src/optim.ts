@@ -50,7 +50,19 @@ export class Adam {
     }
     if (!(this.eps > 0)) throw new RangeError(`Adam: eps must be > 0, got ${this.eps}`)
     if (new Set(params).size !== params.length) throw new Error("Adam: the same parameter was passed more than once")
-    this.slots = params.map((p) => ({ p, m: p.backend.zeros(p.size), v: p.backend.zeros(p.size), t: 0 }))
+    // A refused allocation part-way frees the moments already made, so a failed constructor leaks nothing.
+    const made: Storage[] = []
+    const alloc = (p: Tensor) => {
+      const st = p.backend.zeros(p.size)
+      made.push(st)
+      return st
+    }
+    try {
+      this.slots = params.map((p) => ({ p, m: alloc(p), v: alloc(p), t: 0 }))
+    } catch (e) {
+      made.forEach((st, j) => params[j >> 1]!.backend.dispose(st))
+      throw e
+    }
   }
 
   /** One update for every parameter with a gradient; parameters whose grad is null are skipped. */
@@ -98,13 +110,26 @@ export class Adam {
       if (st.m.length !== n || st.v.length !== n) throw new RangeError(`Adam.setState: slot ${i} has m/v length ${st.m.length}/${st.v.length}, parameter size ${n}`)
       if (!(Number.isInteger(st.t) && st.t >= 0)) throw new RangeError(`Adam.setState: slot ${i} step count must be an integer >= 0, got ${st.t}`)
     })
+    // Upload everything first and swap only once every buffer exists: a refused allocation frees the new
+    // buffers and leaves the optimizer exactly as it was.
+    const fresh: Storage[] = [] // m0, v0, m1, v1, ...
+    try {
+      slots.forEach((st, i) => {
+        const be = this.slots[i]!.p.backend
+        fresh.push(be.upload(Float32Array.from(st.m)))
+        fresh.push(be.upload(Float32Array.from(st.v)))
+      })
+    } catch (e) {
+      fresh.forEach((f, j) => this.slots[j >> 1]!.p.backend.dispose(f))
+      throw e
+    }
     slots.forEach((st, i) => {
       const s = this.slots[i]!
       const be = s.p.backend
       be.dispose(s.m)
       be.dispose(s.v)
-      s.m = be.upload(Float32Array.from(st.m))
-      s.v = be.upload(Float32Array.from(st.v))
+      s.m = fresh[2 * i]!
+      s.v = fresh[2 * i + 1]!
       s.t = st.t
     })
   }

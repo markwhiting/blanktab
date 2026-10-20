@@ -58,6 +58,9 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   const prevLast = prevSorted[prevSorted.length - 1]
   let expected = prevLast ? prevLast.seq + 1 : 0
   let lastSteps = prevLast ? prevLast.stepsTotal : -Infinity
+  // cu exists from schema v2 on: it never decreases across seq (v1 files carry none and are skipped).
+  let lastCu = -Infinity
+  for (const p of prevSorted) if (p.schemaVersion === 2) lastCu = Math.max(lastCu, p.cu)
   const reported = new Set<number>()
   for (const { path, log } of sorted) {
     if (reported.has(log.seq)) continue // duplicate already reported
@@ -69,6 +72,10 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
     expected++
     if (log.stepsTotal < lastSteps) errors.push(`${path}: stepsTotal decreased (${log.stepsTotal} < ${lastSteps})`)
     lastSteps = Math.max(lastSteps, log.stepsTotal)
+    if (log.schemaVersion === 2) {
+      if (log.cu < lastCu) errors.push(`${path}: cu decreased (${log.cu} < ${lastCu})`)
+      lastCu = Math.max(lastCu, log.cu)
+    }
   }
 
   // final: at most one, and it has the highest seq

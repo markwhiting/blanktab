@@ -368,7 +368,9 @@ describe("contributor: token never leaks (Review Focus 1)", () => {
       const rows = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("outbox").objectStore("outbox").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
       expect(rows).toHaveLength(6)
       expect(JSON.stringify(rows)).not.toContain(TOKEN)
-      expect(Array.from(db.objectStoreNames)).toEqual(["outbox"])
+      expect(Array.from(db.objectStoreNames)).toEqual(["checkpoints", "outbox"])
+      const cps = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("checkpoints").objectStore("checkpoints").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
+      expect(JSON.stringify(cps)).not.toContain(TOKEN)
     }
   })
 

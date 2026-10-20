@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest"
 import { decide, activityFromFiles, type OpenPr } from "../gate.ts"
 import type { PrFile } from "../validate.ts"
-import type { LogFile } from "@blanktab/harness/log"
+import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
 const NOW = new Date("2026-10-21T12:00:00.000Z")
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000)
-const log = (seq: number, over: Partial<LogFile> = {}): LogFile => ({
+const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
   schemaVersion: 1, learnerId: ID, seq, codeSha: "a".repeat(40), knowledgeSha: "0".repeat(64),
   writtenAt: hoursAgo(1).toISOString(), stepsTotal: 100 * (seq + 1), settings: { lr: 0.1 },
   hostSig: { cores: 8, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },

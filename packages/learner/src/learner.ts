@@ -182,7 +182,37 @@ const OUTPUT_PARAMS = 4
  * count and sizes against the widths), so a bad checkpoint throws RangeError before anything is allocated.
  */
 function validateState(s: LearnerState): void {
+  try {
+    checkState(s)
+  } catch (e) {
+    // A missing or mistyped field surfaces as a TypeError somewhere inside the checks: it is still a bad checkpoint.
+    if (e instanceof RangeError) throw e
+    throw new RangeError(`LearnerState: malformed (${e instanceof Error ? e.message : String(e)})`, { cause: e })
+  }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+const allFinite = (a: Float32Array) => {
+  for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i]!)) return false
+  return true
+}
+const STATE_KEYS = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats"] as const
+
+function checkState(s: LearnerState): void {
   const fail = (what: string) => { throw new RangeError(`LearnerState: ${what}`) }
+  if (!isRecord(s)) fail("not an object")
+  for (const k of STATE_KEYS) if (!(k in s)) fail(`missing ${k}`)
+  const isF32 = (v: unknown) => v instanceof Float32Array
+  if (!isRecord(s.widths) || !isRecord(s.settings) || !isRecord(s.stats)) fail("widths, settings and stats must be objects")
+  if (!Array.isArray(s.params) || !s.params.every(isF32)) fail("params must be Float32Arrays")
+  if (!Array.isArray(s.adam) || !s.adam.every(a => isRecord(a) && Array.isArray(a.slots) && a.slots.every(sl => isRecord(sl) && isF32(sl.m) && isF32(sl.v)))) {
+    fail("adam must be two optimizer states of Float32Array moments")
+  }
+  if (!isF32(s.h)) fail("h must be a Float32Array")
+  if (s.last !== null && !(isRecord(s.last) && isRecord(s.last.obs) && isRecord(s.last.action) && isF32(s.last.hIn))) fail("last is malformed")
+  if (!Array.isArray(s.replay) || !s.replay.every(tr => isRecord(tr) && isRecord(tr.obs) && isRecord(tr.next) && isRecord(tr.action) && isF32(tr.hIn))) {
+    fail("replay is malformed")
+  }
   if (s.version !== LEARNER_STATE_VERSION) fail(`version ${String(s.version)}, expected ${LEARNER_STATE_VERSION}`)
   if (!isUint32(s.seed)) fail(`seed must be a uint32, got ${s.seed}`)
   for (const k of ["conv1", "conv2", "enc", "hidden"] as const) if (!isPosInt(s.widths[k])) fail(`widths.${k} must be an integer >= 1`)
@@ -201,18 +231,23 @@ function validateState(s: LearnerState): void {
       const len = ps[i]!.length
       if (sl.m.length !== len || sl.v.length !== len) fail(`optimizer ${k} slot ${i} does not match its parameter's ${len} values`)
       if (!(Number.isInteger(sl.t) && sl.t >= 0)) fail(`optimizer ${k} slot ${i} step count ${sl.t}`)
+      if (!allFinite(sl.m) || !allFinite(sl.v)) fail(`optimizer ${k} slot ${i} has a non-finite moment`)
     })
   })
+  // A non-finite weight would poison every later update (Review Focus 4): such a checkpoint is no checkpoint.
+  s.params.forEach((p, i) => { if (!allFinite(p)) fail(`params[${i}] has a non-finite value`) })
   if (!isUint32(s.rng)) fail(`rng state must be a uint32, got ${s.rng}`)
   const hidden = s.widths.hidden
   const checkObs = (o: Observation, where: string) => {
     if (o.periphery.length !== PERIPHERY_LEN || o.fovea.length !== FOVEA_LEN) fail(`${where}: malformed frame`)
   }
   if (s.h.length !== hidden) fail(`h has ${s.h.length} values, hidden is ${hidden}`)
+  if (!allFinite(s.h)) fail("h has a non-finite value")
   if (s.last) {
     checkObs(s.last.obs, "last.obs")
     if (!isValidAction(s.last.action)) fail("last.action is not a valid action")
     if (s.last.hIn.length !== hidden) fail(`last.hIn has ${s.last.hIn.length} values, hidden is ${hidden}`)
+    if (!allFinite(s.last.hIn)) fail("last.hIn has a non-finite value")
   }
   if (s.replay.length > s.settings.bufferSize) fail(`${s.replay.length} transitions exceed bufferSize ${s.settings.bufferSize}`)
   s.replay.forEach((tr, i) => {
@@ -220,6 +255,7 @@ function validateState(s: LearnerState): void {
     checkObs(tr.next, `replay[${i}].next`)
     if (!isValidAction(tr.action)) fail(`replay[${i}].action is not a valid action`)
     if (tr.hIn.length !== hidden) fail(`replay[${i}].hIn has ${tr.hIn.length} values, hidden is ${hidden}`)
+    if (!allFinite(tr.hIn)) fail(`replay[${i}].hIn has a non-finite value`)
   })
   for (const k of ["steps", "skippedUpdates", "consecutiveSkips", "sleeps"] as const) {
     if (!(Number.isInteger(s.stats[k]) && s.stats[k] >= 0)) fail(`stats.${k} = ${s.stats[k]}`)
@@ -278,8 +314,9 @@ export async function createLearner(opts: {
   onUpdate?: (u: UpdateInfo) => void
 } & ({ seed: number; widths: Widths; settings: LearnerSettings; state?: undefined } | { state: LearnerState })): Promise<TrainableLearner> {
   const { backend } = opts
-  const saved = opts.state ? structuredClone(opts.state) : null // the learner owns its copy
-  if (saved) validateState(saved)
+  // The learner owns its copy. Any state given (even a falsy one) is a checkpoint and is validated.
+  const saved = opts.state !== undefined ? structuredClone(opts.state) : null
+  if (opts.state !== undefined) validateState(saved as LearnerState)
   const seed = saved ? saved.seed : (opts as { seed: number }).seed
   const widths: Widths = saved ? saved.widths : (opts as { widths: Widths }).widths
   const settings = saved ? saved.settings : clampSettings((opts as { settings: LearnerSettings }).settings)
@@ -293,30 +330,18 @@ export async function createLearner(opts: {
     throw new Error("learner: Model.outputParams must be the last OUTPUT_PARAMS of Model.params (checkpoint format)")
   }
   const outputSet = new Set(model.outputParams)
-  const opts_ = [
-    new Adam(model.params.filter((p) => !outputSet.has(p)), { lr: settings.lr }),
-    new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale }),
-  ]
-  const opt = {
-    step: () => { for (const o of opts_) o.step() },
-    zeroGrad: () => { for (const o of opts_) o.zeroGrad() },
-    dispose: () => { for (const o of opts_) o.dispose() },
-  }
   // Action sampling has its own stream, independent of the initializer's.
   const rng = createRng((seed ^ 0x9e3779b9) >>> 0)
   const replay = new ReplayBuffer(settings.bufferSize)
   const stats: LearnerStats = { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 }
 
-  // Recurrent state: h = h_{t-1} (output of the last core call) and hIn = h_{t-2} (its input), detached.
-  let h = model.zeroState()
-  let hData: Float32Array = new Float32Array(widths.hidden)
-  let hIn: Tensor | null = null
-  let hInData: Float32Array = new Float32Array(widths.hidden)
-  let last: Last | null = null
-  let busy = false
-  let disposed = false
-
-  const t = (data: Float32Array, shape: number[]) => tensor(data, shape, { backend })
+  // Every tensor made by `t` while the learner is being constructed is registered (see `owned` below).
+  let constructing: ((x: Tensor) => void) | null = null
+  const t = (data: Float32Array, shape: number[]) => {
+    const x = tensor(data, shape, { backend })
+    constructing?.(x)
+    return x
+  }
   const upload = (i: Inputs): InputTensors => ({
     periphery: t(i.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
     fovea: t(i.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
@@ -325,14 +350,6 @@ export async function createLearner(opts: {
   const disposeLast = (l: Last) => {
     for (const x of [l.inputs.periphery, l.inputs.fovea, l.inputs.proprio, l.targetTensors.periphery, l.targetTensors.fovea]) x.dispose()
   }
-  // concat(logits [1,76], value [1,1]) -> [1,77] as two exact 0/1 selection matmuls (no concat op in @blanktab/tensor),
-  // so acting reads the heads once. Caller-owned constants, freed in dispose().
-  const selLogits = new Float32Array(ACTION_DIM * (ACTION_DIM + 1))
-  for (let k = 0; k < ACTION_DIM; k++) selLogits[k * (ACTION_DIM + 1) + k] = 1
-  const selValue = new Float32Array(ACTION_DIM + 1)
-  selValue[ACTION_DIM] = 1
-  const selL = t(selLogits, [ACTION_DIM, ACTION_DIM + 1])
-  const selV = t(selValue, [1, ACTION_DIM + 1])
   const scalar = async (x: Tensor) => (await x.read())[0]!
   const hTensor = (d: Float32Array) => t(d, [1, widths.hidden])
   const targetTensors = (y: Targets): TargetTensors => ({ periphery: t(y.periphery, [1, PRED_P]), fovea: t(y.fovea, [1, PRED_F]) })
@@ -345,23 +362,63 @@ export async function createLearner(opts: {
     }
   }
 
-  if (saved) {
-    // validateState checked every shape; the model already holds the parameters.
-    opts_[0]!.setState(saved.adam[0])
-    opts_[1]!.setState(saved.adam[1])
-    rng.setState(saved.rng)
-    for (const tr of saved.replay) replay.push(tr)
-    Object.assign(stats, saved.stats)
-    h.dispose()
-    h = hTensor(saved.h)
-    hData = saved.h
-    if (saved.last) {
-      const { obs, action } = saved.last
-      const y = targetsFromObs(obs)
-      hIn = hTensor(saved.last.hIn)
-      hInData = saved.last.hIn
-      last = { obs, inputs: upload(obsToInputs(obs)), action, targets: y, targetTensors: targetTensors(y) }
+  // Everything construction allocates is registered here and freed if it fails part-way (e.g. the device refusing a
+  // buffer while a checkpoint is restored), so a failed createLearner leaks nothing.
+  const owned: { dispose(): void }[] = [model]
+  const own = <T extends { dispose(): void }>(x: T): T => { owned.push(x); return x }
+  constructing = own
+  const opts_: Adam[] = []
+  // Recurrent state: h = h_{t-1} (output of the last core call) and hIn = h_{t-2} (its input), detached.
+  let h: Tensor
+  let hData: Float32Array = new Float32Array(widths.hidden)
+  let hIn: Tensor | null = null
+  let hInData: Float32Array = new Float32Array(widths.hidden)
+  let last: Last | null = null
+  let busy = false
+  let disposed = false
+  // concat(logits [1,76], value [1,1]) -> [1,77] as two exact 0/1 selection matmuls (no concat op in @blanktab/tensor),
+  // so acting reads the heads once. Caller-owned constants, freed in dispose().
+  let selL: Tensor
+  let selV: Tensor
+  try {
+    opts_.push(own(new Adam(model.params.filter((p) => !outputSet.has(p)), { lr: settings.lr })))
+    opts_.push(own(new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale })))
+    const selLogits = new Float32Array(ACTION_DIM * (ACTION_DIM + 1))
+    for (let k = 0; k < ACTION_DIM; k++) selLogits[k * (ACTION_DIM + 1) + k] = 1
+    const selValue = new Float32Array(ACTION_DIM + 1)
+    selValue[ACTION_DIM] = 1
+    selL = t(selLogits, [ACTION_DIM, ACTION_DIM + 1])
+    selV = t(selValue, [1, ACTION_DIM + 1])
+    if (saved) {
+      // validateState checked every shape; the model already holds the parameters.
+      opts_[0]!.setState(saved.adam[0])
+      opts_[1]!.setState(saved.adam[1])
+      rng.setState(saved.rng)
+      for (const tr of saved.replay) replay.push(tr)
+      Object.assign(stats, saved.stats)
+      h = hTensor(saved.h)
+      hData = saved.h
+      if (saved.last) {
+        const { obs, action } = saved.last
+        const y = targetsFromObs(obs)
+        hIn = hTensor(saved.last.hIn)
+        hInData = saved.last.hIn
+        last = { obs, inputs: upload(obsToInputs(obs)), action, targets: y, targetTensors: targetTensors(y) }
+      }
+    } else {
+      h = own(model.zeroState())
     }
+  } catch (e) {
+    for (const x of owned.reverse()) x.dispose()
+    throw e
+  } finally {
+    constructing = null
+  }
+  owned.length = 0
+  const opt = {
+    step: () => { for (const o of opts_) o.step() },
+    zeroGrad: () => { for (const o of opts_) o.zeroGrad() },
+    dispose: () => { for (const o of opts_) o.dispose() },
   }
   const ema = (prev: number, v: number) => (Number.isFinite(prev) ? prev + STATS_ALPHA * (v - prev) : v)
 

@@ -4,7 +4,7 @@ import { WORLD } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
 import { createFlailer } from "@blanktab/learner"
 import { openQueue, type Queue } from "@blanktab/harness/queue"
-import { runSession } from "@blanktab/harness/session"
+import { runSessionV1 } from "@blanktab/harness/session-v1"
 import type { FromWorker, ToWorker } from "./protocol"
 
 const scope = self as unknown as {
@@ -46,7 +46,7 @@ async function start({ cfg, stepsPerSecond }: ToWorker): Promise<void> {
     },
   }
   let lastFrame = -Infinity
-  await runSession(cfg, {
+  await runSessionV1(cfg, {
     world, learner, queue, now: () => new Date(), pace: pacer(stepsPerSecond),
     onTick: ({ steps, obs }) => {
       const t = performance.now()

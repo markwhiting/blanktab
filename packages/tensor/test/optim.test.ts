@@ -124,6 +124,36 @@ describe("Adam", () => {
     p.dispose()
   })
 
+  it("a refused allocation in the constructor or setState leaks nothing and leaves the optimizer as it was", async () => {
+    // Patched in place: a tensor's backend is its storage's, so a wrapper object would be bypassed.
+    const inner = createCpuBackend()
+    let budget = Infinity
+    const take = () => { if (budget-- <= 0) throw new Error("device lost") }
+    const { upload, zeros } = inner
+    Object.assign(inner, { upload: (d: Float32Array) => { take(); return upload(d) }, zeros: (n: number) => { take(); return zeros(n) } })
+    const ps = [1, 2, 3].map(n => tensor(new Float32Array(n).fill(1), [n], { requiresGrad: true, backend: inner }))
+    const live = inner.stats.liveBuffers
+    for (let k = 0; k < 6; k++) {
+      budget = k
+      expect(() => new Adam(ps, { lr: 0.1 })).toThrow("device lost")
+      expect(inner.stats.liveBuffers).toBe(live)
+    }
+    budget = Infinity
+    const opt = new Adam(ps, { lr: 0.1 })
+    const before = await opt.state()
+    const next = { slots: before.slots.map(s => ({ m: s.m.map(() => 5), v: s.v.map(() => 6), t: 3 })) }
+    const withOpt = inner.stats.liveBuffers
+    for (let k = 0; k < 6; k++) {
+      budget = k
+      expect(() => opt.setState(next)).toThrow("device lost")
+      expect(inner.stats.liveBuffers).toBe(withOpt)
+      budget = Infinity
+      expect(await opt.state()).toEqual(before)
+    }
+    opt.dispose()
+    for (const p of ps) p.dispose()
+  })
+
   it("dispose releases optimizer state", () => {
     const be = getDefaultBackend()
     const a = param(new Float32Array([1, 2]), [2])

@@ -381,6 +381,69 @@ describe("learner", () => {
       expect(be.stats.liveBuffers).toBe(0)
     })
 
+    it("rejects non-finite parameters, Adam moments and recurrent state with RangeError, allocating nothing", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      const be = createCpuBackend()
+      const poison = (mutate: (s: LearnerState) => void, v: number) => {
+        const s = structuredClone(state)
+        mutate(s)
+        return { s, v }
+      }
+      const cases = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY].flatMap(v => [
+        poison(s => { s.params[3]![1] = v }, v),
+        poison(s => { s.adam[0].slots[2]!.m[0] = v }, v),
+        poison(s => { s.adam[1].slots[1]!.v[4] = v }, v),
+        poison(s => { s.h[5] = v }, v),
+        poison(s => { s.last!.hIn[0] = v }, v),
+        poison(s => { s.replay[1]!.hIn[2] = v }, v),
+      ])
+      for (const { s } of cases) await expect(createLearner({ backend: be, state: s })).rejects.toThrow(RangeError)
+      expect(be.stats.liveBuffers).toBe(0)
+    })
+
+    it("turns missing or malformed top-level fields into RangeError (not TypeError)", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      const be = createCpuBackend()
+      const keys = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats"] as const
+      for (const k of keys) {
+        const s = { ...state } as Partial<LearnerState>
+        delete s[k]
+        await expect(createLearner({ backend: be, state: s as LearnerState }), `without ${k}`).rejects.toThrow(RangeError)
+      }
+      const odd: unknown[] = [null, 7, "x", [], { ...state, adam: [null, null] }, { ...state, stats: null }, { ...state, widths: null }, { ...state, params: [null] }, { ...state, last: { obs: null } }, { ...state, replay: [null] }]
+      for (const s of odd) await expect(createLearner({ backend: be, state: s as LearnerState })).rejects.toThrow(RangeError)
+      expect(be.stats.liveBuffers).toBe(0)
+    })
+
+    it("a restore that fails part-way (the device refuses an allocation) frees everything it had allocated", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      // Count the allocations of a successful restore, then fail at each one in turn. The backend is patched in
+      // place: a tensor's backend is its storage's, so a wrapper object would miss the model's and Adam's allocations.
+      const refusing = (failAt: number) => {
+        const be = createCpuBackend()
+        const { upload, zeros } = be
+        let k = 0
+        const take = () => { if (++k === failAt) throw new Error("device lost") }
+        Object.assign(be, { upload: (d: Float32Array) => { take(); return upload(d) }, zeros: (m: number) => { take(); return zeros(m) } })
+        return { be, count: () => k }
+      }
+      const counting = refusing(0)
+      ;(await createLearner({ backend: counting.be, state })).dispose()
+      const n = counting.count()
+      expect(n).toBeGreaterThan(50)
+      for (let failAt = 1; failAt <= n; failAt++) {
+        const { be: inner } = refusing(failAt)
+        await expect(createLearner({ backend: inner, state }), `failing at allocation ${failAt}`).rejects.toThrow("device lost")
+        expect(inner.stats.liveBuffers, `failing at allocation ${failAt}`).toBe(0)
+      }
+    })
+
     it("sleep() replays replayPerSleep uniformly sampled transitions and lowers the mean loss on the buffer", async () => {
       // Fixed stream, independent of the actions: the block sweeps E then W, 4 px per step.
       const sweep = createSyntheticStream({ start: { x: 20, y: 100 } })

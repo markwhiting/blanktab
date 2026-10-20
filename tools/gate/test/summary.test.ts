@@ -3,11 +3,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { buildSummary } from "../summary.ts"
-import type { LogFile } from "@blanktab/harness/log"
+import type { LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
 
 const A = "lrn_aaaaaaaaaaaaaaaa"
 const B = "lrn_bbbbbbbbbbbbbbbb"
-const log = (id: string, seq: number, over: Partial<LogFile> = {}): LogFile => ({
+const log = (id: string, seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
   schemaVersion: 1, learnerId: id, seq, codeSha: "a".repeat(40), knowledgeSha: "0".repeat(64),
   writtenAt: "2026-10-19T12:00:00.000Z", stepsTotal: 100 * (seq + 1), settings: { moveProbability: 0.5 },
   hostSig: { cores: 8, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
@@ -52,5 +52,29 @@ describe("buildSummary", () => {
     mkdirSync(join(dir, B)); writeFileSync(join(dir, B, "0.json"), "not json")
     expect(buildSummary(dir).sessions.map(r => r.learnerId)).toEqual([A])
     expect(buildSummary(join(dir, "nope")).sessions).toEqual([])
+  })
+  it("rows gain cu and lossRatio (the last curve point's predLoss / baselineLoss); null for v1 or without a point", () => {
+    const v2 = (id: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => ({
+      ...log(id, seq), schemaVersion: 2, cu: 2 ** seq, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 },
+      curve: [{ cu: 2 ** seq, steps: 100 * (seq + 1), predLoss: 0.02, baselineLoss: 0.025 }], skippedUpdates: 0, ...over,
+    })
+    put(v2(A, 0)); put(v2(A, 1, { final: true, curve: [{ cu: 1.5, steps: 150, predLoss: 0.03, baselineLoss: 0.04 }, { cu: 2, steps: 200, predLoss: 0.018, baselineLoss: 0.024 }] }))
+    put(v2(B, 0, { curve: [{ cu: 1, steps: 100, predLoss: 0.05, baselineLoss: 0.04 }] })); put(v2(B, 1, { curve: [] })) // falls back to an earlier file's point
+    const C = "lrn_cccccccccccccccc"
+    put(log(C, 0))
+    const D = "lrn_dddddddddddddddd"
+    put(v2(D, 0, { curve: [] }))
+    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    expect(rows[A]).toMatchObject({ cu: 2, final: true })
+    expect(rows[A]!.lossRatio).toBeCloseTo(0.75, 12)
+    expect(rows[B]).toMatchObject({ cu: 2 })
+    expect(rows[B]!.lossRatio).toBeCloseTo(1.25, 12)
+    expect(rows[C]).toMatchObject({ cu: null, lossRatio: null })
+    expect(rows[D]).toMatchObject({ cu: 1, lossRatio: null })
+  })
+  it("a zero baseline gives lossRatio null, not Infinity", () => {
+    put({ ...log(A, 0), schemaVersion: 2, cu: 1, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, curve: [{ cu: 1, steps: 100, predLoss: 0.1, baselineLoss: 0 }], skippedUpdates: 0 })
+    expect(buildSummary(dir).sessions[0]!.lossRatio).toBeNull()
+    expect(JSON.parse(JSON.stringify(buildSummary(dir))).sessions[0].lossRatio).toBeNull()
   })
 })

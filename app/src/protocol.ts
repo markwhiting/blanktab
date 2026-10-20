@@ -1,7 +1,7 @@
 // Messages between the page (main thread) and the learner's worker. The token never crosses this boundary.
-import type { SessionConfig } from "@blanktab/harness/session"
+import type { SessionV1Config } from "@blanktab/harness/session-v1"
 
-export interface StartMessage { type: "start"; cfg: SessionConfig; stepsPerSecond: number }
+export interface StartMessage { type: "start"; cfg: SessionV1Config; stepsPerSecond: number }
 export type ToWorker = StartMessage
 
 export type FromWorker =

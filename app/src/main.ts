@@ -3,7 +3,7 @@
 import {
   PERMISSION_MESSAGE, REJECTED_MESSAGE, checkToken, chooseSettings, clearToken, createContributor, getOrCreateLearnerId, getToken,
   loadKnowledge, newLearnerId, openQueue, resumePoint, setToken,
-  type Knowledge, type LogFile, type Queue, type SessionConfig,
+  type Knowledge, type LogFile, type LogFileV1, type Queue, type SessionV1Config,
 } from "@blanktab/harness"
 import type { FromWorker, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
@@ -40,7 +40,7 @@ async function countTabs(): Promise<number> {
   ch.close()
   return Math.max(1, n)
 }
-async function hostSig(): Promise<LogFile["hostSig"]> {
+async function hostSig(): Promise<LogFileV1["hostSig"]> {
   const nav = navigator as Navigator & { deviceMemory?: number }
   return {
     cores: Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : 1,
@@ -51,7 +51,7 @@ async function hostSig(): Promise<LogFile["hostSig"]> {
 }
 
 /** Birth facts are fixed for a learner's whole life: a resumed learner keeps the ones its first log recorded. */
-function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<SessionConfig, "settings" | "knowledgeSha" | "sessionsSeenAtBirth"> {
+function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<SessionV1Config, "settings" | "knowledgeSha" | "sessionsSeenAtBirth"> {
   if (latest) return { settings: latest.settings, knowledgeSha: latest.knowledgeSha, sessionsSeenAtBirth: latest.sessionsSeenAtBirth }
   return {
     settings: { ...LEARNER_DEFAULTS, ...chooseSettings(knowledge, Math.random) },
@@ -85,7 +85,7 @@ async function live(id: string, ctx: Ctx): Promise<void> {
   if (release === null) return newborn(ctx) // another tab is living this learner's life
   const latest = await queue.latest(id)
   if (latest?.final) { release(); return newborn(ctx) } // this tab's learner already finished its life
-  const cfg: SessionConfig = {
+  const cfg: SessionV1Config = {
     learnerId: id, codeSha: __CODE_SHA__, ...birth(latest, knowledge), hostSig: await hostSig(),
     lifetimeSteps, logEverySteps: LOG_EVERY_STEPS, ...(await resumePoint(queue, id)),
   }
