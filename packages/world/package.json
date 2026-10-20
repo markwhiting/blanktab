@@ -8,7 +8,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "bench:render": "node bench/run.mjs"
   },
   "devDependencies": {
     "@napi-rs/canvas": "^1.0.11"

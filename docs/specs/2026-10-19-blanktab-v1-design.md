@@ -187,6 +187,7 @@ Each session's condition is assigned by the picker (§8) with each condition's s
 - **The screen:** 320×200. A persistent **taskbar** (bottom 16 px) holds one icon per room. Clicking an icon brings that room's window forward. The rest of the screen is the active room.
 - **Same physics everywhere:** cursor, press/release, scroll wheel, keys.
 - **Rendering [agent]:** Canvas2D on an OffscreenCanvas inside the worker. The pixel buffer is read with `getImageData` each step. One bundled, openly licensed font is loaded with `FontFace`, so text renders identically on every machine. The learner doesn't know how anything is drawn. **[user: "don't mind how it is drawn"]**
+  - *Amendment (2026-10-20, Plan 03):* rendering text with our own bitmap font instead of a FontFace font (Plan 03).
 
 **v1 rooms [agent]:**
 

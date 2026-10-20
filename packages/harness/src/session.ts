@@ -35,6 +35,9 @@ export async function runSession(
   while (steps < cfg.lifetimeSteps) {
     const obs = world.observe()
     world.act(learner.step(obs))
+    // The privileged trace is for milestone detectors, which a later plan adds; until then it is discarded.
+    // Draining it every step keeps it from growing without bound over a lifetime.
+    world.drainTrace()
     steps++
     onTick?.({ steps, obs })
     if (steps % cfg.logEverySteps === 0 || steps >= cfg.lifetimeSteps) {
