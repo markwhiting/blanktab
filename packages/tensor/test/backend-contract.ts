@@ -94,6 +94,8 @@ export function describeBackendContract(label: string, make: () => Promise<Backe
       expect(() => be.gatherRows(a, 2, 3, new Int32Array([2]))).toThrow(ShapeError)
       expect(() => be.scatterAddRows(a, 2, 3, new Int32Array([0, -1]))).toThrow(ShapeError)
       expect(() => be.sumToShape(a, [2, 3], [2])).toThrow(ShapeError)
+      expect(() => be.im2col(be.upload(new Float32Array(4)), 1, 2, 2, 5, 5, 1, 0)).toThrow(ShapeError)
+      expect(() => be.col2im(be.upload(new Float32Array(100)), 1, 2, 2, 5, 5, 1, 0)).toThrow(ShapeError)
       const p = be.upload(f(1))
       expect(() => be.adam(p, p, be.zeros(1), be.zeros(1), 0.1, 0.9, 0.999, 1e-8, 1)).toThrow(ShapeError)
     })

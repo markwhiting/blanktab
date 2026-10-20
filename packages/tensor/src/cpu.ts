@@ -204,6 +204,7 @@ export function createCpuBackend(): Backend {
       checkLen("im2col", xs, c * h * w)
       const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
       const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
+      if (oh < 0 || ow < 0) throw new ShapeError(`im2col: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
       const out = new Float32Array(c * kh * kw * oh * ow)
       for (let ch = 0; ch < c; ch++)
         for (let ky = 0; ky < kh; ky++)
@@ -226,6 +227,7 @@ export function createCpuBackend(): Backend {
       const cols = get(cs)
       const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
       const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
+      if (oh < 0 || ow < 0) throw new ShapeError(`col2im: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
       checkLen("col2im", cs, c * kh * kw * oh * ow)
       const out = new Float32Array(c * h * w)
       for (let ch = 0; ch < c; ch++)

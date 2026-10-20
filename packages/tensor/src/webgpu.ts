@@ -18,8 +18,27 @@ export interface WebGpuOptions {
   powerPreference?: "high-performance" | "low-power"
 }
 
+/** Identity of the adapter a WebGPU backend runs on (for logs and benchmark records). */
+export interface WebGpuAdapterInfo {
+  readonly vendor: string
+  readonly architecture: string
+  readonly device: string
+  readonly description: string
+  readonly isFallbackAdapter: boolean
+}
+
+export interface WebGpuBackend extends Backend {
+  readonly name: "webgpu"
+  readonly adapterInfo: WebGpuAdapterInfo
+}
+
+/** True for fallback/software adapters (SwiftShader, llvmpipe, ...), which do not exercise a real GPU compiler. */
+export function isSoftwareAdapter(info: WebGpuAdapterInfo): boolean {
+  return info.isFallbackAdapter || /swiftshader|llvmpipe|lavapipe|software/i.test(`${info.vendor} ${info.architecture} ${info.device} ${info.description}`)
+}
+
 /** Resolves null when WebGPU (navigator.gpu) or an adapter is unavailable. */
-export async function createWebGpuBackend(opts: WebGpuOptions = {}): Promise<Backend | null> {
+export async function createWebGpuBackend(opts: WebGpuOptions = {}): Promise<WebGpuBackend | null> {
   const gpu = typeof navigator === "undefined" ? undefined : navigator.gpu
   if (!gpu) return null
   const adapter = await gpu.requestAdapter(opts.powerPreference ? { powerPreference: opts.powerPreference } : undefined)
@@ -30,7 +49,17 @@ export async function createWebGpuBackend(opts: WebGpuOptions = {}): Promise<Bac
       maxBufferSize: adapter.limits.maxBufferSize,
     },
   })
-  return webGpuBackendOn(device)
+  const i = adapter.info
+  // isFallbackAdapter moved from GPUAdapter to GPUAdapterInfo; older browsers have only the former.
+  const legacyFallback = (adapter as { isFallbackAdapter?: boolean }).isFallbackAdapter
+  const adapterInfo: WebGpuAdapterInfo = {
+    vendor: i.vendor,
+    architecture: i.architecture,
+    device: i.device,
+    description: i.description,
+    isFallbackAdapter: (i as { isFallbackAdapter?: boolean }).isFallbackAdapter ?? legacyFallback ?? false,
+  }
+  return webGpuBackendOn(device, adapterInfo)
 }
 
 // WebGPU flag values (spec constants; TypeScript's DOM lib types the interfaces but not these namespaces).
@@ -68,17 +97,29 @@ function packUniform(fields: Field[]): ArrayBuffer {
 const MAX_PENDING_PASSES = 64
 const MAX_PENDING_TRASH = 256
 
-function webGpuBackendOn(device: GPUDevice): Backend {
+function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): WebGpuBackend {
   const stats = { flops: 0, liveBuffers: 0 }
   const maxBinding = device.limits.maxStorageBufferBindingSize
   const maxBufferSize = device.limits.maxBufferSize
   const maxGroups = device.limits.maxComputeWorkgroupsPerDimension
   const usage = BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST
 
-  let gpuError: string | null = null
+  // ---- error reporting: every batch of GPU work runs inside error scopes; the next read() awaits
+  // the scopes closed since the previous read and rejects with the first error, then the state is
+  // clear again (not sticky). Errors outside any scope (e.g. buffer creation) are queued the same way.
+  const pendingErrors: Promise<GPUError | null>[] = []
   device.addEventListener("uncapturederror", (e) => {
-    gpuError ??= (e as GPUUncapturedErrorEvent).error.message
+    pendingErrors.push(Promise.resolve((e as GPUUncapturedErrorEvent).error))
   })
+  const pushScopes = () => {
+    device.pushErrorScope("out-of-memory")
+    device.pushErrorScope("validation")
+  }
+  const popScopes = () => {
+    const validation = device.popErrorScope()
+    const oom = device.popErrorScope()
+    pendingErrors.push(validation, oom)
+  }
   let lost: string | null = null
   void device.lost.then((info) => {
     lost = `WebGPU device lost (${info.reason}): ${info.message}`
@@ -92,6 +133,7 @@ function webGpuBackendOn(device: GPUDevice): Backend {
   const flush = () => {
     if (encoder) {
       device.queue.submit([encoder.finish()])
+      popScopes() // opened by beginBatch, so it covers pipeline/bind-group creation, encoding and submit
       encoder = null
       pendingPasses = 0
     }
@@ -173,8 +215,17 @@ function webGpuBackendOn(device: GPUDevice): Backend {
     return [x, y]
   }
 
+  /** The open batch encoder; starting a batch opens its error scopes (closed in flush). */
+  const beginBatch = (): GPUCommandEncoder => {
+    if (!encoder) {
+      pushScopes()
+      encoder = device.createCommandEncoder()
+    }
+    return encoder
+  }
   /** Records one compute pass. `buffers` bind at 0..k-1; the uniform binds at k. Owned temporaries are released after. */
   const dispatch = (key: string, code: () => string, buffers: GPUBuffer[], fields: Field[], groups: [number, number], temps: GPUBuffer[] = []) => {
+    const enc = beginBatch()
     const p = pipeline(key, code)
     const data = packUniform(fields)
     const ub = device.createBuffer({ size: data.byteLength, usage: BUF.UNIFORM, mappedAtCreation: true })
@@ -184,8 +235,7 @@ function webGpuBackendOn(device: GPUDevice): Backend {
       layout: p.getBindGroupLayout(0),
       entries: [...buffers, ub].map((buffer, binding) => ({ binding, resource: { buffer } })),
     })
-    encoder ??= device.createCommandEncoder()
-    const pass = encoder.beginComputePass()
+    const pass = enc.beginComputePass()
     pass.setPipeline(p)
     pass.setBindGroup(0, bind)
     pass.dispatchWorkgroups(groups[0], groups[1])
@@ -207,8 +257,9 @@ function webGpuBackendOn(device: GPUDevice): Backend {
     dispatch(key, code, buffers, fields, groups, temps)
   }
 
-  const backend: Backend = {
+  const backend: WebGpuBackend = {
     name: "webgpu",
+    adapterInfo: Object.freeze({ ...adapterInfo }),
     stats,
     upload: (data) => make(data.length, data),
     zeros: (length) => make(length),
@@ -223,23 +274,27 @@ function webGpuBackendOn(device: GPUDevice): Backend {
       }
       flush()
       const bytes = s.length * 4
+      pushScopes()
       const staging = device.createBuffer({ size: Math.max(4, bytes), usage: BUF.MAP_READ | BUF.COPY_DST })
       const enc = device.createCommandEncoder()
       if (bytes > 0) enc.copyBufferToBuffer(buf, 0, staging, 0, bytes)
       device.queue.submit([enc.finish()])
-      return staging.mapAsync(MAP_MODE_READ).then(
-        () => {
-          const out = new Float32Array(staging.getMappedRange(0, Math.max(4, bytes)).slice(0, bytes))
-          staging.unmap()
-          staging.destroy()
-          if (gpuError) throw new ResourceError(`WebGPU error: ${gpuError}`)
-          return out
-        },
-        (e: unknown) => {
-          staging.destroy()
+      popScopes()
+      // This read owns every error raised since the previous read (including its own copy).
+      const errors = Promise.all(pendingErrors.splice(0))
+      return (async () => {
+        try {
+          const first = (await errors).find((e) => e !== null)
+          if (first) throw new ResourceError(`WebGPU error: ${first.message}`)
+          await staging.mapAsync(MAP_MODE_READ)
+          return new Float32Array(staging.getMappedRange(0, Math.max(4, bytes)).slice(0, bytes))
+        } catch (e) {
+          if (e instanceof ResourceError) throw e
           throw new ResourceError(`WebGPU read failed: ${lost ?? (e instanceof Error ? e.message : String(e))}`)
-        },
-      )
+        } finally {
+          staging.destroy() // also unmaps
+        }
+      })()
     },
 
     dispose(s) {

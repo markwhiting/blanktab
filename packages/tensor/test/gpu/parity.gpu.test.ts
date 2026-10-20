@@ -4,7 +4,8 @@ import {
   gruCell, initGru, layerNorm, matmul, mean, mse, randn, reshape, setDefaultBackend, square, sub, tensor,
 } from "../../src/index"
 import type { Backend, BinaryOp, Storage, UnaryOp } from "../../src/index"
-import { createWebGpuBackend } from "../../src/webgpu"
+import { createWebGpuBackend, isSoftwareAdapter } from "../../src/webgpu"
+import type { WebGpuBackend } from "../../src/webgpu"
 import { describeBackendContract } from "../backend-contract"
 
 // Runs only in real Chromium via `npm run test:gpu` (vitest.gpu.config.ts).
@@ -12,7 +13,7 @@ import { describeBackendContract } from "../backend-contract"
 const adapter = await navigator.gpu?.requestAdapter({ powerPreference: "high-performance" })
 const gpuOrNull = await createWebGpuBackend({ powerPreference: "high-performance" })
 
-const requireGpu = (): Backend => {
+const requireGpu = (): WebGpuBackend => {
   if (!gpuOrNull) throw new Error("WebGPU backend unavailable: no navigator.gpu or no adapter")
   return gpuOrNull
 }
@@ -67,9 +68,29 @@ afterAll(() => {
   console.log("MAX_ERRORS", JSON.stringify(worst))
 })
 
-it("creates a WebGPU backend on this machine", () => {
+it("creates a WebGPU backend on a hardware adapter (opt out: GPU_ALLOW_SOFTWARE=1)", () => {
   expect(adapter, "navigator.gpu.requestAdapter() returned no adapter").toBeTruthy()
-  expect(requireGpu().name).toBe("webgpu")
+  const gpu = requireGpu()
+  expect(gpu.name).toBe("webgpu")
+  const info = gpu.adapterInfo
+  console.log("BACKEND_ADAPTER", JSON.stringify(info))
+  expect(typeof info.vendor).toBe("string")
+  expect(typeof info.architecture).toBe("string")
+  if ((import.meta as ImportMeta & { env: Record<string, string | undefined> }).env.GPU_ALLOW_SOFTWARE === "1") return
+  // A software adapter (SwiftShader) hides GPU-compiler behaviour such as Metal fast math.
+  expect(isSoftwareAdapter(info), `software WebGPU adapter ${JSON.stringify(info)}; set GPU_ALLOW_SOFTWARE=1 to allow`).toBe(false)
+})
+
+it("a GPU validation error rejects the read that observes it, and later reads recover", async () => {
+  const gpu = requireGpu()
+  const ok = gpu.upload(new Float32Array([1, 2]))
+  const bad = gpu.upload(new Float32Array([3, 4]))
+  // Simulate a corrupted storage: its buffer is destroyed behind the backend's back, so the
+  // next submit using it is invalid.
+  ;(bad as unknown as { buffer: GPUBuffer }).buffer.destroy()
+  const out = gpu.unary("neg", bad)
+  await expect(gpu.read(out)).rejects.toThrow(ResourceError)
+  expect(Array.from(await gpu.read(gpu.unary("neg", ok)))).toEqual([-1, -2])
 })
 
 describeBackendContract("webgpu", () => Promise.resolve(requireGpu()))

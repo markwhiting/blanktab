@@ -9,6 +9,8 @@ export default defineConfig({
     include: ["**/*.gpu.test.ts"],
     benchmark: { include: ["**/*.gpu.bench.ts"] },
     testTimeout: 60_000,
+    // GPU_ALLOW_SOFTWARE=1 lets the suite pass on a software adapter (e.g. SwiftShader in CI); by default it must be hardware.
+    env: { GPU_ALLOW_SOFTWARE: process.env.GPU_ALLOW_SOFTWARE ?? "" },
     // Show console output (adapter info, per-primitive max errors) for passing tests too.
     silent: false,
     // Away from vite's default ports and the e2e preview (4173), which other streams may hold.
