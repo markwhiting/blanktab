@@ -90,6 +90,11 @@ describe("matmul and reductions", () => {
     close(await s.read(), [6, 15])
     expect(() => sumLast(t([1], []))).toThrow(ShapeError)
   })
+  it("sumLast over an empty last axis gives zeros over the leading dims", async () => {
+    const s = sumLast(zeros([3, 0]))
+    expect(s.shape).toEqual([3])
+    close(await s.read(), [0, 0, 0])
+  })
 })
 
 describe("softmax", () => {
@@ -124,6 +129,17 @@ describe("reshape and gatherRows", () => {
     expect(r.shape).toEqual([3, 2])
     expect(r.storage).toBe(a.storage)
     close(await r.read(), [1, 2, 3, 4, 5, 6])
+  })
+  it("disposing a reshaped view releases the shared storage exactly once", async () => {
+    const be = getDefaultBackend()
+    const a = t([1, 2, 3, 4, 5, 6], [2, 3])
+    const r = reshape(a, [6])
+    const before = be.stats.liveBuffers
+    r.dispose()
+    expect(be.stats.liveBuffers).toBe(before - 1)
+    await expect(a.read()).rejects.toThrow()
+    a.dispose()
+    expect(be.stats.liveBuffers).toBe(before - 1)
   })
   it("reshape rejects bad shapes", () => {
     const a = t([1, 2, 3, 4, 5, 6], [2, 3])

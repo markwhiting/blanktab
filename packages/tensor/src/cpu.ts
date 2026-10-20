@@ -39,6 +39,14 @@ function broadcastStrides(shape: number[], rank: number): number[] {
   return out
 }
 
+/** Synchronous read of a CPU-backend storage (a copy). Throws ResourceError for other backends or disposed storage. */
+export function readSyncCpu(s: Storage): Float32Array {
+  const c = s as CpuStorage
+  if (c.backend.name !== "cpu" || !(c.data instanceof Float32Array)) throw new ResourceError("readSyncCpu: storage is not a CPU storage")
+  if (c.disposed) throw new ResourceError("storage used after dispose")
+  return Float32Array.from(c.data)
+}
+
 export function createCpuBackend(): Backend {
   const stats = { flops: 0, liveBuffers: 0 }
   const make = (data: Float32Array): CpuStorage => {
@@ -60,7 +68,8 @@ export function createCpuBackend(): Backend {
     stats,
     upload: (data) => make(Float32Array.from(data)),
     zeros: (length) => make(new Float32Array(length)),
-    read: (s) => Promise.resolve(Float32Array.from(get(s))),
+    // Executor form so a disposed/foreign storage rejects instead of throwing synchronously.
+    read: (s) => new Promise((resolve) => resolve(Float32Array.from(get(s)))),
     dispose(s) {
       const c = s as CpuStorage
       if (c.backend !== backend || c.disposed) return

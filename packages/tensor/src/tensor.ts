@@ -2,11 +2,15 @@ import { ShapeError } from "./backend"
 import type { Backend, Storage } from "./backend"
 import { createCpuBackend } from "./cpu"
 
-/** Graph node: the inputs of the op that produced a tensor and its backward rule (filled in by autograd). */
+/** Graph node: the inputs of the op that produced a tensor and its backward rule. */
 export interface GradNode {
   parents: Tensor[]
-  /** Given d(loss)/d(this), returns d(loss)/d(parent) for each parent, in order. */
-  backward: (g: Tensor) => Tensor[]
+  /**
+   * Given g = d(loss)/d(this), returns d(loss)/d(parent) for each parent, in order; null where
+   * `needs[i]` is false. Runs under noGrad. A returned tensor may share storage with `g` (e.g.
+   * add, reshape); `backward` reference-counts storages, so rules never dispose `g` themselves.
+   */
+  backward: (g: Tensor, needs: readonly boolean[]) => (Tensor | null)[]
 }
 
 export interface TensorOptions {
