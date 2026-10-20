@@ -10,6 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspaces --if-present",
     "test": "vitest run",
+    "test:gpu": "vitest run -c vitest.gpu.config.ts",
+    "bench:gpu": "vitest bench --run -c vitest.gpu.config.ts",
     "dev": "npm run dev -w app",
     "e2e": "playwright test"
   },
@@ -17,10 +19,11 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
+    "@vitest/browser-playwright": "5.0.5",
     "eslint": "^10.13.0",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.0",
-    "vitest": "^5.0.5"
+    "vitest": "5.0.5"
   }
 }
