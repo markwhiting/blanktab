@@ -190,6 +190,27 @@ describe("orphaned checkpoints", () => {
     })
   })
 
+  it("a sweep slow on its adoption candidate's full read holds no other lock meanwhile: a reloading tab's wait succeeds", async () => {
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, cp(id(1), HOUR)) // the adoption candidate (newest)
+    await saveCheckpoint(idb, cp(id(2), 2 * HOUR)) // X: a tab reloading right now
+    await saveCheckpoint(idb, cp(id(3), 3 * HOUR))
+    const l = new FakeLocks()
+    let own: Promise<unknown> | undefined
+    let heldDuringRead: string[] = []
+    const readRecord = async (db: IDBFactory, learnerId: string) => {
+      heldDuringRead = l.ids()
+      own = waitLock(l, id(2), 200) // X's tab asks while the sweep is busy reading (a ~29 MB record, slowly)
+      await new Promise(r => setTimeout(r, 500))
+      return readCheckpointRecord(db, learnerId)
+    }
+    const r = await sweepCheckpoints({ idb, tryLock: webLock(l), now: () => NOW, adopt: true, readRecord })
+    expect(heldDuringRead).toEqual([id(1)])
+    expect(await own).not.toBeNull()
+    expect(r.adopted?.learnerId).toBe(id(1))
+    expect(await readCheckpointRecord(idb, id(2))).toBeDefined()
+  })
+
   it("waitLock gives up after its timeout when another tab lives the learner (a duplicated tab)", async () => {
     const { l } = await locks([id(1)])
     expect(await waitLock(l, id(1), 50)).toBeNull()

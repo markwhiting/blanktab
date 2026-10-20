@@ -290,7 +290,8 @@ test("a reload resumes the learner from its checkpoint; a duplicated tab (same s
   const dup = await context.newPage()
   await dup.addInitScript(i => { if (sessionStorage.getItem("blanktab:dup") === null) { sessionStorage.setItem("blanktab:learnerId", i); sessionStorage.setItem("blanktab:dup", "1") } }, id)
   await dup.goto(LONG)
-  await expect(dup.getByTestId("learner-id")).toHaveText(ID_RE)
+  // The copy first waits up to OWN_LOCK_WAIT_MS (10 s) for "its" learner's lock, which the original holds, then a newborn.
+  await expect(dup.getByTestId("learner-id")).toHaveText(ID_RE, { timeout: 20_000 })
   const dupId = (await dup.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
   expect(dupId).not.toBe(id)
   expect(await dup.evaluate(() => sessionStorage.getItem("blanktab:learnerId"))).toBe(dupId)

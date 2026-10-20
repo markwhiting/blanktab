@@ -1,6 +1,6 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
-import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
+import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
 import { KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
@@ -104,10 +104,45 @@ export async function checkpointIds(idb: IDBFactory): Promise<string[]> {
   return (await result(db.transaction(CHECKPOINTS).objectStore(CHECKPOINTS).getAllKeys())).filter((k): k is string => typeof k === "string")
 }
 
+/**
+ * Every checkpoint's id with its meta record (undefined if it has none), and the learners whose latest log file is
+ * final, all read in one transaction: a checkpoint saved meanwhile is seen with its meta record or not at all.
+ */
+export async function checkpointIndex(idb: IDBFactory): Promise<{ entries: { learnerId: string; meta: CheckpointMeta | undefined }[]; final: Set<string> }> {
+  const tx = (await openDb(idb)).transaction([...CHECKPOINT_STORES, OUTBOX])
+  const [ids, metas, rows] = await Promise.all([
+    result(tx.objectStore(CHECKPOINTS).getAllKeys()),
+    result(tx.objectStore(CHECKPOINT_META).getAll() as IDBRequest<CheckpointMeta[]>),
+    result(tx.objectStore(OUTBOX).getAll() as IDBRequest<{ learnerId: string; seq: number; file: { final: boolean } }[]>),
+  ])
+  const byId = new Map(metas.map(m => [m.learnerId, m]))
+  const latest = new Map<string, { seq: number; final: boolean }>()
+  for (const r of rows) if ((latest.get(r.learnerId)?.seq ?? -1) < r.seq) latest.set(r.learnerId, { seq: r.seq, final: r.file.final })
+  return {
+    entries: ids.filter((k): k is string => typeof k === "string").map(learnerId => ({ learnerId, meta: byId.get(learnerId) })),
+    final: new Set([...latest].filter(([, v]) => v.final).map(([k]) => k)),
+  }
+}
+
+/** One learner's checkpoint meta record and whether its checkpoint exists, read together (one transaction). */
+export async function checkpointEntry(idb: IDBFactory, learnerId: string): Promise<{ exists: boolean; meta: CheckpointMeta | undefined }> {
+  const tx = (await openDb(idb)).transaction(CHECKPOINT_STORES)
+  const [n, meta] = await Promise.all([
+    result(tx.objectStore(CHECKPOINTS).count(learnerId)),
+    result(tx.objectStore(CHECKPOINT_META).get(learnerId) as IDBRequest<CheckpointMeta | undefined>),
+  ])
+  return { exists: n > 0, meta }
+}
+
 /** The learner's latest checkpoint, or undefined. Throws RangeError for a malformed record (or undecodable frames). */
 export async function loadCheckpoint<S = LearnerState>(idb: IDBFactory, learnerId: string): Promise<Checkpoint<S> | undefined> {
   const c = await readCheckpointRecord(idb, learnerId)
   if (c === undefined) return undefined
+  return fromRecord<S>(c, learnerId)
+}
+
+/** A checkpoint from its stored record (as readCheckpointRecord returns it). Throws RangeError as loadCheckpoint does. */
+export async function fromRecord<S = LearnerState>(c: unknown, learnerId: string): Promise<Checkpoint<S>> {
   checkCheckpoint(c, learnerId)
   let learnerState: unknown
   try {

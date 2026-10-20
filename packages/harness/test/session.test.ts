@@ -4,7 +4,7 @@ import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, WORLD, type Actio
 import { createCpuBackend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, clampSettings, createLearner, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
-import { loadCheckpoint, saveCheckpoint } from "../src/checkpoint"
+import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/checkpoint"
 import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
@@ -259,6 +259,32 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(logs[1]!.widths).toEqual(CPU_HALF)
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
     })
+  })
+
+  it("resumes from a checkpoint record already read (the sweep's adopted one) without reading it again", async () => {
+    const run = (idb: IDBFactory, over: Partial<SessionDeps> = {}, stopAt?: number) => runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50 }), depsFor(idb, {
+      createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { if (steps === stopAt) throw new Error("reload") }, ...over,
+    }))
+    const whole = new IDBFactory()
+    await run(whole)
+    const idb = new IDBFactory()
+    await expect(run(idb, {}, 300)).rejects.toThrow("reload")
+    const record = await readCheckpointRecord(idb, ID)
+    const reads: unknown[] = []
+    const get = FakeObjectStore.prototype.get
+    FakeObjectStore.prototype.get = function (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) {
+      if (this.name === "checkpoints") reads.push(key)
+      return get.call(this, key)
+    } as typeof get
+    let r: Awaited<ReturnType<typeof runSession>>
+    try {
+      r = await run(idb, { checkpointRecord: record })
+    } finally {
+      FakeObjectStore.prototype.get = get
+    }
+    expect(reads).toEqual([])
+    expect(r.resumedFrom).toBe(256) // the 16 CU crossing
+    expect((await logsOf(idb)).map(strip)).toEqual((await logsOf(whole)).map(strip))
   })
 
   it("deletes the checkpoint once the final log is queued; a finished learner does not run again", async () => {

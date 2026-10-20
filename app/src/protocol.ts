@@ -12,6 +12,8 @@ export interface StartMessage {
   widths?: Widths
   /** document.hidden when the life starts (then VisibilityMessage on each change): no frames are posted while hidden. */
   hidden?: boolean
+  /** The learner's checkpoint record, already read by the startup sweep that adopted it (its buffers transferred). */
+  checkpointRecord?: unknown
 }
 export interface VisibilityMessage { type: "visibility"; hidden: boolean }
 export type ToWorker = StartMessage | VisibilityMessage

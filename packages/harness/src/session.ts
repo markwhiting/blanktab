@@ -2,7 +2,7 @@
 import type { Observation, WorldView } from "@blanktab/interface"
 import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
-import { deleteCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
+import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { MAX_CURVE_POINTS, MAX_RESTORES, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
 
@@ -78,6 +78,11 @@ export interface SessionDeps {
    * WebGPU). They are rethrown as they are. Any other error ends the life: its final log is written first (runSession).
    */
   recoverable?: (e: unknown) => boolean
+  /**
+   * This learner's checkpoint record as stored, already read (by the startup sweep that adopted it): used instead of
+   * reading it from `idb` again. Restores and later runs read the database as usual.
+   */
+  checkpointRecord?: unknown
 }
 
 export interface SessionResult {
@@ -270,7 +275,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   }
 
   async function liveTheLife(): Promise<SessionResult> {
-    cp = await loadCheckpoint(idb, id)
+    cp = deps.checkpointRecord !== undefined ? await fromRecord(deps.checkpointRecord, id) : await loadCheckpoint(idb, id)
     if (!cp && latest) throw new Error(`learner ${id} has log files up to seq ${latest.seq} but no checkpoint: its life cannot be resumed`)
     // Every log file is queued with its checkpoint, so the checkpoint's seq is exactly the one after the latest file.
     if (cp && cp.seq !== (latest?.seq ?? -1) + 1) {

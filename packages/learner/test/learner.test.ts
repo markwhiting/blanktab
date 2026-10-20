@@ -67,7 +67,7 @@ function firstDifference(a: unknown, b: unknown, path = "state"): string | null 
 const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
   (await l.readParams()).every((p) => p.every(Number.isFinite))
 
-describe("learner", () => {
+describe("learner", { timeout: 30_000 }, () => { // every test builds a real learner: >= 30 s (controller ruling; ~1-8 s unloaded)
   // Several seeds must pass (task brief + controller rulings): after 3,000 steps the action-conditioned predictor
   // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha). Measured predLoss/baselineLoss at
   // 3,000 steps (default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
@@ -300,7 +300,7 @@ describe("learner", () => {
     learner.dispose()
   })
 
-  describe("sleep, save and load", () => {
+  describe("sleep, save and load", { timeout: 30_000 }, () => {
     /** The stream is part of the run: a resumed learner continues against the same stream object. */
     it("save at step 300 (sleeps every 100), load into a fresh learner, 200 more steps = an uninterrupted 500-step run", async () => {
       const full = await run({ seed: 11, steps: 500, sleepEvery: 100 })

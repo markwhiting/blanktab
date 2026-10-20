@@ -3,13 +3,14 @@
 import {
   DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
   createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
-  type Knowledge, type LogFile, type Queue,
+  type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
 import { seedsOf, type LifeConfig } from "./life"
 import type { FromWorker, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
 import { flushPolicy } from "./schedule"
 import { birthSettings } from "./settings"
+import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
 
 const NEWBORN_DELAY_MS = 2_000
@@ -88,8 +89,11 @@ interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: bool
 
 const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
 
-/** `held`: this learner's lock, already taken (by the startup sweep). */
-async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
+/**
+ * `held`: this learner's lock, already taken (by the startup sweep). `record`: its checkpoint record, already read by
+ * the sweep that adopted it (handed to the worker, so it is not read twice).
+ */
+async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): Promise<void> {
   const { ui, queue, knowledge, queued } = ctx
   const release = held ?? (await lockLearner(id))
   if (release === null) return newborn(ctx) // another tab is living this learner's life
@@ -140,7 +144,11 @@ async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
   worker.onerror = e => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
-  worker.postMessage({ type: "start", cfg, hidden: document.hidden, ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}) } satisfies ToWorker)
+  const start: ToWorker = {
+    type: "start", cfg, hidden: document.hidden, ...(record !== undefined ? { checkpointRecord: record } : {}),
+    ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),
+  }
+  worker.postMessage(start, buffersOf(record)) // moved, not copied
 }
 
 async function main(ui: Ui): Promise<void> {
@@ -197,7 +205,7 @@ async function main(ui: Ui): Promise<void> {
   if (adopted) {
     adoptLearnerId(sessionStorage, adopted.learnerId)
     ui.notice(`Adopted learner ${adopted.learnerId}: its tab was closed, so this tab lives the rest of its life.`)
-    return live(adopted.learnerId, ctx, adopted.release)
+    return live(adopted.learnerId, ctx, adopted.release, adopted.record)
   }
   return newborn(ctx)
 }
@@ -207,7 +215,7 @@ async function main(ui: Ui): Promise<void> {
  * resume, so they do not fill the disk (sweepCheckpoints). Needs Web Locks to tell orphans from live learners; without
  * them, and on any error, it does nothing.
  */
-async function sweep(adopt: boolean, exclude?: string): Promise<{ learnerId: string; release: () => void } | null> {
+async function sweep(adopt: boolean, exclude?: string): Promise<SweepResult["adopted"]> {
   if (!("locks" in navigator)) return null
   try {
     const r = await sweepCheckpoints({ idb: indexedDB, tryLock: webLock(navigator.locks), now: () => new Date(), adopt, ...(exclude ? { exclude: [exclude] } : {}) })

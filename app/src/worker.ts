@@ -36,7 +36,9 @@ function rateMeter(): (steps: number) => number {
   }
 }
 
-async function start({ cfg, backend: force, widths, hidden }: StartMessage): Promise<void> {
+async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: StartMessage): Promise<void> {
+  /** Used by the first run only: a restore after a GPU failure reads the (updated) checkpoint from the database. */
+  let record = checkpointRecord
   frames.setHidden(hidden ?? false)
   const id = cfg.learnerId
   const world = createWorld({ seed: seedsOf(id).world, canvas: new OffscreenCanvas(WORLD.width, WORLD.height) })
@@ -48,7 +50,10 @@ async function start({ cfg, backend: force, widths, hidden }: StartMessage): Pro
   const run: RunLife = async (c, chosen, restore) => {
     // Every log file this learner has written comes before its checkpoint, so its curve is the start of the resumed one.
     const prior: CurvePoint[] = (await queue.files(id)).flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
+    const adopted = record
+    record = undefined
     return runSession(c, {
+      ...(adopted !== undefined ? { checkpointRecord: adopted } : {}),
       world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen),
       createLearner: async (init): Promise<SessionLearner> => {
         const l = await createLearner({ backend: chosen.backend, ...init })
