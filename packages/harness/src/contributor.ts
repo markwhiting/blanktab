@@ -22,7 +22,7 @@ const BACKOFF_MAX_MS = 600_000
 const FORK_POLLS = 10
 const FORK_POLL_MS = 2_000
 const DEFAULT_RATE_LIMIT_MS = 60_000
-const PERMISSION_MESSAGE = "Your GitHub token can't write to the repo — check its permissions."
+export const PERMISSION_MESSAGE = "Your GitHub token can't write to the repo — check its permissions."
 
 class Wait extends Error { constructor(readonly ms: number, readonly why: string) { super(why) } }
 
@@ -61,61 +61,80 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     throw new Wait(BACKOFF_START_MS, "Your fork is still being created")
   }
 
-  async function ensureBranch(api: Api, dest: string, learnerId: string): Promise<void> {
-    const have = await api.call("GET", `/repos/${dest}/git/ref/heads/${branchOf(learnerId)}`, undefined, [404])
-    if (have.status === 200) return
-    const main = await api.call("GET", `/repos/${UPSTREAM}/git/ref/heads/main`)
-    const sha = (main.body as { object?: { sha?: unknown } } | null)?.object?.sha
-    if (typeof sha !== "string") throw new GitHubError(502, "unexpected ref response", null)
-    try {
-      await api.call("POST", `/repos/${dest}/git/refs`, { ref: `refs/heads/${branchOf(learnerId)}`, sha })
-    } catch (e) {
-      if (!(e instanceof GitHubError && e.status === 422)) throw e // 422: someone else created it first
-    }
+  const shaOf = (body: unknown, where: string): string => {
+    const b = body as { sha?: unknown; object?: { sha?: unknown } } | null
+    const sha = b?.object?.sha ?? b?.sha
+    if (typeof sha !== "string") throw new GitHubError(502, `unexpected ${where} response`, null)
+    return sha
   }
 
-  async function putFile(api: Api, dest: string, learnerId: string, path: string, content: string, message: string, update: boolean): Promise<void> {
-    const ref = encodeURIComponent(branchOf(learnerId))
-    const existing = update ? await api.call("GET", `/repos/${dest}/contents/${path}?ref=${ref}`, undefined, [404]) : null
-    const sha = existing?.status === 200 ? (existing.body as { sha?: unknown } | null)?.sha : undefined
-    const body = { message, content: toBase64(content), branch: branchOf(learnerId), ...(typeof sha === "string" ? { sha } : {}) }
-    try {
-      await api.call("PUT", `/repos/${dest}/contents/${path}`, body)
-    } catch (e) {
-      // A log file is write-once. If it is already there (sent earlier, never marked), that is success.
-      if (!update && e instanceof GitHubError && e.status === 422) {
-        const there = await api.call("GET", `/repos/${dest}/contents/${path}?ref=${ref}`, undefined, [404])
-        if (there.status === 200) return
-      }
-      throw e
-    }
+  async function upstreamMain(api: Api): Promise<string> {
+    return shaOf((await api.call("GET", `/repos/${UPSTREAM}/git/ref/heads/main`)).body, "ref")
   }
 
-  async function ensurePr(api: Api, dest: string, owner: string, learnerId: string): Promise<void> {
-    const head = `${owner}:${branchOf(learnerId)}`
+  async function hasOpenPr(api: Api, owner: string, learnerId: string): Promise<boolean> {
     // Only an OPEN PR counts: once the gate merges or closes one, later logs need a fresh PR.
-    const open = async () => {
-      const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=open`)
-      return Array.isArray(found.body) && found.body.length > 0
+    const head = `${owner}:${branchOf(learnerId)}`
+    const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=open`)
+    return Array.isArray(found.body) && found.body.length > 0
+  }
+
+  /**
+   * The commit to build on. With an open PR: the branch head. Without one the branch starts again from
+   * upstream main, so files an earlier (merged or closed) PR carried are not proposed a second time.
+   */
+  async function branchBase(api: Api, dest: string, learnerId: string, prOpen: boolean): Promise<string> {
+    const refPath = `/repos/${dest}/git/ref/heads/${branchOf(learnerId)}`
+    const have = await api.call("GET", refPath, undefined, [404])
+    if (have.status === 200 && prOpen) return shaOf(have.body, "ref")
+    const main = await upstreamMain(api)
+    if (have.status === 200) {
+      await api.call("PATCH", `/repos/${dest}/git/refs/heads/${branchOf(learnerId)}`, { sha: main, force: true })
+      return main
     }
-    if (await open()) return
     try {
-      await createPr(api, dest, owner, learnerId, head)
+      await api.call("POST", `/repos/${dest}/git/refs`, { ref: `refs/heads/${branchOf(learnerId)}`, sha: main })
+      return main
+    } catch (e) {
+      if (!(e instanceof GitHubError && e.status === 422)) throw e
+      return shaOf((await api.call("GET", refPath)).body, "ref") // 422: another tab created it first
+    }
+  }
+
+  /** All of a learner's pending files as one commit on its branch. Returns false when they were all there already. */
+  async function commitFiles(api: Api, dest: string, learnerId: string, parent: string, files: LogFile[]): Promise<boolean> {
+    const baseTree = (await api.call("GET", `/repos/${dest}/git/commits/${parent}`)).body as { tree?: { sha?: unknown } } | null
+    const baseTreeSha = baseTree?.tree?.sha
+    if (typeof baseTreeSha !== "string") throw new GitHubError(502, "unexpected commit response", null)
+    const entries = []
+    for (const f of files) {
+      const blob = await api.call("POST", `/repos/${dest}/git/blobs`, { content: toBase64(JSON.stringify(f)), encoding: "base64" })
+      entries.push({ path: `${runPath(learnerId)}/${f.seq}.json`, mode: "100644", type: "blob", sha: shaOf(blob.body, "blob") })
+    }
+    const tree = shaOf((await api.call("POST", `/repos/${dest}/git/trees`, { base_tree: baseTreeSha, tree: entries })).body, "tree")
+    if (tree === baseTreeSha) return false // a crash after an earlier commit: nothing new to write
+    const seqs = files.map(f => f.seq)
+    const message = `log: ${learnerId} #${seqs.length === 1 ? seqs[0] : `${seqs[0]}-${seqs[seqs.length - 1]}`}`
+    const commit = shaOf((await api.call("POST", `/repos/${dest}/git/commits`, { message, tree, parents: [parent] })).body, "commit")
+    // force:false: if another tab moved the branch meanwhile this fails and the whole send is retried.
+    await api.call("PATCH", `/repos/${dest}/git/refs/heads/${branchOf(learnerId)}`, { sha: commit, force: false })
+    return true
+  }
+
+  async function createPr(api: Api, dest: string, owner: string, learnerId: string): Promise<void> {
+    try {
+      await api.call("POST", `/repos/${UPSTREAM}/pulls`, {
+        title: `run: ${learnerId}`,
+        head: `${owner}:${branchOf(learnerId)}`,
+        base: "main",
+        draft: true,
+        body: `Session logs from learner ${learnerId}, submitted by the blanktab page on behalf of @${owner}. Branch: ${dest}@${branchOf(learnerId)}.`,
+      })
     } catch (e) {
       // Two tabs share one outbox: the other tab may have opened it first.
-      if (e instanceof GitHubError && e.status === 422 && (await open())) return
+      if (e instanceof GitHubError && e.status === 422 && (await hasOpenPr(api, owner, learnerId))) return
       throw e
     }
-  }
-
-  async function createPr(api: Api, dest: string, owner: string, learnerId: string, head: string): Promise<void> {
-    await api.call("POST", `/repos/${UPSTREAM}/pulls`, {
-      title: `run: ${learnerId}`,
-      head,
-      base: "main",
-      draft: true,
-      body: `Session logs from learner ${learnerId}, submitted by the blanktab page on behalf of @${owner}. Branch: ${dest}@${branchOf(learnerId)}.`,
-    })
   }
 
   async function sendAll(token: string): Promise<void> {
@@ -129,19 +148,14 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const owner = dest.split("/")[0]!
     for (const [id, files] of byLearner) {
       files.sort((a, b) => a.seq - b.seq)
-      await ensureBranch(api, dest, id)
-      // Each log is marked sent right after its PUT. The last stays queued until the heartbeat and PR
-      // are done, so a failure there is retried instead of leaving a branch with no PR.
-      const last = files[files.length - 1]!
-      for (const f of files) {
-        status("sending", `Sending session log ${f.seq} of learner ${id}…`, (await queue.pending()).length)
-        await putFile(api, dest, id, `${runPath(id)}/${f.seq}.json`, JSON.stringify(f), `log: ${id} #${f.seq}`, false)
-        if (f !== last) await queue.markSent(f.learnerId, f.seq)
-      }
-      const hb = { learnerId: id, writtenAt: now().toISOString() }
-      await putFile(api, dest, id, `${runPath(id)}/heartbeat.json`, JSON.stringify(hb), `heartbeat: ${id}`, true)
-      await ensurePr(api, dest, owner, id)
-      await queue.markSent(last.learnerId, last.seq)
+      status("sending", `Sending ${files.length} session log${files.length === 1 ? "" : "s"} of learner ${id}…`, pending.length)
+      const prOpen = await hasOpenPr(api, owner, id)
+      const parent = await branchBase(api, dest, id, prOpen)
+      const changed = await commitFiles(api, dest, id, parent, files)
+      // Unchanged with no open PR: a fresh branch from main already holds these files, i.e. they were merged.
+      if (!prOpen && changed) await createPr(api, dest, owner, id)
+      // Only now, with the commit and an open PR both in place (or the files already on main), are they sent.
+      for (const f of files) await queue.markSent(f.learnerId, f.seq)
     }
   }
 

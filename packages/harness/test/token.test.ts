@@ -38,4 +38,20 @@ describe("checkToken", () => {
     const r = await checkToken("t", (() => Promise.reject(new TypeError("offline"))) as typeof fetch)
     expect(r.ok).toBe(false)
   })
+  it("classic token: X-OAuth-Scopes must include public_repo or repo", async () => {
+    for (const scopes of ["public_repo", "repo", "gist, public_repo, read:org", "repo,workflow"]) {
+      const gh = fakeGithub({ token: "t", login: "ann", canPush: true, scopes })
+      expect(await checkToken("t", gh.fetchFn)).toEqual({ ok: true, login: "ann", canPush: true })
+    }
+    for (const scopes of ["", "gist", "read:repo_hook, public_repo_x", "read:user"]) {
+      const gh = fakeGithub({ token: "t", login: "ann", canPush: true, scopes })
+      const r = await checkToken("t", gh.fetchFn)
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.reason).toMatch(/public_repo/)
+    }
+  })
+  it("no X-OAuth-Scopes header (fine-grained token): no scope check", async () => {
+    const gh = fakeGithub({ token: "t", login: "ann", canPush: true })
+    expect((await checkToken("t", gh.fetchFn)).ok).toBe(true)
+  })
 })

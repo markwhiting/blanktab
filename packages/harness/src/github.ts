@@ -10,14 +10,27 @@ export class GitHubError extends Error {
 }
 export class NetworkError extends Error {}
 
-export interface ApiResult { status: number; body: unknown }
+export interface ApiResult { status: number; body: unknown; headers: Headers }
 export interface Api {
   /** Resolves for 2xx and for statuses listed in `allow`; throws GitHubError otherwise, NetworkError if fetch throws. */
   call(method: string, path: string, body?: unknown, allow?: number[]): Promise<ApiResult>
 }
 
-/** Rate-limit verdict for a 403/429. Reset time is trusted only when the quota is exhausted. */
-export function rateLimit(status: number, h: Headers, nowMs: number): { limited: boolean; delayMs: number | null } {
+/** GitHub's abuse protection: no quota headers, a 403 whose message says so. Waits at least this long. */
+export const SECONDARY_RATE_LIMIT_MIN_MS = 60_000
+const SECONDARY_RE = /secondary rate limit/i
+
+/**
+ * Rate-limit verdict for a 403/429. Reset time is trusted only when the quota is exhausted.
+ * `bodyText` is read only to recognise a secondary rate limit; it never goes into an error message.
+ */
+export function rateLimit(status: number, h: Headers, nowMs: number, bodyText = ""): { limited: boolean; delayMs: number | null } {
+  const primary = primaryRateLimit(status, h, nowMs)
+  if (status === 403 && SECONDARY_RE.test(bodyText)) return { limited: true, delayMs: Math.max(primary.delayMs ?? 0, SECONDARY_RATE_LIMIT_MIN_MS) }
+  return primary
+}
+
+function primaryRateLimit(status: number, h: Headers, nowMs: number): { limited: boolean; delayMs: number | null } {
   const num = (k: string): number | null => {
     const v = h.get(k)
     return v !== null && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null
@@ -48,10 +61,12 @@ export function createApi(token: string, fetchFn: typeof fetch, now: () => numbe
       } catch {
         throw new NetworkError("network request failed")
       }
+      let text = ""
+      try { text = await res.text() } catch { /* unreadable body */ }
       let parsed: unknown = null
-      try { parsed = await res.json() } catch { /* empty or non-JSON body */ }
-      if (res.ok || allow.includes(res.status)) return { status: res.status, body: parsed }
-      const rl = res.status === 403 || res.status === 429 ? rateLimit(res.status, res.headers, now()) : { limited: false, delayMs: null }
+      try { parsed = JSON.parse(text) } catch { /* empty or non-JSON body */ }
+      if (res.ok || allow.includes(res.status)) return { status: res.status, body: parsed, headers: res.headers }
+      const rl = res.status === 403 || res.status === 429 ? rateLimit(res.status, res.headers, now(), text) : { limited: false, delayMs: null }
       throw new GitHubError(res.status, `GitHub answered ${res.status}`, rl.delayMs, rl.limited)
     },
   }

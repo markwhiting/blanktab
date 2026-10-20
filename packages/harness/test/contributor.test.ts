@@ -3,7 +3,7 @@ import { IDBFactory } from "fake-indexeddb"
 import { openQueue, type Queue } from "../src/queue"
 import { createContributor, type ContributorStatus } from "../src/contributor"
 import { setToken } from "../src/token"
-import { parseHeartbeat, parseLogFile } from "../src/log"
+import { parseLogFile } from "../src/log"
 import { stubStorage, mkFile } from "./helpers"
 import { fakeGithub } from "./fakeGithub"
 
@@ -30,30 +30,51 @@ async function setup(opts: { canPush?: boolean; withToken?: boolean; files?: num
   return { idb, queue, ls, gh, c, statuses, scheduled, timers, last: () => statuses.at(-1)! }
 }
 
+const UP = "markwhiting/blanktab"
+const BR = `run/${ID}`
+const at = (r: { method: string; url: string }) => `${r.method} ${new URL(r.url).pathname}`
+const writes = (reqs: { method: string; url: string }[]) => reqs.filter(r => r.method !== "GET").map(at)
+const logPaths = (id: string, seqs: number[]) => seqs.map(s => `data/runs/${id}/${s}.json`)
+
 describe("contributor: push access", () => {
-  it("creates the branch, puts 6 files + heartbeat, opens 1 draft PR, empties the queue", async () => {
+  it("one commit per flush: 6 blobs, 1 tree on the branch head's tree, 1 commit, 1 ref move, 1 draft PR", async () => {
     const t = await setup()
     await t.c.flush()
     const reqs = t.gh.requests
-    expect(reqs.filter(r => r.method === "POST" && r.url.endsWith("/git/refs"))).toHaveLength(1)
-    const puts = reqs.filter(r => r.method === "PUT")
-    expect(puts.map(r => new URL(r.url).pathname)).toEqual([
-      ...[0, 1, 2, 3, 4, 5].map(s => `/repos/markwhiting/blanktab/contents/data/runs/${ID}/${s}.json`),
-      `/repos/markwhiting/blanktab/contents/data/runs/${ID}/heartbeat.json`,
+    expect(writes(reqs)).toEqual([
+      `POST /repos/${UP}/git/refs`,
+      ...Array(6).fill(`POST /repos/${UP}/git/blobs`),
+      `POST /repos/${UP}/git/trees`,
+      `POST /repos/${UP}/git/commits`,
+      `PATCH /repos/${UP}/git/refs/heads/${BR}`,
+      `POST /repos/${UP}/pulls`,
     ])
-    for (const p of puts) expect(JSON.parse(p.body!).branch).toBe(`run/${ID}`)
+    const body = (suffix: string) => JSON.parse(reqs.find(r => r.method !== "GET" && new URL(r.url).pathname.endsWith(suffix))!.body!)
+    const commitOfMain = reqs.find(r => r.method === "GET" && r.url.endsWith(`/git/commits/${"a".repeat(40)}`))
+    expect(commitOfMain).toBeTruthy()
+    expect(body("/git/trees")).toMatchObject({ base_tree: expect.stringMatching(/^[0-9a-f]{40}$/) })
+    expect(body("/git/trees").tree.map((e: { path: string }) => e.path)).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]))
+    expect(body("/git/commits").parents).toEqual(["a".repeat(40)])
+    expect(body(`/git/refs/heads/${BR}`)).toMatchObject({ force: false })
+    expect(reqs.some(r => r.method === "PUT" || r.url.includes("/contents/"))).toBe(false)
+    expect(t.gh.paths(UP, BR)).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]).sort())
     for (let s = 0; s < 6; s++) {
-      const f = t.gh.file("markwhiting/blanktab", `run/${ID}`, `data/runs/${ID}/${s}.json`)
+      const f = t.gh.file(UP, BR, `data/runs/${ID}/${s}.json`)
       expect(parseLogFile(f).ok).toBe(true)
       expect(f).toEqual(mkFile(ID, s, { final: s === 5 }))
     }
-    const hb = t.gh.file("markwhiting/blanktab", `run/${ID}`, `data/runs/${ID}/heartbeat.json`)
-    expect(parseHeartbeat(hb).ok).toBe(true)
-    expect(hb).toEqual({ learnerId: ID, writtenAt: NOW.toISOString() })
-    expect(t.gh.pulls).toEqual([expect.objectContaining({ title: `run: ${ID}`, head: `markwhiting:run/${ID}`, base: "main", draft: true })])
+    expect(t.gh.pulls).toEqual([expect.objectContaining({ title: `run: ${ID}`, head: `markwhiting:${BR}`, base: "main", draft: true })])
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]).sort())
     expect(await t.queue.pending()).toEqual([])
     expect(t.last()).toMatchObject({ state: "idle", pending: 0 })
     expect(reqs.some(r => r.url.includes("/forks"))).toBe(false)
+  })
+
+  it("writes no heartbeat.json", async () => {
+    const t = await setup()
+    await t.c.flush()
+    expect(t.gh.paths(UP, BR).some(p => p.includes("heartbeat"))).toBe(false)
+    expect(t.gh.requests.some(r => (r.body ?? "").includes("heartbeat"))).toBe(false)
   })
 
   it("a second flush with nothing pending makes no requests", async () => {
@@ -64,36 +85,76 @@ describe("contributor: push access", () => {
     expect(t.gh.requests.length).toBe(n)
   })
 
-  it("updates an existing heartbeat using its blob sha and reuses an existing branch and PR", async () => {
+  it("reuses an existing branch and open PR: one more commit on top, fast-forward only", async () => {
     const t = await setup({ files: 2 })
     await t.c.flush()
+    const head = t.gh.repos.get(UP)!.branches.get(BR)!
     await t.queue.put(mkFile(ID, 2))
     t.gh.requests.length = 0
     await t.c.flush()
-    const hbPut = t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("heartbeat.json"))
-    expect(JSON.parse(hbPut[0]!.body!).sha).toMatch(/^blob/)
-    expect(t.gh.requests.some(r => r.method === "POST")).toBe(false)
+    expect(writes(t.gh.requests)).toEqual([
+      `POST /repos/${UP}/git/blobs`, `POST /repos/${UP}/git/trees`, `POST /repos/${UP}/git/commits`, `PATCH /repos/${UP}/git/refs/heads/${BR}`,
+    ])
+    const commit = JSON.parse(t.gh.requests.find(r => r.method === "POST" && r.url.endsWith("/git/commits"))!.body!)
+    expect(commit.parents).toEqual([head])
+    expect(t.gh.paths(UP, BR)).toEqual(logPaths(ID, [0, 1, 2]))
     expect(t.gh.pulls).toHaveLength(1)
+    expect(await t.queue.pending()).toEqual([])
   })
 
-  it("never overwrites a file already on the branch (crash between PUT and markSent)", async () => {
-    const t = await setup({ files: 2 })
-    // File 0 landed and was marked sent; file 1 fails with a 503 and is retried.
-    t.gh.interceptors.push(r => (r.method === "PUT" && r.url.endsWith("/1.json") ? new Response("{}", { status: 503 }) : undefined))
+  it("nothing is marked sent until the commit and the PR both exist; a retry completes without duplicating", async () => {
+    const t = await setup({ files: 3 })
+    t.gh.interceptors.push(r => (r.method === "POST" && r.url.endsWith("/pulls") ? new Response("{}", { status: 503 }) : undefined))
     await t.c.flush()
-    expect((await t.queue.pending()).map(f => f.seq)).toEqual([1])
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([0, 1, 2])
+    expect(t.gh.paths(UP, BR)).toEqual(logPaths(ID, [0, 1, 2])) // the commit landed
+    expect(t.gh.pulls).toHaveLength(0)
     t.gh.interceptors.length = 0
     await t.c.flush()
     expect(await t.queue.pending()).toEqual([])
-    expect(t.gh.file("markwhiting/blanktab", `run/${ID}`, `data/runs/${ID}/0.json`)).toEqual(mkFile(ID, 0))
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2]))
   })
 
-  it("groups several learners, one branch and PR each", async () => {
+  it("a failed commit marks nothing sent", async () => {
+    const t = await setup({ files: 3 })
+    t.gh.interceptors.push(r => (r.method === "POST" && r.url.endsWith("/git/commits") ? new Response("{}", { status: 503 }) : undefined))
+    await t.c.flush()
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([0, 1, 2])
+    expect(t.gh.pulls).toHaveLength(0)
+  })
+
+  it("a ref move that is not a fast-forward (another tab moved the branch) fails and retries; nothing marked", async () => {
+    const t = await setup({ files: 1 })
+    t.gh.interceptors.push(r => (r.method === "PATCH" ? new Response('{"message":"Update is not a fast forward"}', { status: 422 }) : undefined))
+    await t.c.flush()
+    expect((await t.queue.pending()).length).toBe(1)
+    expect(t.last().state).toBe("error")
+    expect(t.scheduled).toHaveLength(1)
+  })
+
+  it("files already on the open PR's branch (crash after commit) are marked sent without a new commit", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    // Simulate the crash: the same files are pending again.
+    const idb2 = await openQueue(new IDBFactory())
+    for (let s = 0; s < 2; s++) await idb2.put(mkFile(ID, s, { final: s === 1 }))
+    const c2 = createContributor({ queue: idb2, ls: t.ls, fetchFn: t.gh.fetchFn, now: () => NOW, onStatus: () => {}, sleep: async () => {}, schedule: () => {} })
+    t.gh.requests.length = 0
+    await c2.flush()
+    expect(t.gh.requests.some(r => r.method === "POST" && r.url.endsWith("/git/commits"))).toBe(false)
+    expect(await idb2.pending()).toEqual([])
+    expect(t.gh.pulls).toHaveLength(1)
+  })
+
+  it("groups several learners, one branch, commit and PR each", async () => {
     const t = await setup({ files: 2 })
     const other = "lrn_fedcba9876543210"
     await t.queue.put(mkFile(other, 0))
     await t.c.flush()
-    expect(t.gh.pulls.map(p => p.head).sort()).toEqual([`markwhiting:run/${other}`, `markwhiting:run/${ID}`].sort())
+    expect(t.gh.pulls.map(p => p.head).sort()).toEqual([`markwhiting:run/${other}`, `markwhiting:${BR}`].sort())
+    expect(t.gh.requests.filter(r => r.method === "POST" && r.url.endsWith("/git/commits"))).toHaveLength(2)
+    expect(t.gh.paths(UP, `run/${other}`)).toEqual(logPaths(other, [0]))
     expect(await t.queue.pending()).toEqual([])
   })
 
@@ -101,7 +162,46 @@ describe("contributor: push access", () => {
     const t = await setup({ files: 1 })
     await t.queue.put(mkFile("lrn_aaaaaaaaaaaaaaaa", 0, { settings: { note: "héllo ✓" } }))
     await t.c.flush()
-    expect(t.gh.file("markwhiting/blanktab", "run/lrn_aaaaaaaaaaaaaaaa", "data/runs/lrn_aaaaaaaaaaaaaaaa/0.json")).toMatchObject({ settings: { note: "héllo ✓" } })
+    expect(t.gh.file(UP, "run/lrn_aaaaaaaaaaaaaaaa", "data/runs/lrn_aaaaaaaaaaaaaaaa/0.json")).toMatchObject({ settings: { note: "héllo ✓" } })
+  })
+})
+
+describe("contributor: fresh branch after merge (brief item 13)", () => {
+  for (const deleteBranch of [false, true]) {
+    for (const canPush of [true, false]) {
+      it(`after a merge (${canPush ? "push" : "fork"}, branch ${deleteBranch ? "deleted" : "kept"}) the next PR proposes only the new files`, async () => {
+        const t = await setup({ canPush, files: 2 })
+        const repo = canPush ? UP : "ann/blanktab"
+        await t.c.flush()
+        t.gh.merge(t.gh.pulls[0]!, { deleteBranch })
+        const main = t.gh.repos.get(UP)!.branches.get("main")!
+        await t.queue.put(mkFile(ID, 2))
+        await t.queue.put(mkFile(ID, 3, { final: true }))
+        t.gh.requests.length = 0
+        await t.c.flush()
+        expect(t.gh.pulls).toHaveLength(2)
+        expect(t.gh.pulls[1]).toMatchObject({ state: "open", draft: true })
+        expect(t.gh.prFiles(t.gh.pulls[1]!)).toEqual(logPaths(ID, [2, 3]))
+        if (!deleteBranch) {
+          const reset = t.gh.requests.find(r => r.method === "PATCH" && JSON.parse(r.body!).force === true)
+          expect(reset && new URL(reset.url).pathname).toBe(`/repos/${repo}/git/refs/heads/${BR}`)
+          expect(JSON.parse(reset!.body!).sha).toBe(main)
+        }
+        expect(await t.queue.pending()).toEqual([])
+      })
+    }
+  }
+
+  it("files that are already on main (PR merged before they were marked sent) are marked sent and no PR is opened", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    t.gh.merge(t.gh.pulls[0]!, { deleteBranch: false })
+    const q2 = await openQueue(new IDBFactory())
+    for (let s = 0; s < 2; s++) await q2.put(mkFile(ID, s, { final: s === 1 }))
+    const c2 = createContributor({ queue: q2, ls: t.ls, fetchFn: t.gh.fetchFn, now: () => NOW, onStatus: () => {}, sleep: async () => {}, schedule: () => {} })
+    await c2.flush()
+    expect(await q2.pending()).toEqual([])
+    expect(t.gh.pulls).toHaveLength(1)
   })
 })
 
@@ -112,11 +212,13 @@ describe("contributor: no push access", () => {
     const reqs = t.gh.requests.map(r => `${r.method} ${new URL(r.url).pathname}`)
     const forkAt = reqs.indexOf("POST /repos/markwhiting/blanktab/forks")
     expect(forkAt).toBeGreaterThan(-1)
-    expect(reqs.indexOf("PUT /repos/ann/blanktab/contents/data/runs/" + ID + "/0.json")).toBeGreaterThan(forkAt)
+    expect(reqs.indexOf("POST /repos/ann/blanktab/git/blobs")).toBeGreaterThan(forkAt)
     expect(reqs.filter(r => r === "GET /repos/ann/blanktab").length).toBeGreaterThan(2)
     expect(t.gh.file("ann/blanktab", `run/${ID}`, `data/runs/${ID}/1.json`)).toBeTruthy()
     expect(t.gh.pulls[0]).toMatchObject({ head: `ann:run/${ID}`, base: "main", draft: true })
-    expect(reqs.some(r => r.startsWith("PUT /repos/markwhiting"))).toBe(false)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1]))
+    // upstream is only read and asked for a PR (and the fork): no git writes there
+    expect(reqs.filter(r => r.startsWith("POST /repos/markwhiting/blanktab/git") || r.startsWith("PATCH /repos/markwhiting"))).toEqual([])
     expect(await t.queue.pending()).toEqual([])
   })
 
@@ -142,21 +244,21 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     expect((await t.queue.pending()).length).toBe(6)
     expect(t.last()).toEqual({ state: "error", message: "Your GitHub token was rejected — paste a new one.", pending: 6 })
     expect(t.scheduled).toEqual([])
-    expect(t.gh.requests.some(r => r.method === "PUT")).toBe(false)
+    expect(t.gh.requests.some(r => r.method !== "GET")).toBe(false)
   })
 
-  it("401 midway keeps unsent files pending", async () => {
+  it("401 midway keeps every file pending (a learner's files are sent as one commit)", async () => {
     const t = await setup()
-    let puts = 0
-    t.gh.interceptors.push(r => (r.method === "PUT" && ++puts === 3 ? new Response('{"message":"Bad credentials"}', { status: 401 }) : undefined))
+    let blobs = 0
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") && ++blobs === 3 ? new Response('{"message":"Bad credentials"}', { status: 401 }) : undefined))
     await t.c.flush()
     expect(t.last().message).toMatch(/rejected/)
-    expect((await t.queue.pending()).map(f => f.seq)).toEqual([2, 3, 4, 5]) // 0 and 1 were sent and marked
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([0, 1, 2, 3, 4, 5])
   })
 
   it("403 with Retry-After: 30 schedules a retry of at least 30 s, queue intact", async () => {
     const t = await setup()
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response('{"message":"rate"}', { status: 403, headers: { "Retry-After": "30" } }) : undefined))
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response('{"message":"rate"}', { status: 403, headers: { "Retry-After": "30" } }) : undefined))
     await t.c.flush()
     expect(t.scheduled).toHaveLength(1)
     expect(t.scheduled[0]!).toBeGreaterThanOrEqual(30_000)
@@ -172,7 +274,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
   it("429 honours X-RateLimit-Reset", async () => {
     const t = await setup()
     const reset = Math.floor(NOW.getTime() / 1000) + 120
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 429, headers: { "X-RateLimit-Reset": String(reset), "X-RateLimit-Remaining": "0" } }) : undefined))
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response("{}", { status: 429, headers: { "X-RateLimit-Reset": String(reset), "X-RateLimit-Remaining": "0" } }) : undefined))
     await t.c.flush()
     expect(t.scheduled[0]!).toBeGreaterThanOrEqual(120_000)
   })
@@ -196,7 +298,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     const t = await setup({ files: 1 })
     let again: Promise<void> | undefined
     t.gh.interceptors.push(r => {
-      if (again === undefined && r.method === "PUT" && r.url.endsWith("/0.json")) {
+      if (again === undefined && r.url.endsWith("/git/blobs")) {
         void t.queue.put(mkFile(ID, 1, { final: true }))
         again = t.c.flush()
       }
@@ -204,7 +306,8 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     })
     await t.c.flush()
     await again
-    expect(t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("/1.json"))).toHaveLength(1)
+    expect(t.gh.paths(UP, BR)).toEqual(logPaths(ID, [0, 1]))
+    expect(t.gh.requests.filter(r => r.url.endsWith("/git/commits") && r.method === "POST")).toHaveLength(2)
     expect(await t.queue.pending()).toEqual([])
   })
 
@@ -216,13 +319,14 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     await expect(t.c.flush()).rejects.toThrow("idb broke")
     await new Promise(r => setTimeout(r, 50))
     expect(await t.queue.pending()).toEqual([])
-    expect(t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("/0.json"))).toHaveLength(1)
+    expect(t.gh.requests.filter(r => r.url.endsWith("/git/commits") && r.method === "POST")).toHaveLength(1)
   })
 
   it("concurrent flushes do not double-send", async () => {
     const t = await setup()
     await Promise.all([t.c.flush(), t.c.flush()])
-    expect(t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("/0.json"))).toHaveLength(1)
+    expect(t.gh.requests.filter(r => r.url.endsWith("/git/commits") && r.method === "POST")).toHaveLength(1)
+    expect(t.gh.pulls).toHaveLength(1)
   })
 })
 
@@ -234,8 +338,8 @@ describe("contributor: no token (Review Focus 5)", () => {
     expect(t.gh.requests).toEqual([])
     setToken(t.ls, TOKEN)
     await t.c.flush()
-    const order = t.gh.requests.filter(r => r.method === "PUT" && !r.url.endsWith("heartbeat.json")).map(r => r.url.match(/(\d+)\.json$/)![1])
-    expect(order).toEqual(["0", "1", "2", "3", "4", "5"])
+    expect(t.gh.requests.filter(r => r.method === "POST" && r.url.endsWith("/git/commits"))).toHaveLength(1)
+    expect(t.gh.paths(UP, BR)).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]).sort())
     expect(await t.queue.pending()).toEqual([])
   })
 })
@@ -257,7 +361,8 @@ describe("contributor: token never leaks (Review Focus 1)", () => {
         for (const [, v] of others) expect(v).not.toContain(TOKEN)
       }
       for (const s of t.statuses) expect(JSON.stringify(s)).not.toContain(TOKEN)
-      for (const p of t.gh.repos.values()) for (const f of p.files.values()) expect(atob(f.content)).not.toContain(TOKEN)
+      expect(t.gh.blobs.size).toBe(6)
+      for (const b of t.gh.blobs.values()) expect(t.gh.decode(b)).not.toContain(TOKEN)
       // dump every IndexedDB record, raw
       const db = await new Promise<IDBDatabase>((res, rej) => { const q = t.idb.open("blanktab"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
       const rows = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("outbox").objectStore("outbox").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
@@ -281,11 +386,12 @@ describe("contributor: review fixes", () => {
     const t = await setup({ files: 2 })
     await t.c.flush()
     expect(t.gh.pulls).toHaveLength(1)
-    t.gh.pulls[0]!.state = "closed"
+    t.gh.pulls[0]!.state = "closed" // closed by the gate without merging: its files are not re-proposed
     await t.queue.put(mkFile(ID, 2))
     await t.c.flush()
     expect(t.gh.pulls).toHaveLength(2)
     expect(t.gh.pulls[1]).toMatchObject({ state: "open", draft: true })
+    expect(t.gh.prFiles(t.gh.pulls[1]!)).toEqual(logPaths(ID, [2]))
     expect(await t.queue.pending()).toEqual([])
   })
 
@@ -300,7 +406,7 @@ describe("contributor: review fixes", () => {
   it("403 with x-ratelimit-remaining 0 waits until the reset time", async () => {
     const t = await setup()
     const reset = Math.floor(NOW.getTime() / 1000) + 300
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }) : undefined))
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }) : undefined))
     await t.c.flush()
     expect(t.scheduled[0]!).toBeGreaterThanOrEqual(300_000)
   })
@@ -308,30 +414,37 @@ describe("contributor: review fixes", () => {
   it("429 with no hints defaults to at least 60 s; reset is ignored while quota remains", async () => {
     const t = await setup()
     const reset = Math.floor(NOW.getTime() / 1000) + 1
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response("{}", { status: 429, headers: { "x-ratelimit-remaining": "40", "x-ratelimit-reset": String(reset) } }) : undefined))
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response("{}", { status: 429, headers: { "x-ratelimit-remaining": "40", "x-ratelimit-reset": String(reset) } }) : undefined))
     await t.c.flush()
     expect(t.scheduled[0]!).toBeGreaterThanOrEqual(60_000)
   })
 
+  it("a 403 secondary rate limit is rate limiting (>= 60 s backoff), not a permissions error", async () => {
+    for (const body of ['{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}', "You have exceeded a SECONDARY RATE LIMIT"]) {
+      const t = await setup()
+      t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response(body, { status: 403, headers: { "x-ratelimit-remaining": "4000" } }) : undefined))
+      await t.c.flush()
+      expect(t.last().message).toMatch(/limiting requests/)
+      expect(t.last().message).not.toMatch(/permissions/)
+      expect(t.scheduled).toHaveLength(1)
+      expect(t.scheduled[0]!).toBeGreaterThanOrEqual(60_000)
+    }
+  })
+
+  it("a secondary rate limit with a longer Retry-After waits that long", async () => {
+    const t = await setup()
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response('{"message":"secondary rate limit"}', { status: 403, headers: { "retry-after": "120" } }) : undefined))
+    await t.c.flush()
+    expect(t.scheduled[0]!).toBeGreaterThanOrEqual(120_000)
+  })
+
   it("a plain 403 is a permissions error: no auto-retry, queue intact", async () => {
     const t = await setup()
-    t.gh.interceptors.push(r => (r.method === "PUT" ? new Response('{"message":"Resource not accessible"}', { status: 403, headers: { "x-ratelimit-remaining": "4000" } }) : undefined))
+    t.gh.interceptors.push(r => (r.url.endsWith("/git/blobs") ? new Response('{"message":"Resource not accessible"}', { status: 403, headers: { "x-ratelimit-remaining": "4000" } }) : undefined))
     await t.c.flush()
     expect(t.last()).toEqual({ state: "error", message: "Your GitHub token can't write to the repo — check its permissions.", pending: 6 })
     expect(t.scheduled).toEqual([])
     expect((await t.queue.pending()).length).toBe(6)
-  })
-
-  it("marks each log sent right after its PUT; the last stays pending until heartbeat and PR succeed", async () => {
-    const t = await setup({ files: 3 })
-    t.gh.interceptors.push(r => (r.method === "PUT" && r.url.endsWith("heartbeat.json") ? new Response("{}", { status: 503 }) : undefined))
-    await t.c.flush()
-    expect((await t.queue.pending()).map(f => f.seq)).toEqual([2])
-    expect(t.gh.pulls).toHaveLength(0)
-    t.gh.interceptors.length = 0
-    await t.c.flush()
-    expect(await t.queue.pending()).toEqual([])
-    expect(t.gh.pulls).toHaveLength(1)
   })
 
   it("treats a 422 'pull request already exists' (another tab) as success", async () => {
