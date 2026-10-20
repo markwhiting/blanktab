@@ -192,6 +192,33 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     expect(t.last().state).toBe("idle")
   })
 
+  it("a flush asked for mid-flight runs again afterwards, so a file queued meanwhile is sent", async () => {
+    const t = await setup({ files: 1 })
+    let again: Promise<void> | undefined
+    t.gh.interceptors.push(r => {
+      if (again === undefined && r.method === "PUT" && r.url.endsWith("/0.json")) {
+        void t.queue.put(mkFile(ID, 1, { final: true }))
+        again = t.c.flush()
+      }
+      return undefined
+    })
+    await t.c.flush()
+    await again
+    expect(t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("/1.json"))).toHaveLength(1)
+    expect(await t.queue.pending()).toEqual([])
+  })
+
+  it("a follow-up flush still runs when the run in flight fails unexpectedly", async () => {
+    const t = await setup({ files: 1 })
+    const pending = t.queue.pending.bind(t.queue)
+    let calls = 0
+    t.queue.pending = async () => { if (++calls === 1) { await Promise.resolve(); void t.c.flush().catch(() => {}); throw new Error("idb broke") } return pending() }
+    await expect(t.c.flush()).rejects.toThrow("idb broke")
+    await new Promise(r => setTimeout(r, 50))
+    expect(await t.queue.pending()).toEqual([])
+    expect(t.gh.requests.filter(r => r.method === "PUT" && r.url.endsWith("/0.json"))).toHaveLength(1)
+  })
+
   it("concurrent flushes do not double-send", async () => {
     const t = await setup()
     await Promise.all([t.c.flush(), t.c.flush()])

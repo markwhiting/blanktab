@@ -6,7 +6,9 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./log": "./src/log.ts"
+    "./log": "./src/log.ts",
+    "./queue": "./src/queue.ts",
+    "./session": "./src/session.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

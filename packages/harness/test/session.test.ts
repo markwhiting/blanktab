@@ -81,4 +81,12 @@ describe("session", { timeout: 60_000 }, () => {
     const q = await openQueue(new IDBFactory())
     await expect(runSession(cfgFor("lrn_0123456789abcdef", { logEverySteps: 0 }), deps(q))).rejects.toThrow()
   })
+
+  it("awaits pace after every step when given one", async () => {
+    const q = await openQueue(new IDBFactory())
+    const paced: number[] = []
+    await runSession(cfgFor("lrn_0123456789abcdef", { lifetimeSteps: 120, logEverySteps: 100 }), { ...deps(q), pace: async (steps: number) => { paced.push(steps) } })
+    expect(paced).toEqual(Array.from({ length: 120 }, (_, i) => i + 1))
+    expect((await q.pending()).map(f => f.seq)).toEqual([0, 1])
+  })
 })

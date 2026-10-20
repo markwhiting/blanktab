@@ -180,10 +180,19 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     }
   }
 
+  // One run at a time. A flush asked for while one is running is not dropped: it runs once more afterwards,
+  // so a file queued mid-flight is not left waiting for the next timer.
+  let again: Promise<void> | null = null
   const contributor = {
     flush(): Promise<void> {
-      inFlight ??= run().finally(() => { inFlight = null })
-      return inFlight
+      if (inFlight === null) {
+        inFlight = run().finally(() => { inFlight = null })
+        return inFlight
+      }
+      // Whether the current run resolves or rejects, the follow-up still runs and `again` is cleared.
+      const after = () => { again = null; return contributor.flush() }
+      again ??= inFlight.then(after, after)
+      return again
     },
   }
   return contributor

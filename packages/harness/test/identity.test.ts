@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { getOrCreateLearnerId } from "../src/identity"
+import { getOrCreateLearnerId, newLearnerId } from "../src/identity"
 import { LEARNER_ID_RE } from "../src/log"
 
 import { stubStorage } from "./helpers"
@@ -21,5 +21,13 @@ describe("identity", () => {
   })
   it("uses the injected rng", () => {
     expect(getOrCreateLearnerId(stubStorage(), () => 0)).toBe("lrn_0000000000000000")
+  })
+  it("newLearnerId replaces the tab's id (a newborn after a final session)", () => {
+    const s = stubStorage()
+    const a = getOrCreateLearnerId(s)
+    const b = newLearnerId(s)
+    expect(b).toMatch(LEARNER_ID_RE)
+    expect(b).not.toBe(a)
+    expect(getOrCreateLearnerId(s)).toBe(b)
   })
 })

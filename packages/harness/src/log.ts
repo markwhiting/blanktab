@@ -14,6 +14,21 @@ export interface LogFile {
   final: boolean
 }
 
+/** One row per learner in the published summary, from its highest-seq log file. Built by tools/gate/summary.ts. */
+export interface SessionRow {
+  learnerId: string
+  settings: LogFile["settings"]
+  hostSig: LogFile["hostSig"]
+  stepsTotal: number
+  final: boolean
+  codeSha: string
+  knowledgeSha: string
+  sessionsSeenAtBirth: number
+}
+
+/** knowledge/summary.json, what the next tab reads. */
+export interface Summary { schemaVersion: 1; sessions: SessionRow[] }
+
 export type ParseResult = { ok: true; value: LogFile } | { ok: false; error: string }
 
 export const LEARNER_ID_RE = /^lrn_[0-9a-f]{16}$/
@@ -22,13 +37,13 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
 const isNonNegInt = (v: unknown): v is number => isNum(v) && Number.isInteger(v) && v >= 0
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/ // exactly what Date.prototype.toISOString emits
-const CODE_SHA_RE = /^([0-9a-f]{40}|dev)$/ // GITHUB_SHA, or "dev" for local builds
-const KNOWLEDGE_SHA_RE = /^[0-9a-f]{64}$/ // sha256 hex
+export const CODE_SHA_RE = /^([0-9a-f]{40}|dev)$/ // GITHUB_SHA, or "dev" for local builds
+export const KNOWLEDGE_SHA_RE = /^[0-9a-f]{64}$/ // sha256 hex
 const isIso = (v: unknown): v is string => typeof v === "string" && ISO_RE.test(v) && !Number.isNaN(Date.parse(v))
 
 const MAX_SETTING_STRING = 200
 const MAX_SETTING_KEYS = 50
-const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+export const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const HEARTBEAT_KEYS = ["learnerId", "writtenAt"]

@@ -1,18 +1,9 @@
 // Builds the shared summary the next tab reads: one row per learner, from its highest-seq log file.
 import { readdirSync, readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
-import { parseLogFile, LEARNER_ID_RE, type LogFile } from "@blanktab/harness/log"
+import { parseLogFile, LEARNER_ID_RE, type LogFile, type SessionRow, type Summary } from "@blanktab/harness/log"
 
-export interface SessionRow {
-  learnerId: string
-  settings: LogFile["settings"]
-  hostSig: LogFile["hostSig"]
-  stepsTotal: number
-  final: boolean
-  codeSha: string
-  knowledgeSha: string
-  sessionsSeenAtBirth: number
-}
+export type { SessionRow, Summary }
 
 /** Reads every parseable <n>.json in a learner dir (heartbeat and junk are skipped). */
 export function readLearnerLogs(dir: string): LogFile[] {
@@ -27,7 +18,7 @@ export function readLearnerLogs(dir: string): LogFile[] {
   return out.sort((a, b) => a.seq - b.seq)
 }
 
-export function buildSummary(runsDir: string): { schemaVersion: 1; sessions: SessionRow[] } {
+export function buildSummary(runsDir: string): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
     for (const id of readdirSync(runsDir).sort()) {

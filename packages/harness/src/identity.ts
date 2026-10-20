@@ -8,6 +8,11 @@ const cryptoRng = (): number => crypto.getRandomValues(new Uint32Array(1))[0]! /
 export function getOrCreateLearnerId(session: Storage, rng: () => number = cryptoRng): string {
   const existing = session.getItem(KEY)
   if (existing !== null && LEARNER_ID_RE.test(existing)) return existing
+  return newLearnerId(session, rng)
+}
+
+/** A newborn: replaces this tab's id (used after the previous learner's session went final). */
+export function newLearnerId(session: Storage, rng: () => number = cryptoRng): string {
   let hex = ""
   for (let i = 0; i < 16; i++) hex += Math.min(15, Math.floor(rng() * 16)).toString(16)
   const id = `lrn_${hex}`

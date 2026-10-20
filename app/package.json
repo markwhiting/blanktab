@@ -1,0 +1,23 @@
+{
+  "name": "app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:e2e": "vite build --mode e2e",
+    "preview": "vite preview",
+    "preview:e2e": "vite preview --mode e2e",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@blanktab/harness": "*",
+    "@blanktab/interface": "*",
+    "@blanktab/learner": "*",
+    "@blanktab/world": "*"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}

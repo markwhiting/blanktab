@@ -10,3 +10,9 @@ checkpoints/
 *.safetensors
 __pycache__/
 node_modules/
+
+# Build and test output
+app/dist/
+app/dist-e2e/
+test-results/
+playwright-report/

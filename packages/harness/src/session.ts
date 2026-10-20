@@ -21,9 +21,14 @@ const yieldToEventLoop = () => new Promise<void>(r => setTimeout(r, 0))
 
 export async function runSession(
   cfg: SessionConfig,
-  deps: { world: World; learner: Learner; queue: Queue; now: () => Date; onTick?: (s: { steps: number; obs: Observation }) => void },
+  deps: {
+    world: World; learner: Learner; queue: Queue; now: () => Date
+    onTick?: (s: { steps: number; obs: Observation }) => void
+    /** Awaited after every step (e.g. to hold a real-time pace). Without it the loop yields every YIELD_EVERY steps. */
+    pace?: (steps: number) => Promise<void>
+  },
 ): Promise<void> {
-  const { world, learner, queue, now, onTick } = deps
+  const { world, learner, queue, now, onTick, pace } = deps
   if (!Number.isInteger(cfg.logEverySteps) || cfg.logEverySteps <= 0) throw new Error("logEverySteps must be a positive integer")
   let seq = cfg.startSeq
   let steps = cfg.startSteps
@@ -47,7 +52,8 @@ export async function runSession(
         final: steps >= cfg.lifetimeSteps,
       })
     }
-    if (steps % YIELD_EVERY === 0) await yieldToEventLoop()
+    if (pace) await pace(steps)
+    else if (steps % YIELD_EVERY === 0) await yieldToEventLoop()
   }
 }
 
