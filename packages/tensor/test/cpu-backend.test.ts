@@ -85,6 +85,49 @@ describe("cpu backend", () => {
     close(await be.read(be.sumToShape(a, [2, 3], [2, 1])), [6, 15])
   })
 
+  it("matmul with m != n for all transpose combinations", async () => {
+    const be = createCpuBackend()
+    // A 2x3, B 3x4 (row-major), C 2x4 hand-computed
+    const A = [1, 2, 3, 4, 5, 6]
+    const At = [1, 4, 2, 5, 3, 6]
+    const B = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    const Bt = [1, 5, 9, 2, 6, 10, 3, 7, 11, 4, 8, 12]
+    const want = [38, 44, 50, 56, 83, 98, 113, 128]
+    for (const [ta, tb] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+      const a = be.upload(new Float32Array(ta ? At : A))
+      const b = be.upload(new Float32Array(tb ? Bt : B))
+      close(await be.read(be.matmul(a, b, 2, 3, 4, ta, tb)), want)
+    }
+  })
+
+  it("binary add broadcasts 3-D [2,1,3] with [4,1] to [2,4,3]", async () => {
+    const be = createCpuBackend()
+    const a = be.upload(f(1, 2, 3, 4, 5, 6))
+    const b = be.upload(f(10, 20, 30, 40))
+    const out = be.binary("add", a, [2, 1, 3], b, [4, 1], [2, 4, 3])
+    close(await be.read(out), [
+      11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43,
+      14, 15, 16, 24, 25, 26, 34, 35, 36, 44, 45, 46,
+    ])
+  })
+
+  it("sumToShape reduces 3-D [2,4,3] to [4,1] and [2,1,3]", async () => {
+    const be = createCpuBackend()
+    const x = be.upload(f(
+      11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43,
+      14, 15, 16, 24, 25, 26, 34, 35, 36, 44, 45, 46,
+    ))
+    close(await be.read(be.sumToShape(x, [2, 4, 3], [4, 1])), [81, 141, 201, 261])
+    close(await be.read(be.sumToShape(x, [2, 4, 3], [2, 1, 3])), [104, 108, 112, 116, 120, 124])
+  })
+
+  it("sumToShape accumulates in float64", async () => {
+    const be = createCpuBackend()
+    const a = be.upload(f(16777216, 1, 1, 1, 1))
+    const out = await be.read(be.sumToShape(a, [5], [1]))
+    expect(out[0]).toBe(16777220)
+  })
+
   it("reduceLast sum and max over rows", async () => {
     const be = createCpuBackend()
     const a = be.upload(f(1, 5, 3, -4, -2, -9))

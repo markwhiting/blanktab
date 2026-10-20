@@ -133,12 +133,12 @@ export function createCpuBackend(): Backend {
         }
       }
       const so = broadcastStrides(padded, rank)
-      const out = new Float32Array(prod(toShape))
+      const acc = new Float64Array(prod(toShape))
       const n = x.length
       const idx = new Array<number>(rank).fill(0)
       let io = 0
       for (let i = 0; i < n; i++) {
-        out[io] = out[io]! + x[i]!
+        acc[io] = acc[io]! + x[i]!
         for (let d = rank - 1; d >= 0; d--) {
           idx[d]!++
           io += so[d]!
@@ -148,7 +148,7 @@ export function createCpuBackend(): Backend {
         }
       }
       stats.flops += n
-      return make(out)
+      return make(Float32Array.from(acc))
     },
 
     matmul(a, b, m, k, n, transA, transB) {
