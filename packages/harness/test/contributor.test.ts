@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
 import { openQueue, type Queue } from "../src/queue"
 import { createContributor, type ContributorStatus } from "../src/contributor"
@@ -267,8 +267,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     // the scheduled retry works once the limit clears
     t.gh.interceptors.length = 0
     t.timers[0]!()
-    await new Promise(r => setTimeout(r, 50))
-    expect(await t.queue.pending()).toEqual([])
+    await vi.waitFor(async () => expect(await t.queue.pending()).toEqual([]))
   })
 
   it("429 honours X-RateLimit-Reset", async () => {
@@ -283,15 +282,17 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     const t = await setup()
     t.gh.interceptors.push(() => { throw new TypeError("Failed to fetch") })
     await t.c.flush()
-    for (let i = 0; i < 9; i++) { t.timers.shift()!(); await new Promise(r => setTimeout(r, 20)) }
+    for (let i = 0; i < 9; i++) {
+      t.timers.shift()!()
+      await vi.waitFor(() => expect(t.timers.length).toBeGreaterThan(0)) // the retry has failed and re-armed
+    }
     expect(t.scheduled).toEqual([5000, 10000, 20000, 40000, 80000, 160000, 320000, 600000, 600000, 600000])
     expect((await t.queue.pending()).length).toBe(6)
     expect(t.last()).toMatchObject({ state: "error", pending: 6 })
     t.gh.interceptors.length = 0
     t.timers.shift()!()
-    await new Promise(r => setTimeout(r, 50))
+    await vi.waitFor(() => expect(t.last().state).toBe("idle"))
     expect(await t.queue.pending()).toEqual([])
-    expect(t.last().state).toBe("idle")
   })
 
   it("a flush asked for mid-flight runs again afterwards, so a file queued meanwhile is sent", async () => {
@@ -317,8 +318,7 @@ describe("contributor: GitHub failures (Review Focus 4)", () => {
     let calls = 0
     t.queue.pending = async () => { if (++calls === 1) { await Promise.resolve(); void t.c.flush().catch(() => {}); throw new Error("idb broke") } return pending() }
     await expect(t.c.flush()).rejects.toThrow("idb broke")
-    await new Promise(r => setTimeout(r, 50))
-    expect(await t.queue.pending()).toEqual([])
+    await vi.waitFor(async () => expect(await t.queue.pending()).toEqual([]))
     expect(t.gh.requests.filter(r => r.url.endsWith("/git/commits") && r.method === "POST")).toHaveLength(1)
   })
 

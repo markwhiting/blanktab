@@ -89,4 +89,20 @@ describe("session", { timeout: 60_000 }, () => {
     expect(paced).toEqual(Array.from({ length: 120 }, (_, i) => i + 1))
     expect((await q.pending()).map(f => f.seq)).toEqual([0, 1])
   })
+
+  it("drains the world trace every step, so it never grows unbounded", async () => {
+    const q = await openQueue(new IDBFactory())
+    const d = deps(q)
+    const world = d.world
+    const drained: number[] = []
+    let steps = 0
+    const counted = {
+      ...world,
+      act: (a: Parameters<typeof world.act>[0]) => { world.act(a); steps++ },
+      drainTrace: () => { drained.push(steps); return world.drainTrace() },
+    }
+    await runSession(cfgFor("lrn_0123456789abcdef", { lifetimeSteps: 300, logEverySteps: 100 }), { ...d, world: counted })
+    expect(drained).toEqual(Array.from({ length: 300 }, (_, i) => i + 1)) // once after each act
+    expect(world.drainTrace()).toEqual([]) // nothing left behind at the end
+  })
 })
