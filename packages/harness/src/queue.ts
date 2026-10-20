@@ -16,6 +16,8 @@ export interface Queue {
   markSent(learnerId: string, seq: number): Promise<void>
   /** Highest-seq file for the learner, sent or not (used to resume numbering). */
   latest(learnerId: string): Promise<LogFile | undefined>
+  /** Every file of the learner, sent or not, by seq (the page redraws a resumed learner's curve from them). */
+  files(learnerId: string): Promise<LogFile[]>
 }
 
 interface Row { learnerId: string; seq: number; sent: boolean; file: LogFile }
@@ -50,6 +52,9 @@ export async function openQueue(idb: IDBFactory): Promise<Queue> {
     async latest(learnerId) {
       const mine = (await rows()).filter(r => r.learnerId === learnerId)
       return mine.reduce<Row | undefined>((m, r) => (m === undefined || r.seq > m.seq ? r : m), undefined)?.file
+    },
+    async files(learnerId) {
+      return (await rows()).filter(r => r.learnerId === learnerId).sort((a, b) => a.seq - b.seq).map(r => r.file)
     },
   }
 }

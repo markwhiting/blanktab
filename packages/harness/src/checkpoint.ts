@@ -59,6 +59,12 @@ export async function loadCheckpoint<S = LearnerState>(idb: IDBFactory, learnerI
   return c as Checkpoint<S>
 }
 
+/** Whether the learner has a checkpoint, without reading it (a GPU learner's is tens of MB). */
+export async function hasCheckpoint(idb: IDBFactory, learnerId: string): Promise<boolean> {
+  const db = await openDb(idb)
+  return (await result(db.transaction(CHECKPOINTS).objectStore(CHECKPOINTS).count(learnerId))) > 0
+}
+
 export async function deleteCheckpoint(idb: IDBFactory, learnerId: string): Promise<void> {
   const tx = (await openDb(idb)).transaction(CHECKPOINTS, "readwrite")
   const finished = done(tx)

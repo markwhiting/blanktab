@@ -1,16 +1,43 @@
 // Test-only knobs. main.ts reads them only when import.meta.env.MODE !== "production",
 // so the deploy build drops this code entirely (checked by app/test/build.test.ts).
-export interface TestParams { lifetimeSteps?: number; stepsPerSecond?: number }
+import type { Widths } from "@blanktab/learner"
 
-const positiveInt = (v: string | null, max: number): number | undefined => {
-  if (v === null || !/^\d+$/.test(v)) return undefined
+export interface TestParams {
+  /** Overrides the lifetime in compute units (default DEFAULT_LIFETIME_CU). */
+  lifetimeCU?: number
+  /** Overrides the speed cap (the learner's maxStepsPerSec setting). */
+  stepsPerSecond?: number
+  /** Overrides the steps between sleeps (default DEFAULT_SLEEP_INTERVAL). */
+  sleepInterval?: number
+  /** Skips WebGPU. */
+  backend?: "cpu"
+  /** Overrides the widths of a newborn (on either backend). */
+  widths?: Widths
+}
+
+/** Every query knob readTestParams reads. */
+export const TEST_KNOBS = ["testLifetimeCU", "testStepsPerSecond", "testSleepInterval", "testBackend", "testWidths"] as const
+
+/** testWidths=tiny: a learner small enough for a few-second e2e life on any CPU. */
+export const TINY_WIDTHS: Widths = Object.freeze({ conv1: 1, conv2: 1, enc: 2, hidden: 2 })
+
+const positive = (v: string | null, max: number, integer: boolean): number | undefined => {
+  if (v === null || !/^\d+(\.\d+)?$/.test(v)) return undefined
   const n = Number(v)
+  if (integer && !Number.isInteger(n)) return undefined
   return n > 0 && n <= max ? n : undefined
 }
 
 export function readTestParams(search: string): TestParams {
   const q = new URLSearchParams(search)
-  const lifetimeSteps = positiveInt(q.get("testLifetime"), 1_000_000)
-  const stepsPerSecond = positiveInt(q.get("testStepsPerSecond"), 10_000)
-  return { ...(lifetimeSteps ? { lifetimeSteps } : {}), ...(stepsPerSecond ? { stepsPerSecond } : {}) }
+  const out: TestParams = {}
+  const lifetimeCU = positive(q.get("testLifetimeCU"), 1_000_000, false)
+  const stepsPerSecond = positive(q.get("testStepsPerSecond"), 10_000, true)
+  const sleepInterval = positive(q.get("testSleepInterval"), 1_000_000, true)
+  if (lifetimeCU !== undefined) out.lifetimeCU = lifetimeCU
+  if (stepsPerSecond !== undefined) out.stepsPerSecond = stepsPerSecond
+  if (sleepInterval !== undefined) out.sleepInterval = sleepInterval
+  if (q.get("testBackend") === "cpu") out.backend = "cpu"
+  if (q.get("testWidths") === "tiny") out.widths = { ...TINY_WIDTHS }
+  return out
 }

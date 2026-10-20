@@ -52,9 +52,12 @@ export interface Clock { now(): number; sleep(ms: number): Promise<void> }
 const realClock: Clock = { now: () => performance.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
 
 export type SessionEvent =
-  | { type: "resumed"; steps: number }
+  /** Resumed from the checkpoint at `steps` and `cu`; `curveTail` is its curve since the latest log file. */
+  | { type: "resumed"; steps: number; cu: number; curveTail: CurvePoint[] }
   /** After RESTORE_AFTER_SKIPS skipped updates in a row at `fromSteps`, the learner went back to its checkpoint at `toSteps`. */
   | { type: "restored"; fromSteps: number; toSteps: number; restores: number; lostCU: number }
+  /** A log file was queued (with its checkpoint). */
+  | { type: "logged"; seq: number; steps: number; cu: number; final: boolean }
 
 export interface SessionDeps {
   /** drainTrace, if the world has one, is called after every action (nothing reads the trace yet). */
@@ -188,7 +191,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     let lostSkips = cp?.lostSkips ?? 0
     let lastSavedAt = clock.now()
     const resumedFrom = cp ? cp.steps : null
-    if (resumedFrom !== null) onEvent?.({ type: "resumed", steps: resumedFrom })
+    if (cp) onEvent?.({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail] })
 
     const checkpointNow = async (): Promise<Checkpoint> => ({
       learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
@@ -272,6 +275,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         cp = await checkpointNow()
         await queue.put(f, { save: cp })
         saved()
+        onEvent?.({ type: "logged", seq: f.seq, steps: f.stepsTotal, cu: f.cu, final: false })
       } else if (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs) {
         cp = await checkpointNow()
         await saveCheckpoint(idb, cp)
@@ -280,7 +284,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
 
     addPoint()
-    await queue.put(logFile(true), { remove: id })
+    const last = logFile(true)
+    await queue.put(last, { remove: id })
+    onEvent?.({ type: "logged", seq: last.seq, steps: last.stepsTotal, cu: last.cu, final: true })
     seq++
     return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false }
   } finally {

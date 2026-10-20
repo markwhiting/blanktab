@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
-import { deleteCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
+import { deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
 import { openQueue } from "../src/queue"
 import { openDb } from "../src/db"
 import { mkFile } from "./helpers"
@@ -12,6 +12,15 @@ const cp = (learnerId: string, steps: number): Checkpoint<{ w: Float32Array }> =
 })
 
 describe("checkpoints", () => {
+  it("hasCheckpoint says whether a learner has one, without reading it", async () => {
+    const idb = new IDBFactory()
+    expect(await hasCheckpoint(idb, A)).toBe(false)
+    await saveCheckpoint(idb, cp(A, 100))
+    expect(await hasCheckpoint(idb, A)).toBe(true)
+    expect(await hasCheckpoint(idb, B)).toBe(false)
+    await deleteCheckpoint(idb, A)
+    expect(await hasCheckpoint(idb, A)).toBe(false)
+  })
   it("keeps only the latest checkpoint per learnerId, structured-clone exact, until deleted", async () => {
     const idb = new IDBFactory()
     expect(await loadCheckpoint(idb, A)).toBeUndefined()

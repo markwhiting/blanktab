@@ -8,7 +8,7 @@ import { loadCheckpoint, saveCheckpoint } from "../src/checkpoint"
 import { parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
-import { runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionLearner } from "../src/session"
+import { runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -112,9 +112,12 @@ function expectContinuous(logs: LogFileV2[]) {
 describe("session v2", { timeout: 60_000 }, () => {
   it("writes log files exactly at the 2^k CU crossings plus the final one, all v2-valid", async () => {
     const idb = new IDBFactory()
-    const r = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16 }) }))
+    const events: SessionEvent[] = []
+    const r = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16 }), onEvent: e => events.push(e) }))
     const logs = await logsOf(idb)
     expect(logs.map(f => f.cu)).toEqual([1, 2, 4, 8, 16, 32, 64])
+    // Each file is announced once it is queued (the page flushes the outbox on the final one).
+    expect(events).toEqual(logs.map(f => ({ type: "logged", seq: f.seq, steps: f.stepsTotal, cu: f.cu, final: f.final })))
     expect(logs.map(f => f.stepsTotal)).toEqual([16, 32, 64, 128, 256, 512, 1024])
     expect(logs.map(f => f.final)).toEqual([false, false, false, false, false, false, true])
     expectContinuous(logs)
@@ -200,8 +203,13 @@ describe("session v2", { timeout: 60_000 }, () => {
         // The latest of: birth, the last sleep before the interrupted step, the last log file (onTick runs before them).
         expect(cp!.steps).toBe(Math.max(50 * Math.floor((stopAt - 1) / 50), before.at(-1)?.stepsTotal ?? 0))
         const ticks: number[] = []
-        const r = await run(idb, undefined, ticks)
+        const events: SessionEvent[] = []
+        const r = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50 }), depsFor(idb, {
+          createLearner: stubFactory({ cuPerStep: 1 / 16 }), onTick: ({ steps }) => { ticks.push(steps) }, onEvent: e => events.push(e),
+        }))
         expect(r.resumedFrom).toBe(cp!.steps)
+        // The page redraws the curve from the event: the checkpoint's place in the life and its curve since the last log.
+        expect(events[0]).toEqual({ type: "resumed", steps: cp!.steps, cu: cp!.cu, curveTail: cp!.curveTail })
         expect(ticks[0]).toBe(cp!.steps + 1)
         const logs = await logsOf(idb)
         expectContinuous(logs)
@@ -406,7 +414,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         createLearner: stubFactory({ cuPerStep: 1 / 16, created, skip: n => poisoned && n >= 120 }),
         onEvent: e => { events.push(e); if (e.type === "restored") poisoned = false },
       }))
-      expect(events).toEqual([{ type: "restored", fromSteps: 139, toSteps: 100, restores: 1, lostCU: 39 / 16 }])
+      expect(events.filter(e => (e as SessionEvent).type === "restored")).toEqual([{ type: "restored", fromSteps: 139, toSteps: 100, restores: 1, lostCU: 39 / 16 }])
       expect(created.length).toBe(2)
       expect("state" in created[1]! && (created[1].state as unknown as StubState).stats.steps).toBe(100)
       const logs = await logsOf(idb)

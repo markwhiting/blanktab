@@ -1,12 +1,21 @@
 import { describe, it, expect } from "vitest"
-import { readTestParams } from "../src/params"
+import { TEST_KNOBS, TINY_WIDTHS, readTestParams } from "../src/params"
 
 describe("readTestParams", () => {
-  it("reads positive integer testLifetime and testStepsPerSecond", () => {
-    expect(readTestParams("?testLifetime=600&testStepsPerSecond=100")).toEqual({ lifetimeSteps: 600, stepsPerSecond: 100 })
+  it("reads testLifetimeCU, testStepsPerSecond, testSleepInterval, testBackend=cpu and testWidths=tiny", () => {
+    expect(readTestParams("?testLifetimeCU=0.05&testStepsPerSecond=100&testSleepInterval=4&testBackend=cpu&testWidths=tiny")).toEqual({
+      lifetimeCU: 0.05, stepsPerSecond: 100, sleepInterval: 4, backend: "cpu", widths: TINY_WIDTHS,
+    })
   })
-  it("ignores missing, zero, negative, fractional and absurd values", () => {
+  it("ignores missing, zero, negative, malformed and absurd values, and unknown backends or widths", () => {
     expect(readTestParams("")).toEqual({})
-    for (const v of ["0", "-5", "1.5", "abc", "99999999"]) expect(readTestParams(`?testLifetime=${v}&testStepsPerSecond=${v}`)).toEqual({})
+    for (const v of ["0", "-5", "abc", "1e9", "99999999", "Infinity", ""]) {
+      expect(readTestParams(`?testLifetimeCU=${v}&testStepsPerSecond=${v}&testSleepInterval=${v}`)).toEqual({})
+    }
+    expect(readTestParams("?testStepsPerSecond=1.5&testSleepInterval=2.5")).toEqual({})
+    expect(readTestParams("?testBackend=webgpu&testWidths=huge")).toEqual({})
+  })
+  it("names every knob it reads (the production build test checks none of them survive)", () => {
+    expect([...TEST_KNOBS].sort()).toEqual(["testBackend", "testLifetimeCU", "testSleepInterval", "testStepsPerSecond", "testWidths"])
   })
 })

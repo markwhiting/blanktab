@@ -22,6 +22,8 @@
       --accent-link: #2563eb;
       --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
       --shadow-panel: 0 12px 36px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+      --curve-pred: #0284c7;
+      --curve-base: #d97706;
       --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Georgia Pro", Georgia, serif;
@@ -39,6 +41,8 @@
         --accent-gold: #f4c867;
         --accent-red: #ff7f8d;
         --accent-link: #8aa5ff;
+        --curve-pred: #6ad3ff;
+        --curve-base: #f4c867;
         --shadow-panel: 0 30px 90px rgba(3, 6, 18, 0.42), 0 12px 36px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       }
     }
@@ -97,6 +101,12 @@
     canvas { display: block; image-rendering: pixelated; background: #000; border: 1px solid var(--hairline); border-radius: 6px; }
     #periphery { width: 560px; height: 350px; }
     #fovea { width: 160px; height: 160px; }
+    #curve { width: 100%; height: 96px; background: transparent; image-rendering: auto; border: 0; border-radius: 0; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0 0; padding: 0; list-style: none; font-size: 11px; color: var(--muted); }
+    .legend li { display: flex; align-items: center; gap: 6px; }
+    .swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--curve-pred); }
+    .swatch.base { border-top: 2px dashed var(--curve-base); }
+    .axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 2px; }
     .side { display: grid; gap: 16px; min-width: 0; }
     dl.stats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-family: var(--mono); font-size: 12px; }
     dl.stats dt { color: var(--muted); font-weight: 500; }
@@ -202,7 +212,11 @@
         <div class="side">
           <dl class="stats">
             <dt>Learner</dt><dd data-testid="learner-id">starting…</dd>
-            <dt>Steps lived</dt><dd data-testid="steps">0 of …</dd>
+            <dt>Backend</dt><dd data-testid="backend">choosing…</dd>
+            <dt>Steps lived</dt><dd data-testid="steps">0</dd>
+            <dt>Compute lived</dt><dd data-testid="cu">…</dd>
+            <dt>Speed</dt><dd data-testid="rate">…</dd>
+            <dt>Status</dt><dd data-testid="status">…</dd>
             <dt>Sessions</dt><dd data-testid="sessions">loading…</dd>
             <dt>Setting</dt><dd data-testid="setting">…</dd>
             <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
@@ -210,6 +224,22 @@
           </dl>
 
           <p class="life" data-testid="life" role="status" hidden></p>
+
+          <section class="panel surface" aria-labelledby="learning-title">
+            <h2 id="learning-title">Is it learning?</h2>
+            <p class="muted">At every step it guesses what it will see next. The lazy guess is that nothing changes; a learner
+              that learns ends up below it.</p>
+            <canvas id="curve" data-testid="curve" data-points="0" width="360" height="96" role="img"
+              aria-label="Loss curve: how wrong its guesses are, and the lazy guess, over the compute it has lived"></canvas>
+            <div class="axis" aria-hidden="true"><span>birth</span><span>compute lived →</span></div>
+            <ul class="legend" data-testid="curve-legend">
+              <li><span class="swatch"></span>how wrong its guesses are</li>
+              <li><span class="swatch base"></span>the lazy guess: nothing changes</li>
+            </ul>
+            <dl class="stats" style="margin-top: 10px">
+              <dt>Ratio</dt><dd data-testid="ratio">no guesses measured yet</dd>
+            </dl>
+          </section>
 
           <section class="panel surface" data-testid="token-panel" aria-labelledby="token-title" hidden>
             <h2 id="token-title">Share this learner's logs</h2>
@@ -233,7 +263,7 @@
     <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden>
       <div class="table-wrap surface" data-testid="history">
         <table>
-          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
+          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col" class="num">CU</th><th scope="col" class="num">Loss ratio</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" hidden>No past sessions yet. When a learner's logs are merged, its session appears here.</p>
@@ -245,12 +275,16 @@
         <p>A learner lives in this tab. It starts from nothing, with no pretrained knowledge. It sees only pixels of a small
           screen and acts only through a cursor. When its life ends, what happened is sent back to GitHub, so later learners
           can start from what earlier ones found and, over time, do better.</p>
-        <p>For now it flails at random. That is a placeholder: the point of this stage is the loop. A session runs, its logs
-          come back as a pull request, and the next tab sees them.</p>
+        <p>It learns to predict what it sees: at every step it guesses its next view of the screen, and it learns from how
+          wrong the guess was. It seeks out what it can learn, moving where its guesses are getting better.
+          It doesn't yet move between rooms by itself. Its life is measured in compute (1 CU is a billion arithmetic operations), and the
+          LEARNER tab shows its guesses against the lazy guess that nothing changes.</p>
+        <p>It runs on this machine's GPU through WebGPU when there is one, otherwise on the CPU at half the size. A reload
+          resumes it from its last checkpoint, saved in this browser.</p>
         <p>To help, leave the tab open, and add a GitHub token so its logs can be shared. Without a token the learner still
           runs and its logs wait in this browser.</p>
         <p>Privacy: the token is kept only in this browser and is sent only to <code>api.github.com</code>. The logs hold the
-          learner's settings and step counts and a coarse description of the machine (cores, memory, WebGPU, open tabs). The
+          learner's settings, step and compute counts, its loss curve and a coarse description of the machine (cores, memory, WebGPU, open tabs). The
           pull request is opened under the token's GitHub account.</p>
         <h2>Links</h2>
         <ul data-links></ul>

@@ -1,13 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { FLUSH_EVERY_MS, LIFETIME_STEPS, STEPS_PER_SECOND, flushPolicy } from "../src/schedule"
-
-describe("pacing", () => {
-  it("the placeholder learner lives at 2 steps/s: a 3000-step life takes 25 minutes", () => {
-    expect(STEPS_PER_SECOND).toBe(2)
-    expect(LIFETIME_STEPS).toBe(3000)
-    expect(LIFETIME_STEPS / STEPS_PER_SECOND).toBe(25 * 60)
-  })
-})
+import { FLUSH_EVERY_MS, flushPolicy } from "../src/schedule"
 
 describe("flush cadence", () => {
   const setup = () => {

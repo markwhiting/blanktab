@@ -1,9 +1,5 @@
-// How fast the learner lives and how often the page talks to GitHub. Kept apart from main.ts so it is testable.
+// How often the page talks to GitHub. Kept apart from main.ts so it is testable.
 
-export const LIFETIME_STEPS = 3000
-export const LOG_EVERY_STEPS = 500
-/** Real time: a 3000-step life takes 25 minutes, so one tab sends a handful of commits per life, not a stream. */
-export const STEPS_PER_SECOND = 2
 /** Pending logs that are not final wait at most this long before they are sent. */
 export const FLUSH_EVERY_MS = 10 * 60_000
 

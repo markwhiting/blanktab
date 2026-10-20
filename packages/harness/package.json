@@ -9,8 +9,7 @@
     "./log": "./src/log.ts",
     "./queue": "./src/queue.ts",
     "./checkpoint": "./src/checkpoint.ts",
-    "./session": "./src/session.ts",
-    "./session-v1": "./src/session-v1.ts"
+    "./session": "./src/session.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

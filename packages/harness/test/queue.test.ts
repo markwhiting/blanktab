@@ -20,6 +20,13 @@ describe("queue", () => {
     expect((await q.latest(A))?.seq).toBe(1)
     expect(await q.latest(B)).toBeUndefined()
   })
+  it("files() lists one learner's files, sent or not, by seq", async () => {
+    const q = await openQueue(new IDBFactory())
+    for (const f of [mkFile(A, 2), mkFile(B, 0), mkFile(A, 0), mkFile(A, 10)]) await q.put(f)
+    await q.markSent(A, 0)
+    expect((await q.files(A)).map(f => f.seq)).toEqual([0, 2, 10])
+    expect(await q.files("lrn_cccccccccccccccc")).toEqual([])
+  })
   it("persists across reopen and round-trips valid files", async () => {
     const idb = new IDBFactory()
     await (await openQueue(idb)).put(mkFile(A, 0))
