@@ -29,6 +29,7 @@ export function buildSummary(runsDir: string): Summary {
       sessions.push({
         learnerId: id, settings: last.settings, hostSig: last.hostSig, stepsTotal: last.stepsTotal,
         final: last.final, codeSha: last.codeSha, knowledgeSha: last.knowledgeSha, sessionsSeenAtBirth: last.sessionsSeenAtBirth,
+        lastWrittenAt: last.writtenAt,
       })
     }
   }

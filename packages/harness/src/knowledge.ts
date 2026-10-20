@@ -1,6 +1,6 @@
 // What a newborn tab reads before it starts: the published summary, the manifest, and the settings space.
 // Browser-safe. Unreachable or malformed knowledge never stops the learner: it falls back to an empty, offline view.
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, SETTING_KEY_RE, type Summary } from "./log"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, SETTING_KEY_RE, parseSessionRow, type SessionRow, type Summary } from "./log"
 
 export interface SettingRange { name: string; min: number; max: number }
 
@@ -27,7 +27,8 @@ const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFin
 
 function asSummary(v: unknown): Summary {
   if (!isObj(v) || v.schemaVersion !== 1 || !Array.isArray(v.sessions)) throw new Error("bad summary.json")
-  return { schemaVersion: 1, sessions: v.sessions as Summary["sessions"] }
+  // One bad row must not take the rest (or the page) down: drop it.
+  return { schemaVersion: 1, sessions: v.sessions.map(parseSessionRow).filter((r): r is SessionRow => r !== null) }
 }
 function asManifest(v: unknown): Knowledge["manifest"] {
   if (!isObj(v) || typeof v.knowledgeSha !== "string" || !KNOWLEDGE_SHA_RE.test(v.knowledgeSha)) throw new Error("bad manifest.json knowledgeSha")

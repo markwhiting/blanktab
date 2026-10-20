@@ -24,6 +24,8 @@ export interface SessionRow {
   codeSha: string
   knowledgeSha: string
   sessionsSeenAtBirth: number
+  /** writtenAt of that highest-seq file. Absent in summaries built before it existed. */
+  lastWrittenAt?: string
 }
 
 /** knowledge/summary.json, what the next tab reads. */
@@ -40,6 +42,18 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/ // exactly what D
 export const CODE_SHA_RE = /^([0-9a-f]{40}|dev)$/ // GITHUB_SHA, or "dev" for local builds
 export const KNOWLEDGE_SHA_RE = /^[0-9a-f]{64}$/ // sha256 hex
 const isIso = (v: unknown): v is string => typeof v === "string" && ISO_RE.test(v) && !Number.isNaN(Date.parse(v))
+
+/**
+ * A summary row as the page reads it, or null if it is unusable (the page drops it rather than fail).
+ * Checks only what the page relies on; an invalid lastWrittenAt is dropped, not the row.
+ */
+export function parseSessionRow(v: unknown): SessionRow | null {
+  if (!isObj(v) || typeof v.learnerId !== "string" || !LEARNER_ID_RE.test(v.learnerId)) return null
+  if (!isObj(v.settings) || !isObj(v.hostSig) || !isNum(v.hostSig.cores) || typeof v.hostSig.webgpu !== "boolean") return null
+  if (!isNum(v.stepsTotal) || !isNum(v.sessionsSeenAtBirth) || typeof v.final !== "boolean") return null
+  const { lastWrittenAt, ...rest } = v
+  return { ...(rest as unknown as SessionRow), ...(isIso(lastWrittenAt) ? { lastWrittenAt } : {}) }
+}
 
 const MAX_SETTING_STRING = 200
 const MAX_SETTING_KEYS = 50

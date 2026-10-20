@@ -12,9 +12,15 @@ describe("historyRows", () => {
   it("is empty for no sessions", () => {
     expect(historyRows({ schemaVersion: 1, sessions: [] }, REPO)).toEqual([])
   })
-  it("lists newest first (born after more sessions), ties keep the later summary entry first", () => {
-    const rows = historyRows({ schemaVersion: 1, sessions: [row("lrn_cccccccccccccccc", 1), row("lrn_aaaaaaaaaaaaaaaa", 0), row("lrn_bbbbbbbbbbbbbbbb", 1)] }, REPO)
-    expect(rows.map(r => r.learnerId)).toEqual(["lrn_bbbbbbbbbbbbbbbb", "lrn_cccccccccccccccc", "lrn_aaaaaaaaaaaaaaaa"])
+  it("lists newest first by lastWrittenAt; rows without it go last (born after more sessions first, then later entry first)", () => {
+    const rows = historyRows({ schemaVersion: 1, sessions: [
+      row("lrn_1111111111111111", 5),
+      row("lrn_2222222222222222", 0, { lastWrittenAt: "2026-10-19T12:00:00.000Z" }),
+      row("lrn_3333333333333333", 1),
+      row("lrn_4444444444444444", 0, { lastWrittenAt: "2026-10-20T08:00:00.000Z" }),
+      row("lrn_5555555555555555", 1),
+    ] }, REPO)
+    expect(rows.map(r => r.learnerId)).toEqual(["lrn_4444444444444444", "lrn_2222222222222222", "lrn_1111111111111111", "lrn_5555555555555555", "lrn_3333333333333333"])
   })
   it("formats each column and links the learner to its data folder", () => {
     const [r] = historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { final: false, stepsTotal: 1500, hostSig: { cores: 4, deviceMemoryGb: 8, webgpu: false, tabsOnMachine: 2 } })] }, REPO)

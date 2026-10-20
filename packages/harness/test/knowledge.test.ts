@@ -50,6 +50,19 @@ describe("loadKnowledge", () => {
     delete rest["manifest.json"]
     offline(await loadKnowledge("/learner/", fakeFetch(rest).fn))
   })
+  it("drops malformed summary rows instead of failing; keeps a valid lastWrittenAt, strips an invalid one", async () => {
+    const good = { ...row("lrn_aaaaaaaaaaaaaaaa"), lastWrittenAt: "2026-10-20T01:02:03.000Z" }
+    const oddTime = { ...row("lrn_bbbbbbbbbbbbbbbb"), lastWrittenAt: "yesterday" }
+    const bad = [
+      { ...row("lrn_cccccccccccccccc"), learnerId: "nope" }, { ...row("lrn_cccccccccccccccc"), hostSig: null },
+      { ...row("lrn_cccccccccccccccc"), hostSig: { cores: "4", webgpu: false } }, { ...row("lrn_cccccccccccccccc"), settings: [1] },
+      { ...row("lrn_cccccccccccccccc"), stepsTotal: "3000" }, { ...row("lrn_cccccccccccccccc"), sessionsSeenAtBirth: null },
+      { ...row("lrn_cccccccccccccccc"), final: "yes" }, null, "row", 7,
+    ]
+    const k = await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 1, sessions: [bad[0], good, ...bad.slice(1), oddTime] } }).fn)
+    expect(k.offline).toBe(false)
+    expect(k.summary.sessions).toEqual([good, row("lrn_bbbbbbbbbbbbbbbb")])
+  })
   it("falls back when a file is malformed", async () => {
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 2, sessions: [] } }).fn))
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "manifest.json": { knowledgeSha: "nope", codeSha: "dev" } }).fn))

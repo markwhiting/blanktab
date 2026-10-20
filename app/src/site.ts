@@ -16,13 +16,21 @@ export const fmtSettings = (settings: Record<string, number | string>) => {
 export interface HistoryRow { learnerId: string; href: string; steps: string; final: string; setting: string; host: string }
 
 /**
- * Past sessions, newest first. The summary carries no timestamps, so "newer" means born after more sessions
- * existed (sessionsSeenAtBirth); ties keep the later summary entry first.
+ * Past sessions, newest first by lastWrittenAt (ISO strings sort as times). Rows without it (older summaries)
+ * go last, ordered by sessionsSeenAtBirth descending, then the later summary entry first.
  */
 export function historyRows(summary: Summary, repo: Repo): HistoryRow[] {
   return summary.sessions
     .map((s, i) => ({ s, i }))
-    .sort((a, b) => b.s.sessionsSeenAtBirth - a.s.sessionsSeenAtBirth || b.i - a.i)
+    .sort((a, b) => {
+      const ta = a.s.lastWrittenAt, tb = b.s.lastWrittenAt
+      if (ta !== undefined || tb !== undefined) {
+        if (ta === undefined) return 1
+        if (tb === undefined) return -1
+        if (ta !== tb) return ta < tb ? 1 : -1
+      }
+      return b.s.sessionsSeenAtBirth - a.s.sessionsSeenAtBirth || b.i - a.i
+    })
     .map(({ s }: { s: SessionRow }) => ({
       learnerId: s.learnerId,
       href: `${gh(repo)}/tree/main/data/runs/${s.learnerId}`,

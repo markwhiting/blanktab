@@ -307,3 +307,22 @@ test("HISTORY says so when there are no past sessions", async ({ page }) => {
   await expect(page.getByTestId("history")).toContainText("No past sessions yet")
   await expect(page.getByTestId("history").locator("tbody tr")).toHaveCount(0)
 })
+
+test("a malformed summary row is dropped: the learner runs and HISTORY shows only the good rows, newest first", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.route("**/knowledge/summary.json", route => route.fulfill({ json: { schemaVersion: 1, sessions: [
+    { ...row("lrn_aaaaaaaaaaaaaaaa"), lastWrittenAt: "2026-10-19T12:00:00.000Z" },
+    { ...row("lrn_dddddddddddddddd"), hostSig: null },
+    { learnerId: "garbage" },
+    { ...row("lrn_bbbbbbbbbbbbbbbb"), lastWrittenAt: "2026-10-20T12:00:00.000Z" },
+  ] } }))
+  await page.goto(PAGE)
+  await expect(page.getByText("2 sessions before this one")).toBeVisible()
+  await expect(page.getByTestId("knowledge")).not.toHaveText(/offline/i)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
+  await page.getByRole("tab", { name: "History" }).click()
+  const rows = page.getByTestId("history").locator("tbody tr")
+  await expect(rows).toHaveCount(2)
+  await expect(rows.nth(0)).toContainText("lrn_bbbbbbbbbbbbbbbb")
+  await expect(rows.nth(1)).toContainText("lrn_aaaaaaaaaaaaaaaa")
+})

@@ -35,6 +35,10 @@ describe("buildSummary", () => {
     expect(a).toMatchObject({ stepsTotal: 600, final: true, sessionsSeenAtBirth: 3, codeSha: "a".repeat(40), knowledgeSha: "0".repeat(64) })
     expect(b).toMatchObject({ stepsTotal: 200, final: false, settings: { moveProbability: 0.9 } })
   })
+  it("records lastWrittenAt from the highest-seq file", () => {
+    put(log(A, 0, { writtenAt: "2026-10-19T12:00:00.000Z" })); put(log(A, 1, { writtenAt: "2026-10-19T12:05:00.000Z" }))
+    expect(buildSummary(dir).sessions[0]!.lastWrittenAt).toBe("2026-10-19T12:05:00.000Z")
+  })
   it("sorts numerically (seq 10 beats seq 9) and rows by learnerId", () => {
     for (let s = 0; s <= 10; s++) put(log(B, s))
     put(log(A, 0))
