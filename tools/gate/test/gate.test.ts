@@ -57,9 +57,11 @@ describe("decide", () => {
     expect(decide([pr({ updatedAt: hoursAgo(49) })], NOW)[0]!.action).toBe("merge")
     expect(decide([pr({ updatedAt: hoursAgo(1) })], NOW)[0]!.action).toBe("wait")
   })
-  it("a future-dated heartbeat is clamped to now (cannot be stale, cannot wait forever via updatedAt)", () => {
+  it("a future-dated heartbeat is ignored; updatedAt decides liveness", () => {
     const future = new Date(NOW.getTime() + 400 * 24 * 3_600_000)
-    expect(decide([pr({ files: [file(log(0)), hbFile(future)] })], NOW)[0]!.action).toBe("wait")
-    expect(heartbeatFromFiles([hbFile(future)], NOW)?.getTime()).toBe(NOW.getTime())
+    const files = [file(log(0)), hbFile(future)]
+    expect(decide([pr({ files, updatedAt: hoursAgo(49) })], NOW)[0]!.action).toBe("merge")
+    expect(decide([pr({ files, updatedAt: hoursAgo(1) })], NOW)[0]!.action).toBe("wait")
+    expect(heartbeatFromFiles([hbFile(future)], NOW)).toBeNull()
   })
 })
