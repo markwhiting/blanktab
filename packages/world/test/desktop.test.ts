@@ -48,7 +48,7 @@ describe("desktop: privileged leakage (Review Focus 1)", () => {
 describe("desktop: construction", () => {
   it("defaults to every implemented room, starting at the first", () => {
     const w = makeWorld(1)
-    expect(w.rooms()).toEqual(["crib", "toys"])
+    expect(w.rooms()).toEqual(["crib", "toys", "hideseek"])
     expect(w.state().room).toBe("crib")
   })
   it("rejects duplicate kinds, unknown/unimplemented kinds, empty lists and a start outside the list", () => {
