@@ -10,7 +10,8 @@ export default defineConfig({
     benchmark: { include: ["**/*.gpu.bench.ts"] },
     testTimeout: 60_000,
     // GPU_ALLOW_SOFTWARE=1 lets the suite pass on a software adapter (e.g. SwiftShader in CI); by default it must be hardware.
-    env: { GPU_ALLOW_SOFTWARE: process.env.GPU_ALLOW_SOFTWARE ?? "" },
+    // BENCH_WIDTHS (JSON, e.g. '{"hidden":128}') overrides the spike-2 benchmark's default widths.
+    env: { GPU_ALLOW_SOFTWARE: process.env.GPU_ALLOW_SOFTWARE ?? "", BENCH_WIDTHS: process.env.BENCH_WIDTHS ?? "" },
     // Show console output (adapter info, per-primitive max errors) for passing tests too.
     silent: false,
     // Away from vite's default ports and the e2e preview (4173), which other streams may hold.

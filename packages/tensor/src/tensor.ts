@@ -28,6 +28,12 @@ export class Tensor {
   requiresGrad: boolean
   grad: Tensor | null = null
   _node?: GradNode
+  /**
+   * Set on a node-less tensor built inside a composite (e.g. im2col of a constant input in conv2d)
+   * that a graph node still references. The caller never sees it, so `disposeGraph` frees it like
+   * any other intermediate instead of treating it as a caller-owned leaf.
+   */
+  _graphOwned?: true
 
   constructor(storage: Storage, shape: readonly number[], requiresGrad = false) {
     for (const d of shape) {

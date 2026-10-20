@@ -126,7 +126,9 @@ export function backward(loss: Tensor): void {
  *
  * "Non-leaf" means "has a graph node". A tensor computed only from tensors that do not require grad
  * (or under noGrad) has no node, so it is treated as a leaf and is NOT freed here — create such
- * constants once, outside training loops, and dispose them yourself.
+ * constants once, outside training loops, and dispose them yourself. The exception is a node-less
+ * tensor built inside a composite (e.g. conv2d's im2col of a constant input): the caller never sees
+ * it, so it is graph-owned (`_graphOwned`) and freed here like an intermediate.
  *
  * Kept tensors are detached (PyTorch `.detach()` semantics): their node is removed and
  * `requiresGrad` set to false, so reusing one in a later graph (e.g. carried recurrent state)
@@ -136,9 +138,10 @@ export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
   const order = topoOrder(loss)
   const keepSet = new Set(keep)
   const protectedStorages = new Set<Storage>()
+  const isLeaf = (t: Tensor) => !t._node && !t._graphOwned
   for (const t of order) {
-    if (!t._node || keepSet.has(t)) protectedStorages.add(t.storage)
-    if (t.grad && (!t._node || keepSet.has(t))) protectedStorages.add(t.grad.storage)
+    if (isLeaf(t) || keepSet.has(t)) protectedStorages.add(t.storage)
+    if (t.grad && (isLeaf(t) || keepSet.has(t))) protectedStorages.add(t.grad.storage)
   }
   const freed = new Set<Storage>()
   const free = (s: Storage) => {
@@ -147,8 +150,9 @@ export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
     s.backend.dispose(s)
   }
   for (const t of order) {
-    if (!t._node) continue
+    if (isLeaf(t)) continue
     delete t._node
+    delete t._graphOwned
     if (keepSet.has(t)) {
       t.requiresGrad = false
       continue

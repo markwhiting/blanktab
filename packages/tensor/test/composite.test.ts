@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
-  conv2d, createRng, gradCheck, gruCell, initGru, layerNorm, linear, mse, noGrad, param, tensor,
+  backward, conv2d, createCpuBackend, createRng, disposeGraph, gradCheck, gruCell, initGru, layerNorm, linear, mse, noGrad, param,
+  composite, matmul, relu, reshape, sum, tensor,
 } from "../src/index"
+import type { Tensor } from "../src/index"
 
 
 const rng = createRng(77)
@@ -104,5 +106,69 @@ describe("mse", () => {
   })
   it("gradCheck", () => {
     expect(gradCheck((p, t) => mse(p, t), [rand([2, 3]), rand([2, 3])])).toBeLessThan(1e-3)
+  })
+})
+
+describe("composites leave no unreachable intermediates (non-grad inputs)", () => {
+  // A composite applied to a constant (e.g. conv2d on an input frame) builds internal tensors that
+  // have no graph node, such as im2col of the frame. They are invisible to the caller, so
+  // disposeGraph must free them; they must not be treated as caller-owned leaves.
+  const be = createCpuBackend()
+  const r = createRng(3)
+  const p = (shape: number[]) => tensor(Float32Array.from({ length: shape.reduce((a, d) => a * d, 1) }, () => r() - 0.5), shape, { requiresGrad: true, backend: be })
+  const c = (shape: number[]) => tensor(Float32Array.from({ length: shape.reduce((a, d) => a * d, 1) }, () => r() - 0.5), shape, { backend: be })
+
+  /** Live-buffer delta of build → backward → disposeGraph → clear grads; params and inputs pre-exist. */
+  function leaked(params: Tensor[], build: () => Tensor): number {
+    const before = be.stats.liveBuffers
+    const loss = build()
+    backward(loss)
+    disposeGraph(loss, [])
+    for (const t of params) {
+      t.grad?.dispose()
+      t.grad = null
+    }
+    return be.stats.liveBuffers - before
+  }
+
+  it("conv2d on a constant input", () => {
+    const w = p([4, 27]), b = p([4, 1]), x = c([3, 8, 8])
+    expect(leaked([w, b], () => sum(relu(conv2d(x, w, b, { kh: 3, kw: 3, stride: 2, pad: 1 }))))).toBe(0)
+  })
+
+  it("layerNorm on a constant input", () => {
+    const g = p([5]), b = p([5]), x = c([3, 5])
+    expect(leaked([g, b], () => sum(layerNorm(x, g, b)))).toBe(0)
+  })
+
+  it("a fully constant composite keeps only its result", () => {
+    const g = c([5]), b = c([5]), x = c([3, 5])
+    const before = be.stats.liveBuffers
+    const y = layerNorm(x, g, b)
+    expect(be.stats.liveBuffers).toBe(before + 1)
+    y.dispose()
+  })
+
+  it("a constant computed by a composite outside the step survives disposeGraph and can be reused", async () => {
+    const w = c([4, 27]), x = c([3, 8, 8])
+    const feat = conv2d(x, w, undefined, { kh: 3, kw: 3, stride: 2, pad: 1 }) // caller-owned constant
+    const v = p([4, 4, 4])
+    for (let i = 0; i < 2; i++) {
+      const loss = sum(mse(feat, v))
+      backward(loss)
+      disposeGraph(loss, [])
+      v.grad?.dispose()
+      v.grad = null
+    }
+    expect((await feat.read()).length).toBe(64)
+    feat.dispose()
+  })
+
+  it("a composite never frees a view of the caller's input", async () => {
+    const x = c([2, 6]), w = p([3, 2])
+    const n = leaked([w], () => sum(composite(() => matmul(reshape(x, [4, 3]), w))))
+    expect(n).toBe(0)
+    expect((await x.read()).length).toBe(12)
+    x.dispose()
   })
 })

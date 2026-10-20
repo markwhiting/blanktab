@@ -85,17 +85,19 @@ type Field = ["u" | "f", number]
 const u = (x: number): Field => ["u", x]
 const fl = (x: number): Field => ["f", x]
 
-/** Packs uniform fields (4-byte scalars, vec4s written as 4 consecutive u32) into a 16-byte-aligned buffer. */
-function packUniform(fields: Field[]): ArrayBuffer {
-  const buf = new ArrayBuffer(Math.max(16, Math.ceil((fields.length * 4) / 16) * 16))
-  const view = new DataView(buf)
-  fields.forEach(([t, x], i) => (t === "u" ? view.setUint32(i * 4, x, true) : view.setFloat32(i * 4, x, true)))
-  return buf
+/** Bytes of a uniform holding `fields` (4-byte scalars, vec4s as 4 consecutive u32), rounded up to 16. */
+const uniformBytes = (fields: Field[]) => Math.max(16, Math.ceil((fields.length * 4) / 16) * 16)
+
+/** Writes uniform fields at `offset` of `view` (little-endian). */
+function writeUniform(view: DataView, offset: number, fields: Field[]): void {
+  fields.forEach(([t, x], i) => (t === "u" ? view.setUint32(offset + i * 4, x, true) : view.setFloat32(offset + i * 4, x, true)))
 }
 
 // Submit pending work once this many passes are queued (or this many dead buffers await destruction).
 const MAX_PENDING_PASSES = 64
 const MAX_PENDING_TRASH = 256
+/** Largest uniform any kernel declares (sumToShape: 14 u32 = 64 bytes), with headroom. */
+const MAX_UNIFORM_BYTES = 128
 
 function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): WebGpuBackend {
   const stats = { flops: 0, liveBuffers: 0 }
@@ -103,6 +105,16 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
   const maxBufferSize = device.limits.maxBufferSize
   const maxGroups = device.limits.maxComputeWorkgroupsPerDimension
   const usage = BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST
+
+  // ---- uniforms: one slot per pass of the open batch in a single ring buffer, staged on the CPU
+  // and uploaded with one writeBuffer just before the batch is submitted. Creating a mapped buffer
+  // per dispatch cost ~38 µs each, two thirds of a learner-sized step (spike 2). Reusing the ring
+  // across batches is safe: queue operations run in order, so the next batch's write lands after
+  // the previous batch's passes have read their slots.
+  const uniformSlot = Math.ceil(MAX_UNIFORM_BYTES / device.limits.minUniformBufferOffsetAlignment) * device.limits.minUniformBufferOffsetAlignment
+  const uniformRing = device.createBuffer({ size: MAX_PENDING_PASSES * uniformSlot, usage: BUF.UNIFORM | BUF.COPY_DST })
+  const uniformStaging = new ArrayBuffer(MAX_PENDING_PASSES * uniformSlot)
+  const uniformView = new DataView(uniformStaging)
 
   // ---- error reporting: every batch of GPU work runs inside error scopes; the next read() awaits
   // the scopes closed since the previous read and rejects with the first error, then the state is
@@ -132,6 +144,7 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
   const trash: GPUBuffer[] = []
   const flush = () => {
     if (encoder) {
+      if (pendingPasses > 0) device.queue.writeBuffer(uniformRing, 0, uniformStaging, 0, pendingPasses * uniformSlot)
       device.queue.submit([encoder.finish()])
       popScopes() // opened by beginBatch, so it covers pipeline/bind-group creation, encoding and submit
       encoder = null
@@ -225,22 +238,25 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
   }
   /** Records one compute pass. `buffers` bind at 0..k-1; the uniform binds at k. Owned temporaries are released after. */
   const dispatch = (key: string, code: () => string, buffers: GPUBuffer[], fields: Field[], groups: [number, number], temps: GPUBuffer[] = []) => {
+    const size = uniformBytes(fields)
+    if (size > MAX_UNIFORM_BYTES) throw new Error(`${key}: uniform of ${size} bytes exceeds MAX_UNIFORM_BYTES ${MAX_UNIFORM_BYTES}`)
     const enc = beginBatch()
     const p = pipeline(key, code)
-    const data = packUniform(fields)
-    const ub = device.createBuffer({ size: data.byteLength, usage: BUF.UNIFORM, mappedAtCreation: true })
-    new Uint8Array(ub.getMappedRange()).set(new Uint8Array(data))
-    ub.unmap()
+    const offset = pendingPasses * uniformSlot
+    writeUniform(uniformView, offset, fields)
     const bind = device.createBindGroup({
       layout: p.getBindGroupLayout(0),
-      entries: [...buffers, ub].map((buffer, binding) => ({ binding, resource: { buffer } })),
+      entries: [
+        ...buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
+        { binding: buffers.length, resource: { buffer: uniformRing, offset, size } },
+      ],
     })
     const pass = enc.beginComputePass()
     pass.setPipeline(p)
     pass.setBindGroup(0, bind)
     pass.dispatchWorkgroups(groups[0], groups[1])
     pass.end()
-    trash.push(ub, ...temps)
+    trash.push(...temps)
     if (++pendingPasses >= MAX_PENDING_PASSES || trash.length >= MAX_PENDING_TRASH) flush()
   }
   /** One thread per element of an n-element output. */

@@ -6,13 +6,65 @@ import type { GradNode } from "./tensor"
 const fmt = (s: readonly number[]) => `[${s.join(",")}]`
 const sameShape = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((d, i) => d === b[i])
 
+/** Every op output (with its parents) recorded while a `composite` scope is open (innermost last). */
+interface Recorded {
+  out: Tensor
+  parents: Tensor[]
+}
+const compositeScopes: Recorded[][] = []
+
 /** Attach a graph node to `out` iff grad mode is on and any parent requires grad. */
 function record(out: Tensor, parents: Tensor[], backward: GradNode["backward"]): Tensor {
   if (isGradEnabled() && parents.some((p) => p.requiresGrad)) {
     out.requiresGrad = true
     out._node = { parents, backward }
   }
+  compositeScopes[compositeScopes.length - 1]?.push({ out, parents })
   return out
+}
+
+/**
+ * Runs `fn`, a composite built from ops, and settles the ownership of the tensors it created that
+ * have no graph node (those computed only from non-grad inputs, e.g. im2col of an input frame).
+ * The caller cannot reach them, so they must not become caller-owned leaves:
+ *  - referenced by a graph node created here: marked graph-owned, freed by `disposeGraph`;
+ *  - otherwise: dead, freed now.
+ * Never touched: the result (and any storage it shares), and views sharing the storage of a tensor
+ * from outside the scope (e.g. a reshape of the caller's input). Scopes nest.
+ */
+export function composite(fn: () => Tensor): Tensor {
+  const recorded: Recorded[] = []
+  compositeScopes.push(recorded)
+  let result: Tensor
+  try {
+    result = fn()
+  } finally {
+    compositeScopes.pop()
+  }
+  const created = new Set(recorded.map((r) => r.out))
+  const referenced = new Set<Tensor>()
+  for (const { out } of recorded) for (const p of out._node?.parents ?? []) referenced.add(p)
+  // Storages this scope must not free: the result's; views of outside tensors (same storage as a
+  // parent not created here); and those of node-less tensors a node still references (a view and
+  // its source share one storage, which is then freed once, by disposeGraph).
+  const foreign = new Set<Storage>([result.storage])
+  for (const { out, parents } of recorded) {
+    if (parents.some((p) => p.storage === out.storage && !created.has(p))) foreign.add(out.storage)
+  }
+  const live = new Set(foreign)
+  for (const { out } of recorded) if (!out._node && referenced.has(out)) live.add(out.storage)
+  const freed = new Set<Storage>()
+  for (const { out } of recorded) {
+    if (out._node || foreign.has(out.storage)) continue
+    if (referenced.has(out)) out._graphOwned = true
+    else if (!live.has(out.storage) && !freed.has(out.storage)) {
+      freed.add(out.storage)
+      out.dispose()
+    }
+  }
+  // The enclosing composite (if any) treats everything created here as its own.
+  compositeScopes[compositeScopes.length - 1]?.push(...recorded)
+  return result
 }
 
 // ---- backward helpers (storage-level; never record) ----
