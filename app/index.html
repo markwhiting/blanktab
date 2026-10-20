@@ -28,6 +28,7 @@
     .row input { flex: 1; min-width: 240px; padding: 6px 8px; font: inherit; }
     .row button { padding: 6px 12px; font: inherit; cursor: pointer; }
     .error { color: #b00020; margin: 6px 0 0; min-height: 1.5em; }
+    button.link { padding: 0; border: 0; background: none; font: inherit; font-size: 0.85rem; color: #0b57d0; text-decoration: underline; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -52,7 +53,7 @@
     <dt>History</dt><dd data-testid="sessions">loading…</dd>
     <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
     <dt>Chosen setting</dt><dd data-testid="setting">…</dd>
-    <dt>Contribution</dt><dd data-testid="contribution">…</dd>
+    <dt>Contribution</dt><dd><span data-testid="contribution">…</span> <button type="button" class="link" data-testid="change-token" hidden>change token</button></dd>
   </dl>
 
   <p class="life" data-testid="life" hidden></p>

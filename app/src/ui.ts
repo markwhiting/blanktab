@@ -32,6 +32,9 @@ export interface Ui {
   lifeComplete(id: string): void
   error(message: string): void
   tokenPanel(visible: boolean): void
+  /** The small "change token" control, shown whenever a token is stored. */
+  changeToken(visible: boolean): void
+  onChangeToken(handler: () => void): void
   /** The handler returns an error message to show, or null on success. */
   onTokenSubmit(handler: (token: string) => Promise<string | null>): void
 }
@@ -40,7 +43,7 @@ export function createUi(): Ui {
   const paintPeriphery = painter($("#periphery"), PERIPHERY.width, PERIPHERY.height)
   const paintFovea = painter($("#fovea"), FOVEA.width, FOVEA.height)
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
-  const life = byTest("life")
+  const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   let lifetime = 0
 
   return {
@@ -80,6 +83,12 @@ export function createUi(): Ui {
     tokenPanel(visible) {
       panel.hidden = !visible
     },
+    changeToken(visible) {
+      change.hidden = !visible
+    },
+    onChangeToken(handler) {
+      change.addEventListener("click", handler)
+    },
     onTokenSubmit(handler) {
       const submit = async () => {
         const token = input.value.trim()
@@ -90,6 +99,9 @@ export function createUi(): Ui {
           const problem = await handler(token)
           err.textContent = problem ?? ""
           if (problem === null) input.value = ""
+        } catch {
+          // Never leave "Checking with GitHub…" up forever. The cause is not shown: it could echo the token.
+          err.textContent = "Something went wrong while saving the token; try again."
         } finally {
           button.disabled = false
         }
