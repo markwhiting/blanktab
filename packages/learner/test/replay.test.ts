@@ -23,6 +23,16 @@ describe("ReplayBuffer", () => {
     }
   })
 
+  it("toArray lists the transitions oldest first, and pushing them in order rebuilds the same buffer", () => {
+    const b = new ReplayBuffer(4)
+    for (let i = 0; i < 7; i++) b.push(tr(i)) // wrapped: head is mid-ring
+    const items = b.toArray()
+    expect(items.map((t) => t.hIn[0])).toEqual([3, 4, 5, 6])
+    const c = new ReplayBuffer(4)
+    for (const t of items) c.push(t)
+    expect(Array.from({ length: c.size }, (_, k) => c.at(k))).toEqual(items)
+  })
+
   it("rejects an invalid capacity and out-of-range reads", () => {
     for (const c of [0, -1, 1.5, Number.NaN]) expect(() => new ReplayBuffer(c)).toThrow(RangeError)
     const b = new ReplayBuffer(2)

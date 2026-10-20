@@ -211,6 +211,20 @@ describe("random", () => {
     expect(createRng(1)()).not.toBe(createRng(2)())
   })
 
+  it("an rng's getState() / setState() resumes its sequence exactly", () => {
+    const a = createRng(42)
+    for (let i = 0; i < 13; i++) a()
+    const st = a.getState()
+    expect(Number.isInteger(st) && st >= 0 && st < 2 ** 32).toBe(true)
+    const want = Array.from({ length: 50 }, () => a())
+    const b = createRng(7)
+    b.setState(st)
+    expect(Array.from({ length: 50 }, () => b())).toEqual(want)
+    a.setState(st)
+    expect(a()).toBe(want[0])
+    for (const bad of [-1, 2 ** 32, 1.5, Number.NaN]) expect(() => b.setState(bad)).toThrow(RangeError)
+  })
+
   it("randn has mean 0 and std 1", () => {
     const x = randn(createRng(42), 100000)
     let mean = 0

@@ -43,6 +43,11 @@ export class ReplayBuffer {
     this.head = (this.head + 1) % this.capacity
   }
 
+  /** Every transition, oldest first (the same objects; for checkpoints). Pushing them in order rebuilds the buffer. */
+  toArray(): Transition[] {
+    return Array.from({ length: this.items.length }, (_, i) => this.at(i))
+  }
+
   /** The i-th transition, oldest first (0 = oldest, size-1 = newest). */
   at(i: number): Transition {
     if (!(Number.isInteger(i) && i >= 0 && i < this.items.length)) throw new RangeError(`ReplayBuffer: index ${i} out of range [0, ${this.items.length})`)

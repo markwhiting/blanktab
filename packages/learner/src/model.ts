@@ -49,21 +49,48 @@ const outDim = (n: number, k: number, s: number, p: number) => Math.floor((n + 2
 const PRED_P = PRED_PERIPHERY.width * PRED_PERIPHERY.height * PRED_PERIPHERY.channels
 const PRED_F = PRED_FOVEA.width * PRED_FOVEA.height * PRED_FOVEA.channels
 
-export function createModel(backend: Backend, seed: number, widths: Widths): Model {
+/**
+ * Builds the model with every weight drawn from `seed`, or, given `initial` (a checkpoint's parameter values in
+ * Model.params order), with copies of those values. A checkpoint that does not fit these widths throws RangeError
+ * and leaks nothing.
+ */
+export function createModel(backend: Backend, seed: number, widths: Widths, initial?: readonly Float32Array[]): Model {
+  const params: Tensor[] = []
+  try {
+    const model = buildModel(backend, seed, widths, initial, params)
+    if (initial && initial.length !== params.length) throw new RangeError(`createModel: ${initial.length} saved parameters, the model has ${params.length}`)
+    return model
+  } catch (e) {
+    for (const t of params) t.dispose()
+    throw e
+  }
+}
+
+function buildModel(backend: Backend, seed: number, widths: Widths, initial: readonly Float32Array[] | undefined, params: Tensor[]): Model {
   const { conv1, conv2, enc, hidden } = widths
   const rng = createRng(seed)
-  const params: Tensor[] = []
+  /** The saved values for the next parameter (a copy is uploaded), or null when drawing fresh weights. */
+  const saved = (shape: number[]): Float32Array | null => {
+    if (!initial) return null
+    const i = params.length
+    const n = shape.reduce((a, d) => a * d, 1)
+    const v = initial[i]
+    if (!v || v.length !== n) throw new RangeError(`createModel: saved parameter ${i} has ${v?.length ?? "no"} values, shape [${shape.join(",")}] needs ${n}`)
+    return v
+  }
   /** Trainable, uniform in ±1/sqrt(fanIn), drawn in creation order. */
   const p = (shape: number[], fanIn: number): Tensor => {
     const lim = 1 / Math.sqrt(fanIn)
     const n = shape.reduce((a, d) => a * d, 1)
-    const t = tensor(Float32Array.from({ length: n }, () => (2 * rng() - 1) * lim), shape, { requiresGrad: true, backend })
+    const data = saved(shape) ?? Float32Array.from({ length: n }, () => (2 * rng() - 1) * lim)
+    const t = tensor(data, shape, { requiresGrad: true, backend })
     params.push(t)
     return t
   }
   /** Trainable, all zeros; draws nothing from the rng. */
   const p0 = (shape: number[]): Tensor => {
-    const t = zeros(shape, { requiresGrad: true, backend })
+    const v = saved(shape)
+    const t = v ? tensor(v, shape, { requiresGrad: true, backend }) : zeros(shape, { requiresGrad: true, backend })
     params.push(t)
     return t
   }

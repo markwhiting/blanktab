@@ -9,8 +9,18 @@ export interface AdamOptions {
   eps?: number
 }
 
+/** One parameter's optimizer state, in the order the parameters were passed to the constructor. */
+export interface AdamSlotState {
+  m: Float32Array
+  v: Float32Array
+  /** Steps taken for this parameter (bias correction). */
+  t: number
+}
+/** Everything Adam carries between steps (plain typed arrays, structured-clone friendly). */
+export interface AdamState { slots: AdamSlotState[] }
+
 interface Slot {
-  p: Tensor
+  readonly p: Tensor
   m: Storage
   v: Storage
   /** Per-parameter step count, so a parameter skipped (null grad) keeps correct bias correction. */
@@ -65,6 +75,38 @@ export class Adam {
   setLr(lr: number): void {
     checkLr(lr)
     this.lr = lr
+  }
+
+  /** A copy of the moments and step counts, in parameter order. lr and betas are not part of it (they are settings). */
+  async state(): Promise<AdamState> {
+    const slots = await Promise.all(this.slots.map(async (s) => {
+      const [m, v] = await Promise.all([s.p.backend.read(s.m), s.p.backend.read(s.v)])
+      return { m, v, t: s.t }
+    }))
+    return { slots }
+  }
+
+  /**
+   * Restores moments and step counts from state() (copied, so the caller's arrays are not aliased). Validates the
+   * whole state first and throws RangeError, changing nothing, unless it matches these parameters slot for slot.
+   */
+  setState(state: AdamState): void {
+    const { slots } = state
+    if (slots.length !== this.slots.length) throw new RangeError(`Adam.setState: ${slots.length} slots for ${this.slots.length} parameters`)
+    slots.forEach((st, i) => {
+      const n = this.slots[i]!.p.size
+      if (st.m.length !== n || st.v.length !== n) throw new RangeError(`Adam.setState: slot ${i} has m/v length ${st.m.length}/${st.v.length}, parameter size ${n}`)
+      if (!(Number.isInteger(st.t) && st.t >= 0)) throw new RangeError(`Adam.setState: slot ${i} step count must be an integer >= 0, got ${st.t}`)
+    })
+    slots.forEach((st, i) => {
+      const s = this.slots[i]!
+      const be = s.p.backend
+      be.dispose(s.m)
+      be.dispose(s.v)
+      s.m = be.upload(Float32Array.from(st.m))
+      s.v = be.upload(Float32Array.from(st.v))
+      s.t = st.t
+    })
   }
 
   /** Frees the moment buffers. The optimizer must not be used afterwards. */

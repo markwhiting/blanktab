@@ -69,6 +69,32 @@ describe("model", () => {
     expect(c).not.toEqual(a)
   })
 
+  it("outputParams are exactly the last four params (the headLrScale split depends on it)", () => {
+    const m = createModel(createCpuBackend(), 3, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    expect(m.outputParams.length).toBe(4)
+    m.outputParams.forEach((t, i) => expect(t).toBe(m.params.slice(-4)[i]))
+    m.dispose()
+  })
+
+  it("can be built from saved parameter values (checkpoint restore) and rejects ones that do not fit", async () => {
+    const w: Widths = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
+    const be = createCpuBackend()
+    const a = createModel(be, 5, w)
+    const saved = await Promise.all(a.params.map((t) => t.read()))
+    saved[saved.length - 1]![0] = 0.25 // differs from any fresh init (output layers start at zero)
+    const b = createModel(be, 999, w, saved)
+    expect(await Promise.all(b.params.map((t) => t.read()))).toEqual(saved)
+    expect(b.params.every((t) => t.requiresGrad)).toBe(true)
+    saved[0]![0] = 123 // the model holds a copy
+    expect((await b.params[0]!.read())[0]).not.toBe(123)
+    const live = be.stats.liveBuffers
+    expect(() => createModel(be, 5, w, saved.slice(1))).toThrow(RangeError)
+    expect(() => createModel(be, 5, w, [new Float32Array(3), ...saved.slice(1)])).toThrow(RangeError)
+    expect(be.stats.liveBuffers).toBe(live) // nothing leaked by a rejected restore
+    a.dispose()
+    b.dispose()
+  })
+
   it("starts at copy-last: a fresh predictor returns its base exactly", async () => {
     const be = createCpuBackend()
     const m = createModel(be, 2, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })

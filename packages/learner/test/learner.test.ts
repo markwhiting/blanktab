@@ -4,7 +4,7 @@ import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
-import type { LearnerSettings, UpdateInfo } from "../src/learner"
+import type { LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
 
@@ -16,22 +16,52 @@ async function run(opts: {
   settings?: Partial<LearnerSettings>
   stream?: { observe(): Observation; act(a: Action): void }
   at?: (step: number, l: Awaited<ReturnType<typeof createLearner>>, be: ReturnType<typeof createCpuBackend>) => void | Promise<void>
+  /** Sleep after every `sleepEvery`-th step (counting the learner's own steps, so a restored learner keeps the schedule). */
+  sleepEvery?: number
+  /** Resume from this checkpoint instead of starting fresh (seed and settings are then the state's). */
+  state?: LearnerState
 }) {
   const be = createCpuBackend()
   const updates: UpdateInfo[] = []
-  const learner = await createLearner({
-    backend: be, seed: opts.seed, widths: TINY, settings: { ...DEFAULT_SETTINGS, ...opts.settings },
-    onUpdate: (u) => updates.push(u),
-  })
+  const onUpdate = (u: UpdateInfo) => updates.push(u)
+  const learner = opts.state
+    ? await createLearner({ backend: be, state: opts.state, onUpdate })
+    : await createLearner({ backend: be, seed: opts.seed, widths: TINY, settings: { ...DEFAULT_SETTINGS, ...opts.settings }, onUpdate })
   const world = opts.stream ?? createSyntheticStream()
   const actions: Action[] = []
   for (let i = 1; i <= opts.steps; i++) {
     const a = await learner.step(world.observe())
     actions.push(a)
     world.act(a)
+    if (opts.sleepEvery && learner.stats().steps % opts.sleepEvery === 0) await learner.sleep()
     await opts.at?.(i, learner, be)
   }
   return { learner, be, actions, updates }
+}
+
+/**
+ * Bitwise deep equality (typed arrays by bytes, numbers by Object.is), returning the first differing path or null.
+ * vitest's toEqual walks typed arrays element by element and takes seconds on a full LearnerState.
+ */
+function firstDifference(a: unknown, b: unknown, path = "state"): string | null {
+  if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b)) {
+    if (!ArrayBuffer.isView(a) || !ArrayBuffer.isView(b) || a.constructor !== b.constructor) return path
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength)
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength)
+    if (x.length !== y.length) return path
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return path
+    return null
+  }
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return Object.is(a, b) ? null : path
+  if (Array.isArray(a) !== Array.isArray(b)) return path
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length || ka.some((k) => !(k in b))) return `${path} (keys)`
+  for (const k of ka) {
+    const d = firstDifference((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`)
+    if (d) return d
+  }
+  return null
 }
 
 const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
@@ -75,6 +105,7 @@ describe("learner", () => {
     expect(s.cu).toBeGreaterThan(0)
     expect(Number.isFinite(s.predLoss) && Number.isFinite(s.baselineLoss)).toBe(true)
     expect(s.sleeps).toBe(0)
+    expect(s.consecutiveSkips).toBe(0)
     learner.dispose()
   })
 
@@ -226,6 +257,7 @@ describe("learner", () => {
     const a = await learner.step(world.observe())
     expect(isValidAction(a)).toBe(true)
     expect(learner.stats().skippedUpdates).toBe(skipped + 1)
+    expect(learner.stats().consecutiveSkips).toBe(1)
     const after = await learner.readParams()
     after.forEach((p, i) => {
       if (i === POISONED) return
@@ -266,5 +298,175 @@ describe("learner", () => {
     await expect(learner.step(emptyObservation())).rejects.toThrow(/in progress/)
     await first
     learner.dispose()
+  })
+
+  describe("sleep, save and load", () => {
+    /** The stream is part of the run: a resumed learner continues against the same stream object. */
+    it("save at step 300 (sleeps every 100), load into a fresh learner, 200 more steps = an uninterrupted 500-step run", async () => {
+      const full = await run({ seed: 11, steps: 500, sleepEvery: 100 })
+      expect(full.learner.stats().sleeps).toBe(5)
+
+      const world = createSyntheticStream()
+      const first = await run({ seed: 11, steps: 300, sleepEvery: 100, stream: world })
+      const state = await first.learner.save()
+      first.learner.dispose()
+      expect(first.be.stats.liveBuffers).toBe(0)
+      const second = await run({ seed: -1, steps: 200, sleepEvery: 100, stream: world, state })
+
+      expect([...first.actions, ...second.actions]).toEqual(full.actions)
+      expect([...first.updates, ...second.updates]).toEqual(full.updates)
+      expect(second.learner.stats()).toEqual(full.learner.stats())
+      expect(await second.learner.readParams()).toEqual(await full.learner.readParams())
+      expect(firstDifference(await second.learner.save(), await full.learner.save())).toBeNull()
+      full.learner.dispose()
+      second.learner.dispose()
+    }, 25_000)
+
+    it("restores a learner saved before its first step and one saved after a single step", async () => {
+      for (const n of [0, 1]) {
+        const full = await run({ seed: 12, steps: 20 })
+        const world = createSyntheticStream()
+        const first = await run({ seed: 12, steps: n, stream: world })
+        const second = await run({ seed: -1, steps: 20 - n, stream: world, state: await first.learner.save() })
+        expect([...first.actions, ...second.actions]).toEqual(full.actions)
+        expect([...first.updates, ...second.updates]).toEqual(full.updates)
+        for (const r of [full, first, second]) r.learner.dispose()
+      }
+    })
+
+    it("LearnerState survives structuredClone, is a snapshot, and a cloned state resumes identically", async () => {
+      const world = createSyntheticStream()
+      const { learner } = await run({ seed: 13, steps: 40, sleepEvery: 20, stream: world, settings: { bufferSize: 16 } })
+      const state = await learner.save()
+      const clone = structuredClone(state)
+      expect(firstDifference(clone, state)).toBeNull()
+      const tweaked = structuredClone(state) // the comparison itself sees a one-float change
+      tweaked.adam[1].slots[3]!.v[0]! += 1e-30
+      expect(firstDifference(tweaked, state)).toBe("state.adam.1.slots.3.v")
+      expect(state.params[0]).toBeInstanceOf(Float32Array)
+      expect(state.replay.length).toBe(16)
+      expect(state.version).toBe(1)
+      expect(state.seed).toBe(13)
+      expect(state.widths).toEqual(TINY)
+      // A snapshot: stepping on does not change it, and loading from it does not alias it.
+      const frozen = structuredClone(state)
+      world.act(await learner.step(world.observe()))
+      await learner.sleep()
+      expect(firstDifference(state, frozen)).toBeNull()
+      const w2 = createSyntheticStream()
+      const w3 = createSyntheticStream()
+      const a = await run({ seed: -1, steps: 30, sleepEvery: 10, stream: w2, state })
+      const b = await run({ seed: -1, steps: 30, sleepEvery: 10, stream: w3, state: clone })
+      expect(firstDifference(state, frozen)).toBeNull()
+      expect(b.actions).toEqual(a.actions)
+      expect(b.updates).toEqual(a.updates)
+      for (const r of [a, b]) r.learner.dispose()
+      learner.dispose()
+    })
+
+    it("rejects a state that does not fit, before allocating anything", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      const be = createCpuBackend()
+      const bad: LearnerState[] = [
+        { ...state, version: 2 as 1 },
+        { ...state, params: state.params.slice(1) },
+        { ...state, widths: { ...TINY, hidden: 8 } },
+        { ...state, h: new Float32Array(3) },
+        { ...state, adam: state.adam.slice(1) as unknown as LearnerState["adam"] },
+        { ...state, settings: { ...state.settings, bufferSize: 2 } }, // fewer slots than the 4 stored transitions
+      ]
+      for (const s of bad) await expect(createLearner({ backend: be, state: s })).rejects.toThrow(RangeError)
+      expect(be.stats.liveBuffers).toBe(0)
+    })
+
+    it("sleep() replays replayPerSleep uniformly sampled transitions and lowers the mean loss on the buffer", async () => {
+      // Fixed stream, independent of the actions: the block sweeps E then W, 4 px per step.
+      const sweep = createSyntheticStream({ start: { x: 20, y: 100 } })
+      let k = 0
+      const fixed = { observe: () => { sweep.act({ move: Math.floor(k++ / 40) % 2 === 0 ? 2 : 14, button: 0, scroll: 0, key: 0 }); return sweep.observe() }, act: () => {} }
+      const { learner, updates } = await run({ seed: 15, steps: 120, stream: fixed, settings: { bufferSize: 100, replayPerSleep: 200 } })
+      const s0 = learner.stats()
+      const before = await learner.replayLoss()
+      expect(learner.stats()).toEqual(s0) // measuring is not learning and not billed
+      const p0 = await learner.readParams()
+      await learner.sleep()
+      const after = await learner.replayLoss()
+      const s1 = learner.stats()
+      expect(Number.isFinite(before) && Number.isFinite(after)).toBe(true)
+      expect(after).toBeLessThan(before)
+      expect(s1.sleeps).toBe(1)
+      expect(s1.steps).toBe(s0.steps)
+      expect(s1.cu).toBeGreaterThan(s0.cu)
+      expect(s1.skippedUpdates).toBe(0)
+      expect(updates.length).toBe(119) // sleep does not report online updates
+      // Prediction only: the policy and value heads are untouched by replay.
+      const p1 = await learner.readParams()
+      const n = p0.length
+      for (const i of [n - 12, n - 11, n - 10, n - 9]) expect(p1[i]).toEqual(p0[i])
+      expect(p1[0]).not.toEqual(p0[0])
+      learner.dispose()
+    })
+
+    it("sleep() on an empty buffer is a counted no-op, and sleep() cannot overlap a step", async () => {
+      const be = createCpuBackend()
+      const learner = await createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS })
+      const live = be.stats.liveBuffers
+      await learner.sleep()
+      expect(learner.stats().sleeps).toBe(1)
+      expect(be.stats.liveBuffers).toBe(live)
+      const step = learner.step(emptyObservation())
+      const [sl, sv, rl] = [learner.sleep(), learner.save(), learner.replayLoss()] // all started while the step runs
+      for (const p of [sl, sv, rl]) await expect(p).rejects.toThrow(/in progress/)
+      await step
+      expect(learner.stats().sleeps).toBe(1)
+      learner.dispose()
+      await expect(learner.sleep()).rejects.toThrow(/dispose/)
+    })
+
+    it("Review Focus 1: after 2000 steps with a sleep every 250, liveBuffers equals its value after the first sleep", async () => {
+      let afterFirstSleep = -1
+      const { learner, be } = await run({
+        seed: 16, steps: 2000, sleepEvery: 250,
+        at: (i, _l, b) => { if (i === 250) afterFirstSleep = b.stats.liveBuffers },
+      })
+      expect(learner.stats().sleeps).toBe(8)
+      expect(afterFirstSleep).toBeGreaterThan(0)
+      expect(be.stats.liveBuffers).toBe(afterFirstSleep)
+      learner.dispose()
+      expect(be.stats.liveBuffers).toBe(0)
+    }, 25_000)
+
+    it("consecutiveSkips counts skipped updates in a row, and restoring the last checkpoint clears it", async () => {
+      // Same white-box poisoning as the skip test above: a NaN in headP's bias makes every prediction loss non-finite.
+      const inner = createCpuBackend()
+      const allocated: Storage[] = []
+      const be: Backend = {
+        ...inner,
+        upload: (d) => { const st = inner.upload(d); allocated.push(st); return st },
+        zeros: (n) => { const st = inner.zeros(n); allocated.push(st); return st },
+      }
+      const learner = await createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS })
+      const world = createSyntheticStream()
+      for (let i = 0; i < 5; i++) world.act(await learner.step(world.observe()))
+      const checkpoint = await learner.save()
+      ;(allocated[32] as unknown as { data: Float32Array }).data[7] = Number.NaN
+      for (let i = 1; i <= 4; i++) {
+        world.act(await learner.step(world.observe()))
+        expect(learner.stats().consecutiveSkips).toBe(i)
+      }
+      await learner.sleep() // every replayed update is skipped too
+      expect(learner.stats().consecutiveSkips).toBe(4 + DEFAULT_SETTINGS.replayPerSleep)
+      expect(learner.stats().skippedUpdates).toBe(4 + DEFAULT_SETTINGS.replayPerSleep)
+      learner.dispose()
+      // The harness's response: restore from the last checkpoint and carry on.
+      const restored = await createLearner({ backend: createCpuBackend(), state: checkpoint })
+      expect(restored.stats().consecutiveSkips).toBe(0)
+      world.act(await restored.step(world.observe()))
+      expect(restored.stats().consecutiveSkips).toBe(0)
+      expect(restored.stats().skippedUpdates).toBe(0)
+      restored.dispose()
+    })
   })
 })
