@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
 import { createCanvas } from "@napi-rs/canvas"
-import { WORLD } from "@blanktab/interface"
+import { WORLD, type Observation } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
 import { createFlailer } from "@blanktab/learner"
 import { openQueue, type Queue } from "../src/queue"
@@ -31,6 +31,17 @@ describe("session", { timeout: 60_000 }, () => {
     expect(p.map(f => f.stepsTotal)).toEqual([500, 1000, 1500, 2000, 2500, 3000])
     expect(p.map(f => f.final)).toEqual([false, false, false, false, false, true])
     for (const f of p) expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
+  })
+
+  it("writes the same files when the learner's step resolves asynchronously", async () => {
+    const q = await openQueue(new IDBFactory())
+    const inner = createFlailer({ seed: 2, moveProbability: 0.5 })
+    const slow = { step: async (o: Observation) => { await new Promise<void>(r => setTimeout(r, 0)); return inner.step(o) } }
+    await runSession(cfgFor(getOrCreateLearnerId(stubStorage())), { ...deps(q), learner: slow })
+    const p = await q.pending()
+    expect(p.map(f => f.seq)).toEqual([0, 1, 2, 3, 4, 5])
+    expect(p.map(f => f.stepsTotal)).toEqual([500, 1000, 1500, 2000, 2500, 3000])
+    expect(p.at(-1)?.final).toBe(true)
   })
 
   it("reload: same id, resume continues at seq 2 with no duplicate", async () => {
