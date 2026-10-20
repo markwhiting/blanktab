@@ -62,12 +62,12 @@ describe("crib in the desktop", () => {
     expect(w.drainTrace()).toEqual([])
   })
 
-  it("pressing on empty background emits nothing", () => {
+  it("pressing on empty background emits only the shell click, with no element", () => {
     const w = crib(1)
     moveTo(w, 1, 1)
     w.drainTrace()
     w.act(PRESS)
-    expect(w.drainTrace()).toEqual([])
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "click" }])
   })
 
   it("fovea is padded black outside the screen", () => {
@@ -115,10 +115,10 @@ describe("cribRoom", () => {
     expect(draw(r)).toEqual(plain)
   })
 
-  it("a press on a shape returns click and respond; elsewhere nothing", () => {
+  it("a press on a shape returns respond only (the shell emits click); elsewhere nothing", () => {
     const r = room()
     const s = shapesOf(1)[0]!
-    expect(r.press(centre(s).x, centre(s).y)).toEqual([{ kind: "click", elementId: s.id }, { kind: "respond", elementId: s.id }])
+    expect(r.press(centre(s).x, centre(s).y)).toEqual([{ kind: "respond", elementId: s.id }])
     expect(r.press(0, 0)).toEqual([])
     expect(r.release(0, 0)).toEqual([])
     expect(r.step(1)).toEqual([])

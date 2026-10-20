@@ -191,6 +191,10 @@ export function createWorld(opts: {
         held = true
         if (here) {
           pressed = slot
+          const hit = slot.room.inspect(cx, cy) // before the press changes anything
+          const click: TraceEvent = { tick, room: slot.kind, kind: "click" }
+          if (hit) click.elementId = hit.id
+          trace.push(click)
           emit(slot, slot.room.press(cx, cy))
         } else {
           const i = iconAt(cx, cy)

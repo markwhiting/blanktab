@@ -245,7 +245,10 @@ describe("desktop: input routing", () => {
     moveTo(w, 40, 30)
     w.drainTrace()
     w.act(PRESS)
-    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "toys", kind: "widget", elementId: "w1", value: "press" }])
+    expect(w.drainTrace()).toEqual([
+      { tick: w.tick, room: "toys", kind: "click" }, // the shell's click: the stub's inspect finds nothing
+      { tick: w.tick, room: "toys", kind: "widget", elementId: "w1", value: "press" },
+    ])
   })
 })
 

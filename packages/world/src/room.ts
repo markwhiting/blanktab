@@ -18,7 +18,7 @@ export const inView = (x: number, y: number) => x >= 0 && y >= 0 && x < ROOM_VIE
 export interface ElementInfo { id: string; interactive: boolean; responsive: boolean }
 
 export interface RoomEvent {
-  kind: "click" | "respond" | "scroll" | "reveal" | "navigate" | "widget"
+  kind: "respond" | "scroll" | "reveal" | "navigate" | "widget"
   elementId?: string
   value?: number | string
 }

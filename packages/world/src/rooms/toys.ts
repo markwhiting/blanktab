@@ -34,7 +34,7 @@ export function layoutToys(seed: number, words: readonly string[] = WORDS): Toys
   const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1))
   const word = () => words[Math.floor(rnd() * words.length)]!
   const KINDS = ["button", "toggle", "slider", "block"] as const
-  for (;;) {
+  for (let round = 0; round < 200; round++) {
     const extra = int(0, 3)
     const kinds: ToyWidget["kind"][] = [...KINDS]
     for (let i = 0; i < extra; i++) kinds.push(KINDS[int(0, 3)]!)
@@ -70,6 +70,7 @@ export function layoutToys(seed: number, words: readonly string[] = WORDS): Toys
     }
     if (ok) return { widgets, labels }
   }
+  throw new Error("layoutToys: could not fit the widgets")
 }
 
 const lighten = (c: readonly number[]) => c.map(v => Math.min(255, Math.round(v + (255 - v) * 0.4)))
@@ -178,16 +179,16 @@ export const toysRoom: RoomFactory = (seed, words) => {
       if (w.kind === "button") {
         pressedId = w.id
         counts.set(w.id, (counts.get(w.id) ?? 0) + 1)
-        return [{ kind: "widget", elementId: w.id, value: "press" }]
+        return [{ kind: "respond", elementId: w.id }, { kind: "widget", elementId: w.id, value: "press" }]
       }
       if (w.kind === "toggle") {
         if (on.has(w.id)) on.delete(w.id)
         else on.add(w.id)
-        return [{ kind: "widget", elementId: w.id, value: on.has(w.id) ? 1 : 0 }]
+        return [{ kind: "respond", elementId: w.id }, { kind: "widget", elementId: w.id, value: on.has(w.id) ? 1 : 0 }]
       }
       const r = rectOf(w)
       drag = { id: w.id, dx: x - r.x, dy: y - r.y } // grab offset inside the knob / block
-      return []
+      return [{ kind: "respond", elementId: w.id }] // the grab is the visible reaction
     },
     move(x, y, held) {
       hovered = widgetAt(x, y)?.id ?? null

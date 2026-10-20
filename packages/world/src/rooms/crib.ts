@@ -76,7 +76,7 @@ export const cribRoom: RoomFactory = seed => {
       if (!s) return []
       const i = shapes.indexOf(s)
       colors[i] = colors[i]!.map(v => 255 - v)
-      return [{ kind: "click", elementId: s.id }, { kind: "respond", elementId: s.id }]
+      return [{ kind: "respond", elementId: s.id }]
     },
     move(x, y) {
       hovered = shapeAt(x, y)?.id ?? null
