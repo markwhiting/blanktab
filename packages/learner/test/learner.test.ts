@@ -3,7 +3,7 @@ import { emptyObservation, isValidAction } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
+import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
 import type { LearnerSettings, UpdateInfo } from "../src/learner"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
@@ -40,11 +40,8 @@ const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
 describe("learner", () => {
   // Several seeds must pass (task brief + controller ruling): after 1,500 steps the action-conditioned predictor
   // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha).
-  // BLOCKED pending a controller ruling (task-4 report, "Fix round 1"): at the default lr 1e-3 this fails on seeds 1-2
-  // at every width up to CPU_WIDTHS (predLoss/baselineLoss ~1.007: Adam's noise floor on the zero-gradient residual
-  // outputs). Skipped, not weakened: re-enable as is once the ruling lands.
   for (const seed of [1, 2, 3]) {
-    it.skip(`learns to predict the next frame better than copy-last (seed ${seed})`, async () => {
+    it(`learns to predict the next frame better than copy-last (seed ${seed})`, async () => {
       const { learner } = await run({ seed, steps: 1500 })
       const s = learner.stats()
       expect(Number.isFinite(s.predLoss) && Number.isFinite(s.baselineLoss)).toBe(true)
@@ -114,6 +111,10 @@ describe("learner", () => {
     expect(clampSettings({ ...DEFAULT_SETTINGS, lr: 1 }).lr).toBe(LR_RANGE[1])
     expect(clampSettings({ ...DEFAULT_SETTINGS, lr: 1e-9 }).lr).toBe(LR_RANGE[0])
     expect(LR_RANGE).toEqual([1e-5, 1e-2])
+    expect(DEFAULT_SETTINGS.headLrScale).toBe(0.1)
+    expect(HEAD_LR_SCALE_RANGE).toEqual([0.01, 1])
+    expect(clampSettings({ ...DEFAULT_SETTINGS, headLrScale: 5 }).headLrScale).toBe(1)
+    expect(clampSettings({ ...DEFAULT_SETTINGS, headLrScale: 0 }).headLrScale).toBe(0.01)
     const { learner, updates } = await run({ seed: 7, steps: 200, settings: { lr: 1 } })
     expect(updates.every((u) => Number.isFinite(u.lossBefore) && Number.isFinite(u.lossAfter))).toBe(true)
     expect(await finiteParams(learner)).toBe(true)
@@ -135,7 +136,7 @@ describe("learner", () => {
   }, 30_000)
 
   it("rejects settings that cannot be clamped", () => {
-    for (const bad of [{ lr: Number.NaN }, { entropyWeight: -1 }, { curiosityWeight: Number.POSITIVE_INFINITY }, { bufferSize: 0 }, { bufferSize: 2.5 }, { replayPerSleep: -3 }]) {
+    for (const bad of [{ lr: Number.NaN }, { entropyWeight: -1 }, { curiosityWeight: Number.POSITIVE_INFINITY }, { bufferSize: 0 }, { bufferSize: 2.5 }, { replayPerSleep: -3 }, { headLrScale: Number.NaN }]) {
       expect(() => clampSettings({ ...DEFAULT_SETTINGS, ...bad })).toThrow(RangeError)
     }
   })
@@ -154,6 +155,39 @@ describe("learner", () => {
     for (const u of updates) {
       expect(Number.isFinite(u.reward)).toBe(true)
       expect(Math.abs(u.reward)).toBeLessThanOrEqual(1)
+    }
+    learner.dispose()
+  })
+
+  it("scales curiosity by the predLoss EMA from before this step's loss (no self-inclusion)", async () => {
+    const { learner, updates } = await run({ seed: 5, steps: 60 })
+    let ema = Number.NaN
+    for (const u of updates) {
+      expect(u.reward).toBe(curiosityReward(u.lossBefore, u.lossAfter, ema)) // the first update has no scale yet: 0
+      ema = Number.isFinite(ema) ? ema + 0.01 * (u.lossBefore - ema) : u.lossBefore
+    }
+    expect(updates[0]!.reward).toBe(0)
+    learner.dispose()
+  })
+
+  it("trains the residual output layers at lr x headLrScale and every other parameter at lr", async () => {
+    // Adam's first step moves each parameter with a non-zero gradient by ~lr (m/sqrt(v) = sign(g)).
+    const learner = await createLearner({ backend: createCpuBackend(), seed: 2, widths: TINY, settings: { ...DEFAULT_SETTINGS, lr: 1e-3, headLrScale: 0.1 } })
+    const world = createSyntheticStream()
+    world.act(await learner.step(world.observe()))
+    const p0 = await learner.readParams()
+    world.act(await learner.step(world.observe())) // first update
+    const p1 = await learner.readParams()
+    const maxStep = (i: number) => p1[i]!.reduce((m, v, k) => Math.max(m, Math.abs(v - p0[i]![k]!)), 0)
+    const n = p0.length
+    for (const i of [n - 4, n - 3, n - 2, n - 1]) expect(maxStep(i)).toBeLessThan(1.01e-4) // headP w/b, headF w/b
+    // headP sees the block move; headF's target is unchanged on this step (block centred, plain fovea): zero gradient.
+    for (const i of [n - 4, n - 3]) expect(maxStep(i)).toBeGreaterThan(0.9e-4)
+    // On this first update the zero output layers block every gradient upstream of them (core, predictor h/action
+    // layers get exactly 0), so compare with the policy and value heads, which are on the main optimizer.
+    for (const i of [n - 12, n - 11, n - 10, n - 9]) { // policy w/b, value w/b
+      expect(maxStep(i)).toBeGreaterThan(0.9e-3)
+      expect(maxStep(i)).toBeLessThan(1.01e-3)
     }
     learner.dispose()
   })

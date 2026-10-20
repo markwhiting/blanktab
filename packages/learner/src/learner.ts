@@ -11,8 +11,18 @@ import { createModel } from "./model"
 import type { Widths } from "./model"
 import { ReplayBuffer } from "./replay"
 
-export interface LearnerSettings { lr: number; entropyWeight: number; curiosityWeight: number; bufferSize: number; replayPerSleep: number }
-export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({ lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64 })
+export interface LearnerSettings {
+  lr: number
+  entropyWeight: number
+  curiosityWeight: number
+  bufferSize: number
+  replayPerSleep: number
+  /** The predictor's residual output layers train at lr × headLrScale (everything else at lr). */
+  headLrScale: number
+}
+export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({
+  lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1,
+})
 export interface LearnerStats { steps: number; cu: number; predLoss: number; baselineLoss: number; skippedUpdates: number; sleeps: number }
 
 /** What one online update did, for instrumentation and tests (not part of the learner's inputs). */
@@ -22,7 +32,7 @@ export interface UpdateInfo {
   lossBefore: number
   /** The same loss with the updated weights (L_after); NaN if not measured. */
   lossAfter: number
-  /** Curiosity: clamp((L_before − L_after) / max(predLoss EMA, 1e-6), −1, 1), 0 when non-finite. */
+  /** Curiosity: clamp((L_before − L_after) / max(predLoss EMA before this step, 1e-6), −1, 1), 0 when non-finite. */
   reward: number
   /** TD advantage curiosityWeight·reward + γ·V(h_t) − V(h_{t-1}); NaN if the actor-critic update did not run. */
   advantage: number
@@ -40,6 +50,8 @@ export interface TrainableLearner extends Learner {
 
 /** The learning rate is clamped into this range (Review Focus 5). */
 export const LR_RANGE = [1e-5, 1e-2] as const
+/** headLrScale is clamped into this range. */
+export const HEAD_LR_SCALE_RANGE = [0.01, 1] as const
 /** TD discount. */
 export const GAMMA = 0.9
 /** Smoothing of the predLoss / baselineLoss moving averages. */
@@ -65,7 +77,9 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!isNonNeg(s.curiosityWeight)) throw new RangeError(`curiosityWeight must be finite and >= 0, got ${s.curiosityWeight}`)
   if (!isPosInt(s.bufferSize)) throw new RangeError(`bufferSize must be an integer >= 1, got ${s.bufferSize}`)
   if (!isPosInt(s.replayPerSleep)) throw new RangeError(`replayPerSleep must be an integer >= 1, got ${s.replayPerSleep}`)
-  return { ...s, lr: Math.min(LR_RANGE[1], Math.max(LR_RANGE[0], s.lr)) }
+  if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
+  const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
+  return { ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE) }
 }
 
 /** Floor of the curiosity scale, so progress on a near-zero loss cannot blow up. */
@@ -128,8 +142,8 @@ interface Last {
  *     gradient from the stored, detached h_{t-2} (truncated BPTT of length 1, no graph lives across steps),
  *     L_before = mse(predict(h_{t-1}, a_{t-1}, y_{t-1}), y_t) over both outputs (residual on the current frame),
  *     then backward and one Adam step;
- *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA, 1e-6), −1, 1), L_after being the same
- *     loss with the new weights;
+ *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA before this step, 1e-6), −1, 1), L_after
+ *     being the same loss with the new weights;
  *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float read (logits, V(h_t)); a_t is sampled
  *     per factor with the learner's seeded RNG;
  *  4. updates the actor-critic on a_{t-1}: A = curiosityWeight·r + γ·V(h_t) − V(h_{t-1}),
@@ -142,7 +156,9 @@ interface Last {
  * backward(L_before + actorCritic). V(h_{t-1}) uses the carried h_{t-1}, which equals the recomputed one: the
  * core weights do not change between acting at t−1 and learning at t.
  *
- * Guards: lr is clamped to LR_RANGE; a non-finite loss skips its update (counted in skippedUpdates, never
+ * The predictor's residual output layers train at lr × headLrScale (a second Adam), all other parameters at lr.
+ *
+ * Guards: lr is clamped to LR_RANGE, headLrScale to HEAD_LR_SCALE_RANGE; a non-finite loss skips its update (counted in skippedUpdates, never
  * applied, never thrown). A rejected read() is fatal and propagates (packages/tensor/README.md rule 5).
  */
 export async function createLearner(opts: {
@@ -155,7 +171,19 @@ export async function createLearner(opts: {
   const { backend, seed, widths } = opts
   const settings = clampSettings(opts.settings)
   const model = createModel(backend, seed, widths)
-  const opt = new Adam([...model.params], { lr: settings.lr })
+  // Two optimizers over disjoint parameters: the residual output layers at lr × headLrScale (they start at zero and
+  // see near-zero gradients over static background, where Adam's normalized step at full lr is pure jitter that
+  // outweighs what they learn), everything else at lr. Each step runs both: one Adam step per parameter.
+  const outputSet = new Set(model.outputParams)
+  const opts_ = [
+    new Adam(model.params.filter((p) => !outputSet.has(p)), { lr: settings.lr }),
+    new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale }),
+  ]
+  const opt = {
+    step: () => { for (const o of opts_) o.step() },
+    zeroGrad: () => { for (const o of opts_) o.zeroGrad() },
+    dispose: () => { for (const o of opts_) o.dispose() },
+  }
   // Action sampling has its own stream, independent of the initializer's.
   const rng = createRng((seed ^ 0x9e3779b9) >>> 0)
   const replay = new ReplayBuffer(settings.bufferSize)
@@ -249,14 +277,15 @@ export async function createLearner(opts: {
       // 2. Curiosity: the same loss with the updated weights, relative to the running loss.
       if (Number.isFinite(lb)) {
         info.lossBefore = lb
-        stats.predLoss = ema(stats.predLoss, lb)
         const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)))
         const la = await scalar(after)
         after.dispose()
         if (Number.isFinite(la)) {
           info.lossAfter = la
+          // Scaled by the EMA from before this loss is folded in; the very first update has no scale yet (r = 0).
           info.reward = curiosityReward(lb, la, stats.predLoss)
         }
+        stats.predLoss = ema(stats.predLoss, lb)
       }
       const base = copyLastBaseline(prev.targets, y)
       if (Number.isFinite(base)) stats.baselineLoss = ema(stats.baselineLoss, base)

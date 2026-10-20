@@ -20,6 +20,8 @@ export interface Model {
    * these tensors' data in this order, so never reorder, insert or remove parameters without a format bump.
    */
   readonly params: readonly Tensor[]
+  /** The predictor's zero-initialised residual output layers (headP w/b, headF w/b): the last four of `params`. */
+  readonly outputParams: readonly Tensor[]
   readonly paramCount: number
   readonly widths: Widths
   /**
@@ -93,6 +95,7 @@ export function createModel(backend: Backend, seed: number, widths: Widths): Mod
 
   return {
     params,
+    outputParams: [headP.w, headP.b, headF.w, headF.b],
     paramCount: params.reduce((a, t) => a + t.size, 0),
     widths,
 
