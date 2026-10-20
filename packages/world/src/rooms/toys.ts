@@ -217,15 +217,11 @@ export const toysRoom: RoomFactory = (seed, words) => {
     },
     areas() {
       if (!areaCache) {
-        let live = 0, inert = 0
-        for (let y = 0; y < ROOM_VIEW.height; y++) {
-          for (let x = 0; x < ROOM_VIEW.width; x++) {
-            if (widgetAt(x, y)) live++
-            else if (labelAt(x, y)) inert++
-          }
-        }
+        let live = 0
+        for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) if (widgetAt(x, y)) live++
         const total = ROOM_VIEW.width * ROOM_VIEW.height
-        areaCache = { interactive: live / total, responsive: live / total, unresponsive: inert / total }
+        // unresponsive: labels and bare background alike
+        areaCache = { interactive: live / total, responsive: live / total, unresponsive: (total - live) / total }
       }
       return { ...areaCache }
     },

@@ -139,13 +139,18 @@ describe("places navigation", () => {
     r.press(bk.x, bk.y)
     expect(colorOf(a!)).not.toEqual(unvisited)
   })
-  it("text is neither interactive nor responsive; areas sum sensibly", () => {
+  it("text is neither interactive nor responsive; unresponsive is everything not responsive", () => {
     const r = make()
     const a = r.areas()
     expect(a.interactive).toBeGreaterThan(0)
-    expect(a.unresponsive).toBeGreaterThan(0)
     expect(a.interactive).toBe(a.responsive)
-    expect(a.interactive + a.unresponsive).toBeLessThan(1)
+    expect(a.unresponsive).toBeCloseTo(1 - a.responsive, 12)
+    // the dead Back button counts as unresponsive; once there is history it counts as responsive
+    const b = find(r, "back")
+    const l = find(r, linkId(r.graph().links.p0![0]!))
+    r.press(l.x, l.y)
+    expect(r.inspect(b.x, b.y)!.responsive).toBe(true)
+    expect(r.areas().unresponsive).toBeCloseTo(1 - r.areas().responsive, 12)
     expect(r.areas()).not.toBe(r.areas())
   })
   it("ignores scroll and keys; out-of-view points hit nothing", () => {

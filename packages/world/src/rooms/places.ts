@@ -146,16 +146,11 @@ export const placesRoom: RoomFactory = (seed, words) => {
     },
     areas() {
       if (!areaCache) {
-        let live = 0, inert = 0
-        for (let y = 0; y < ROOM_VIEW.height; y++) {
-          for (let x = 0; x < ROOM_VIEW.width; x++) {
-            const info = room.inspect(x, y)
-            if (info?.interactive) live++
-            else if (info) inert++
-          }
-        }
+        let live = 0
+        for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) if (room.inspect(x, y)?.responsive) live++
         const total = ROOM_VIEW.width * ROOM_VIEW.height
-        areaCache = { interactive: live / total, responsive: live / total, unresponsive: inert / total }
+        // unresponsive: text, a dead Back button and bare background alike
+        areaCache = { interactive: live / total, responsive: live / total, unresponsive: (total - live) / total }
       }
       return { ...areaCache }
     },

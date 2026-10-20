@@ -223,7 +223,9 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
     }
     return null
   }
-  const live = (k: Hit["kind"]) => k === "close" || k === "header" || k === "tab"
+  /** Reacts to a press: the close box, any header, a tab other than the one showing (that one is inert, like Back with no history). */
+  const live = (hit: Hit) =>
+    hit.kind === "close" || hit.kind === "header" || (hit.kind === "tab" && hit.index !== activeTab)
 
   /** Marks newly visible items; returns their `reveal` events. */
   const reveal = (): RoomEvent[] => {
@@ -246,7 +248,7 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
   const changed = () => {
     areaCache = null
     const hit = cursor ? hitAt(cursor.x, cursor.y) : null
-    hovered = hit && live(hit.kind) ? hit.id : null
+    hovered = hit && live(hit) ? hit.id : null
   }
   reveal() // what is on screen from the start counts, silently
 
@@ -334,7 +336,7 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
     move(x, y) {
       cursor = { x, y }
       const hit = hitAt(x, y)
-      hovered = hit && live(hit.kind) ? hit.id : null
+      hovered = hit && live(hit) ? hit.id : null
       return []
     },
     release: () => [],
@@ -356,12 +358,13 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
     inspect(x, y): ElementInfo | null {
       const hit = hitAt(x, y)
       if (!hit) return null
-      const on = live(hit.kind)
+      const on = live(hit)
       return { id: hit.id, interactive: on, responsive: on }
     },
     areas() {
       if (!areaCache) {
-        // paint each element's on-screen rect into a mask (1 inert, 2 live); the pop-up paints last, on top
+        // paint each element's on-screen rect into a mask (1 inert, 2 live); the pop-up paints last, on top.
+        // Everything not live (inert items, the active tab, the pop-up body, bare page) is the unresponsive side.
         const mask = new Uint8Array(ROOM_VIEW.width * ROOM_VIEW.height)
         const paint = (b: Box, v: number) => {
           const x0 = clamp(b.x, 0, ROOM_VIEW.width), x1 = clamp(b.x + b.w, 0, ROOM_VIEW.width)
@@ -373,12 +376,12 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
           paint({ x: it.x, y: iy - offset, w: it.w, h: it.h }, 1)
         }
         for (const s of h.sections) paint(headerBox(flow.headers.get(s.id)! - offset), 2)
-        for (const t of h.tabs) paint({ ...tabBox(t), y: flow.tabY - offset }, 2)
+        for (const [i, t] of h.tabs.entries()) paint({ ...tabBox(t), y: flow.tabY - offset }, i === activeTab ? 1 : 2)
         if (popupOpen) { paint(popup, 1); paint(close, 2) }
-        let on = 0, off = 0
-        for (const v of mask) { if (v === 2) on++; else if (v === 1) off++ }
+        let on = 0
+        for (const v of mask) if (v === 2) on++
         const total = mask.length
-        areaCache = { interactive: on / total, responsive: on / total, unresponsive: off / total }
+        areaCache = { interactive: on / total, responsive: on / total, unresponsive: (total - on) / total }
       }
       return { ...areaCache }
     },

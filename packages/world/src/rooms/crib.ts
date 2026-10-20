@@ -59,7 +59,9 @@ export const cribRoom: RoomFactory = seed => {
   // Exact pixel count of the shapes (they never overlap); constant because shapes never move.
   let covered = 0
   for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) if (shapeAt(x, y)) covered++
-  const fraction = covered / (ROOM_VIEW.width * ROOM_VIEW.height)
+  const total = ROOM_VIEW.width * ROOM_VIEW.height
+  const fraction = covered / total
+  const rest = (total - covered) / total // background: the unresponsive side
 
   const room: Room = {
     kind: "crib",
@@ -90,7 +92,7 @@ export const cribRoom: RoomFactory = seed => {
       const s = shapeAt(x, y)
       return s ? { id: s.id, interactive: true, responsive: true } : null
     },
-    areas: () => ({ interactive: fraction, responsive: fraction, unresponsive: 0 }),
+    areas: () => ({ interactive: fraction, responsive: fraction, unresponsive: rest }),
     scrollState: () => null,
     page: () => null,
   }

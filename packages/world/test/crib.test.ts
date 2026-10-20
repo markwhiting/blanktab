@@ -121,7 +121,8 @@ describe("cribRoom", () => {
     for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) if (r.inspect(x, y)) px++
     expect(a.interactive).toBeCloseTo(px / (ROOM_VIEW.width * ROOM_VIEW.height), 10)
     expect(a.responsive).toBe(a.interactive)
-    expect(a.unresponsive).toBe(0)
+    expect(a.unresponsive).toBeCloseTo(1 - a.responsive, 12) // the background is the unresponsive side
+    expect(a.unresponsive).toBeGreaterThan(0.5)
   })
 
   it("highlights the hovered shape, and drops the highlight when the cursor leaves the viewport", () => {

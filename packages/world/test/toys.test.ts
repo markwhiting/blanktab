@@ -68,11 +68,11 @@ describe("toys inspect and areas", () => {
     expect(r.inspect(-1, -1)).toBeNull()
     expect(r.inspect(5, ROOM_VIEW.height + 3)).toBeNull()
   })
-  it("area fractions are inside (0,1) and responsive + unresponsive <= 1", () => {
+  it("area fractions are inside (0,1) and unresponsive is everything not responsive (labels + background)", () => {
     for (let seed = 1; seed <= 20; seed++) {
       const a = freshRoom(seed).areas()
       for (const v of Object.values(a)) { expect(v).toBeGreaterThan(0); expect(v).toBeLessThan(1) }
-      expect(a.responsive + a.unresponsive).toBeLessThanOrEqual(1)
+      expect(a.unresponsive).toBeCloseTo(1 - a.responsive, 12)
       expect(a.interactive).toBeCloseTo(a.responsive, 10)
     }
   })

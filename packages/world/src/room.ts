@@ -41,6 +41,7 @@ export interface Room {
   key(k: string): RoomEvent[]
   step(tick: number): RoomEvent[]
   inspect(x: number, y: number): ElementInfo | null
+  /** Fractions of ROOM_VIEW. `unresponsive` is the whole rest of the viewport (inert elements + background): 1 - responsive. */
   areas(): { interactive: number; responsive: number; unresponsive: number }
   scrollState(): { offset: number; max: number; revealedFraction: number } | null
   page(): string | null

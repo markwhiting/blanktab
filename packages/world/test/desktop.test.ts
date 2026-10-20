@@ -23,7 +23,7 @@ function stub(color = "rgb(10,120,200)", onPress: RoomEvent[] = []) {
       key(k) { calls.push(`key ${k}`); return [] },
       step(tick) { ticks.push(tick); return tick === 3 ? [{ kind: "reveal", elementId: "timer", value: 3 }] : [] },
       inspect: () => null,
-      areas: () => ({ interactive: 0, responsive: 0, unresponsive: 0 }),
+      areas: () => ({ interactive: 0, responsive: 0, unresponsive: 1 }),
       scrollState: () => null,
       page: () => null,
     }
@@ -323,6 +323,17 @@ describe("desktop: carried from review", () => {
       { tick: w.tick, room: "crib", kind: "focus", source: "caregiver" },
       { tick: w.tick, room: "crib", kind: "hover", elementId: shape.id, interactive: true, responsive: true },
     ])
+  })
+  it("in every room, areas.unresponsive is the rest of the viewport: 1 - responsive (seeds 1-8)", () => {
+    for (const kind of ["crib", "toys", "hideseek", "places"] as const) {
+      for (let seed = 1; seed <= 8; seed++) {
+        const { areas } = makeWorld(seed, { start: kind }).state()
+        expect(areas.responsive).toBeGreaterThan(0)
+        expect(areas.responsive).toBeLessThan(1)
+        expect(areas.interactive).toBeCloseTo(areas.responsive, 12)
+        expect(areas.unresponsive).toBeCloseTo(1 - areas.responsive, 12)
+      }
+    }
   })
   it("the hover trace alone reconstructs state().hovered at every tick (random walk, all rooms, carrying)", () => {
     const w = makeWorld(3)

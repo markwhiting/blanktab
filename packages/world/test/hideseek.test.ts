@@ -361,6 +361,8 @@ describe("hideseek inspect and areas", () => {
     const f = flowHideseek(h, new Set(), 0)
     const t = h.tabs[1]!
     expect(r.inspect(t.x + 1, f.tabY + 1)).toEqual({ id: t.id, interactive: true, responsive: true })
+    // the tab already showing does nothing when pressed, so it is neither (like Back with no history)
+    expect(r.inspect(h.tabs[0]!.x + 1, f.tabY + 1)).toEqual({ id: h.tabs[0]!.id, interactive: false, responsive: false })
     const a = h.tabs[0]!.items[0]!
     expect(r.inspect(a.x + 1, f.items.get(a.id)! + 1)).toEqual({ id: a.id, interactive: false, responsive: false })
     const s = h.sections[0]!
@@ -373,12 +375,12 @@ describe("hideseek inspect and areas", () => {
     expect(r.inspect(h.popup.x, h.popup.y + h.popup.h - 1)).toEqual({ id: "popup", interactive: false, responsive: false })
     expect(r.page()).toBeNull()
   })
-  it("area fractions are in [0,1], responsive + unresponsive <= 1, and track scrolling", () => {
+  it("area fractions are in [0,1], unresponsive = 1 - responsive, and track scrolling", () => {
     for (let seed = 1; seed <= 10; seed++) {
       const r = freshRoom(seed)
       const a = r.areas()
       for (const v of Object.values(a)) { expect(v).toBeGreaterThanOrEqual(0); expect(v).toBeLessThanOrEqual(1) }
-      expect(a.responsive + a.unresponsive).toBeLessThanOrEqual(1)
+      expect(a.unresponsive).toBeCloseTo(1 - a.responsive, 12)
       expect(a.interactive).toBeGreaterThan(0) // the tab strip is near the top
       expect(a.unresponsive).toBeGreaterThan(0)
       expect(a.interactive).toBeCloseTo(a.responsive, 10)
@@ -390,14 +392,10 @@ describe("hideseek inspect and areas", () => {
   })
   it("areas agree with inspect() pixel by pixel, with and without the pop-up", () => {
     const scan = (r: Room) => {
-      let on = 0, off = 0
-      for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) {
-        const i = r.inspect(x, y)
-        if (i?.responsive) on++
-        else if (i) off++
-      }
+      let on = 0
+      for (let y = 0; y < ROOM_VIEW.height; y++) for (let x = 0; x < ROOM_VIEW.width; x++) if (r.inspect(x, y)?.responsive) on++
       const n = ROOM_VIEW.width * ROOM_VIEW.height
-      return { interactive: on / n, responsive: on / n, unresponsive: off / n }
+      return { interactive: on / n, responsive: on / n, unresponsive: (n - on) / n }
     }
     for (const seed of [1, 2, 3]) {
       const r = freshRoom(seed)
@@ -407,6 +405,33 @@ describe("hideseek inspect and areas", () => {
       r.step(layout(seed).popup.tick)
       expect(r.areas()).toEqual(scan(r))
     }
+    // after switching tabs the newly active tab is the inert one
+    const h = layout(1), r = freshRoom(1), f = flowHideseek(h, new Set(), 0)
+    r.press(h.tabs[1]!.x + 2, f.tabY + 4)
+    expect(r.inspect(h.tabs[1]!.x + 2, f.tabY + 4)).toEqual({ id: h.tabs[1]!.id, interactive: false, responsive: false })
+    expect(r.inspect(h.tabs[0]!.x + 2, f.tabY + 4)).toEqual({ id: h.tabs[0]!.id, interactive: true, responsive: true })
+    expect(r.areas()).toEqual(scan(r))
+  })
+  it("clicking a tab: the click is responsive, then the hover trace shows the tab turned inert; the active tab's click is not", () => {
+    const h = layout(1), f = flowHideseek(h, new Set(), 0)
+    const w = makeWorld(1, { rooms: ["hideseek"] })
+    const t1 = h.tabs[1]!, t0 = h.tabs[0]!
+    moveTo(w, t0.x + 2, f.tabY + 4)
+    w.drainTrace()
+    w.act(PRESS); w.act(RELEASE)
+    expect(w.drainTrace().filter(e => e.kind === "click" || e.kind === "respond")).toEqual([
+      { tick: w.tick - 1, room: "hideseek", kind: "click", elementId: t0.id, interactive: false, responsive: false },
+    ])
+    moveTo(w, t1.x + 2, f.tabY + 4)
+    w.drainTrace()
+    w.act(PRESS)
+    expect(w.drainTrace().filter(e => e.kind !== "reveal")).toEqual([
+      { tick: w.tick, room: "hideseek", kind: "click", elementId: t1.id, interactive: true, responsive: true },
+      { tick: w.tick, room: "hideseek", kind: "respond", elementId: t1.id },
+      // same element, new flags: the hover trace keeps up with state().hovered
+      { tick: w.tick, room: "hideseek", kind: "hover", elementId: t1.id, interactive: false, responsive: false },
+    ])
+    expect(w.state().hovered).toEqual({ id: t1.id, interactive: false, responsive: false })
   })
   it("tab strip and header are drawn at their flow positions (header ink differs from the page)", () => {
     const h = layout(1)
