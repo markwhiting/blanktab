@@ -74,10 +74,11 @@
     .tabs button[aria-selected="true"] { font-weight: 700; }
     .tabs button[aria-selected="true"]::after { opacity: 1; }
     .build {
-      margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 0.02em; opacity: 0.6;
-      transition: opacity 0.2s var(--ease-out), color 0.2s var(--ease-out);
+      /* Full opacity (life uses 0.6): muted on canvas-bg is ~4.7:1 in light, ~7:1 in dark; any fade drops below 4.5:1. */
+      margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 0.02em;
+      transition: color 0.2s var(--ease-out);
     }
-    .build:hover { opacity: 1; color: var(--text); text-decoration: none; }
+    .build:hover { color: var(--text); text-decoration: none; }
 
     main { flex: 1 1 auto; padding: 10px 14px 24px; }
     [role="tabpanel"][hidden] { display: none; }
