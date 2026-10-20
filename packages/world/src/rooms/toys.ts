@@ -1,6 +1,6 @@
 import { mulberry32 } from "../rng"
 import { WORDS } from "../words"
-import { GLYPH_ADVANCE, GLYPH_H } from "../font"
+import { GLYPH_H, textWidth } from "../font"
 import { ROOM_VIEW, inView, type ElementInfo, type Room, type RoomEvent, type RoomFactory } from "../room"
 
 export const TOYS_BACKGROUND = "rgb(214,226,222)"
@@ -22,7 +22,6 @@ export interface Toys { widgets: ToyWidget[]; labels: ToyLabel[] }
 
 const PAD = 6
 const BUTTON_H = 18, TOGGLE = { w: 32, h: 16 }, SLIDER = { w: 96, h: 12, knobW: 8 }, BLOCK = 24
-const textW = (s: string, scale = 1) => s.length * GLYPH_ADVANCE * scale - (scale > 0 ? scale : 0)
 
 type Box = { x: number; y: number; w: number; h: number }
 const overlaps = (a: Box, b: Box, pad: number) =>
@@ -53,7 +52,7 @@ export function layoutToys(seed: number, words: readonly string[] = WORDS): Toys
     for (const kind of kinds) {
       const color: [number, number, number] = [int(90, 220), int(90, 220), int(90, 220)]
       const label = kind === "button" ? word() : undefined
-      const w = kind === "button" ? textW(label!) + 8 + 16 : kind === "toggle" ? TOGGLE.w : kind === "slider" ? SLIDER.w : BLOCK
+      const w = kind === "button" ? textWidth(label!) + 8 + 16 : kind === "toggle" ? TOGGLE.w : kind === "slider" ? SLIDER.w : BLOCK
       const h = kind === "button" ? BUTTON_H : kind === "toggle" ? TOGGLE.h : kind === "slider" ? SLIDER.h : BLOCK
       const b = place(w, h)
       if (!b) { ok = false; break }
@@ -64,7 +63,7 @@ export function layoutToys(seed: number, words: readonly string[] = WORDS): Toys
     }
     for (let i = 0; ok && i < nLabels; i++) {
       const text = word(), scale = int(1, 2)
-      const b = place(textW(text, scale), GLYPH_H * scale)
+      const b = place(textWidth(text, scale), GLYPH_H * scale)
       if (!b) ok = false
       else labels.push({ id: `label-${i}`, text, ...b, scale })
     }

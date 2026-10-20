@@ -1,4 +1,5 @@
-// 5x7 bitmap font. Text in the world is always pixels from this table, never fillText.
+// 5x9 bitmap font (5 wide; 7 rows above the baseline + 2 descender rows). Text in the world is always
+// pixels from this table, never fillText.
 // Each glyph is GLYPH_H rows; each row is a 5-bit mask (bit 4 = leftmost pixel).
 // Rows 0-6 sit above the baseline; rows 7-8 hold the tails of p, y, g, q and j.
 export const GLYPH_W = 5, GLYPH_H = 9, GLYPH_BASELINE = 7, GLYPH_ADVANCE = 6
