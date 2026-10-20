@@ -48,7 +48,7 @@ describe("desktop: privileged leakage (Review Focus 1)", () => {
 describe("desktop: construction", () => {
   it("defaults to every implemented room, starting at the first", () => {
     const w = makeWorld(1)
-    expect(w.rooms()).toEqual(["crib"])
+    expect(w.rooms()).toEqual(["crib", "toys"])
     expect(w.state().room).toBe("crib")
   })
   it("rejects duplicate kinds, unknown/unimplemented kinds, empty lists and a start outside the list", () => {
@@ -278,5 +278,37 @@ describe("desktop: state()", () => {
       return JSON.stringify(out)
     }
     expect(run()).toBe(run())
+  })
+})
+
+describe("desktop: carried from review", () => {
+  it("state() returns copies of the room's scrollState and inspect results", () => {
+    const scroll = { offset: 8, max: 100, revealedFraction: 0.5 }
+    const info = { id: "thing", interactive: true, responsive: true }
+    const factory: RoomFactory = () => ({
+      ...stub().factory(1, WORDS),
+      scrollState: () => scroll,
+      inspect: () => info,
+    })
+    const w = makeWorld(1, { rooms: ["toys"], roomFactories: { toys: factory } })
+    moveTo(w, 40, 30)
+    const st = w.state()
+    st.scroll!.offset = 999
+    st.hovered!.id = "mutated"
+    expect(scroll.offset).toBe(8)
+    expect(info.id).toBe("thing")
+    expect(w.state().scroll).toEqual({ offset: 8, max: 100, revealedFraction: 0.5 })
+    expect(w.state().hovered!.id).toBe("thing")
+  })
+  it("bringToFront emits the hover trace for the element now under the cursor in the same tick", () => {
+    const shape = layoutCrib(hashSeed(1, "crib")).shapes[0]!
+    const { w } = two(stub(), { start: "toys" })
+    moveTo(w, Math.round(shape.x + shape.size / 2), Math.round(shape.y + shape.size / 2))
+    w.drainTrace()
+    w.bringToFront("crib")
+    expect(w.drainTrace()).toEqual([
+      { tick: w.tick, room: "crib", kind: "focus", source: "caregiver" },
+      { tick: w.tick, room: "crib", kind: "hover", elementId: shape.id },
+    ])
   })
 })

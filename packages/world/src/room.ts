@@ -28,6 +28,8 @@ export interface RoomEvent {
  * The shell calls `move` every tick the cursor is in the viewport, plus once on the tick it leaves
  * (with the outside point), so rooms can drop hover state; points outside ROOM_VIEW mean "not over the room".
  * `release` may also arrive with an outside point when a drag ends over the taskbar.
+ * A held move (`held` true) with no prior press in this room is never a grab: a caregiver switch
+ * mid-drag delivers held moves to a room that never saw the press. Rooms start drags only in `press`.
  */
 export interface Room {
   readonly kind: RoomKind

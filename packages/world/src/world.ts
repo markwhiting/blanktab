@@ -10,6 +10,7 @@ import {
   type ElementInfo, type Room, type RoomEvent, type RoomFactory, type RoomKind,
 } from "./room"
 import { cribRoom } from "./rooms/crib"
+import { toysRoom } from "./rooms/toys"
 
 /** Privileged; harness only. */
 export interface TraceEvent {
@@ -49,7 +50,7 @@ export interface CanvasLike {
 }
 
 /** Built-in rooms. A kind is "implemented" once it has an entry here. */
-const FACTORIES: Partial<Record<RoomKind, RoomFactory>> = { crib: cribRoom }
+const FACTORIES: Partial<Record<RoomKind, RoomFactory>> = { crib: cribRoom, toys: toysRoom }
 
 const DOWN = WORLD.width / PERIPHERY.width // 4
 const ICON = { x0: 4, size: 12, gap: 4, y: WORLD.height - TASKBAR_HEIGHT + 2 } as const
@@ -58,6 +59,9 @@ const OUTLINE_COLOR = "rgb(240,240,240)"
 const lighten = (c: readonly number[]) => c.map(v => Math.min(255, Math.round(v + (255 - v) * 0.4)))
 const rgb = (c: readonly number[]) => `rgb(${c[0]},${c[1]},${c[2]})`
 const taskbarId = (k: RoomKind) => `taskbar:${k}`
+
+const copyInfo = (i: ElementInfo | null): ElementInfo | null => (i ? { ...i } : null)
+const copyScroll = <T extends object>(s: T | null): T | null => (s ? { ...s } : null)
 
 interface Slot {
   kind: RoomKind; room: Room; icon: number[]; iconX: number
@@ -251,9 +255,9 @@ export function createWorld(opts: {
       return {
         tick, room: room.kind, page: room.page(),
         cursor: { x: cx, y: cy },
-        hovered: hoveredInfo(),
+        hovered: copyInfo(hoveredInfo()),
         areas: { ...room.areas() },
-        scroll: room.scrollState(),
+        scroll: copyScroll(room.scrollState()),
       }
     },
 
@@ -262,7 +266,10 @@ export function createWorld(opts: {
     bringToFront(kind: RoomKind) {
       const i = kinds.indexOf(kind)
       if (i < 0) throw new RangeError(`room "${kind}" is not in this world`)
-      if (i !== active) focus(i, "caregiver")
+      if (i !== active) {
+        focus(i, "caregiver")
+        checkHover() // the element now under the cursor gets its hover trace this tick
+      }
     },
   }
 }

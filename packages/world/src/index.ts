@@ -5,3 +5,5 @@ export type { Room, RoomKind, RoomEvent, RoomFactory, ElementInfo } from "./room
 export { cribRoom, layoutCrib } from "./rooms/crib"
 export type { Shape, Crib } from "./rooms/crib"
 export type { Gfx } from "./gfx"
+export { toysRoom, layoutToys } from "./rooms/toys"
+export type { ToyWidget, ToyLabel, Toys } from "./rooms/toys"
