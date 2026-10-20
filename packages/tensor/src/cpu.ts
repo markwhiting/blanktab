@@ -1,4 +1,4 @@
-import { ResourceError, ShapeError, broadcastShape } from "./backend"
+import { ResourceError, ShapeError, broadcastShape, im2colGeometry } from "./backend"
 import type { Backend, BinaryOp, Storage, UnaryOp } from "./backend"
 
 interface CpuStorage extends Storage {
@@ -8,8 +8,9 @@ interface CpuStorage extends Storage {
 
 const unaryFns: Record<UnaryOp, (x: number) => number> = {
   neg: (x) => -x,
-  relu: (x) => (x > 0 ? x : 0),
-  step: (x) => (x > 0 ? 1 : 0),
+  // NaN fails every comparison, so test x <= 0 (not x > 0) to let NaN through.
+  relu: (x) => (x <= 0 ? 0 : x),
+  step: (x) => (x > 0 ? 1 : x <= 0 ? 0 : NaN),
   tanh: Math.tanh,
   sigmoid: (x) => 1 / (1 + Math.exp(-x)),
   exp: Math.exp,
@@ -90,8 +91,10 @@ export function createCpuBackend(): Backend {
     scalar(op, a, c) {
       const x = get(a)
       const f = binaryFns[op]
+      // The constant is float32, as on the GPU (a uniform f32), so both backends round identically.
+      const c32 = Math.fround(c)
       const out = new Float32Array(x.length)
-      for (let i = 0; i < x.length; i++) out[i] = f(x[i]!, c)
+      for (let i = 0; i < x.length; i++) out[i] = f(x[i]!, c32)
       stats.flops += out.length
       return make(out)
     },
@@ -202,9 +205,7 @@ export function createCpuBackend(): Backend {
     im2col(xs, c, h, w, kh, kw, stride, pad) {
       const x = get(xs)
       checkLen("im2col", xs, c * h * w)
-      const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
-      const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
-      if (oh < 0 || ow < 0) throw new ShapeError(`im2col: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
+      const [oh, ow] = im2colGeometry("im2col", c, h, w, kh, kw, stride, pad)
       const out = new Float32Array(c * kh * kw * oh * ow)
       for (let ch = 0; ch < c; ch++)
         for (let ky = 0; ky < kh; ky++)
@@ -225,9 +226,7 @@ export function createCpuBackend(): Backend {
 
     col2im(cs, c, h, w, kh, kw, stride, pad) {
       const cols = get(cs)
-      const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
-      const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
-      if (oh < 0 || ow < 0) throw new ShapeError(`col2im: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
+      const [oh, ow] = im2colGeometry("col2im", c, h, w, kh, kw, stride, pad)
       checkLen("col2im", cs, c * kh * kw * oh * ow)
       const out = new Float32Array(c * h * w)
       for (let ch = 0; ch < c; ch++)

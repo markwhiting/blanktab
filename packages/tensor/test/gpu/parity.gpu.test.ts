@@ -107,9 +107,13 @@ describe("webgpu parity with cpu", () => {
     }
   })
 
-  it("scalar", async () => {
+  it("scalar (add/sub/mul bit-exact: both backends use the float32 constant)", async () => {
     for (const op of ["add", "sub", "mul", "div"] as BinaryOp[]) {
-      for (const c of [0.37, -2.5]) await parity(`scalar:${op}`, [rand(n, 3)], (be, [a]) => be.scalar(op, a!, c))
+      for (const c of [0.37, -2.5, 0.1, -1 / 3]) {
+        const e = await parity(`scalar:${op}`, [rand(n, 3)], (be, [a]) => be.scalar(op, a!, c))
+        // One correctly rounded float32 operation; div is excluded (fast math may use a reciprocal).
+        if (op !== "div") expect(e, `scalar:${op} ${c}`).toBe(0)
+      }
     }
   })
 

@@ -4,8 +4,9 @@ import { WG, prelude } from "./common.wgsl"
 // tanh and sigmoid use exp(-|x|) forms so large |x| saturates instead of overflowing to NaN.
 const unaryExpr: Record<UnaryOp, string> = {
   neg: "-x",
-  relu: "select(0.0, x, x > 0.0)",
-  step: "select(0.0, 1.0, x > 0.0)",
+  // NaN passes through via the bit-pattern isNan (fast math may assume comparisons never see NaN).
+  relu: "select(select(0.0, x, x > 0.0), x, isNan(x))",
+  step: "select(select(0.0, 1.0, x > 0.0), x, isNan(x))",
   tanh: "tanhStable(x)",
   sigmoid: "sigmoidStable(x)",
   exp: "exp(x)",

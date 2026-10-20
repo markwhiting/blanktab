@@ -53,6 +53,49 @@ export function describeBackendContract(label: string, make: () => Promise<Backe
       expect(Array.from(await be.read(be.reduceLast("sum", be.zeros(0), 2, 0)))).toEqual([0, 0])
     })
 
+    it("relu and step propagate NaN; ±0 and ±Infinity follow x > 0", async () => {
+      const be = await make()
+      const a = be.upload(f(NaN, -2, -0, 0, 3, Infinity, -Infinity))
+      const relu = Array.from(await be.read(be.unary("relu", a)))
+      const step = Array.from(await be.read(be.unary("step", a)))
+      expect(Number.isNaN(relu[0])).toBe(true)
+      expect(Number.isNaN(step[0])).toBe(true)
+      expect(relu.slice(1).map(Math.abs)).toEqual([0, 0, 0, 3, Infinity, 0])
+      expect(step.slice(1)).toEqual([0, 0, 0, 1, 1, 0])
+    })
+
+    it("scalar uses the float32 value of c (equals binary with c uploaded as a 1-element storage)", async () => {
+      const be = await make()
+      // Inputs whose float64 result x op 0.1 rounds differently from x op fround(0.1).
+      const xs = Float32Array.from({ length: 4096 }, (_, i) => 1 + i / 1024 - 2)
+      const a = be.upload(xs)
+      for (const c of [0.1, -1 / 3, 1e-7]) {
+        const cs = be.upload(f(c))
+        for (const op of ["add", "sub", "mul", "div"] as const) {
+          const got = await be.read(be.scalar(op, a, c))
+          const want = await be.read(be.binary(op, a, [xs.length], cs, [1], [xs.length]))
+          let mismatches = 0
+          for (let i = 0; i < xs.length; i++) if (!Object.is(got[i], want[i])) mismatches++
+          expect(mismatches, `scalar ${op} ${c}`).toBe(0)
+        }
+      }
+    })
+
+    it("im2col/col2im geometry: ShapeError when the output is empty (oh or ow < 1) or stride < 1", async () => {
+      const be = await make()
+      const x = be.upload(new Float32Array(1 * 4 * 4))
+      // h + 2*pad - kh = -1 -> floor(-1/2) + 1 = 0 output rows (previously accepted as an empty result).
+      expect(() => be.im2col(x, 1, 4, 4, 5, 3, 2, 0)).toThrow(ShapeError)
+      expect(() => be.im2col(x, 1, 4, 4, 3, 5, 2, 0)).toThrow(ShapeError)
+      expect(() => be.col2im(be.zeros(0), 1, 4, 4, 5, 3, 2, 0)).toThrow(ShapeError)
+      for (const stride of [0, -1]) {
+        expect(() => be.im2col(x, 1, 4, 4, 3, 3, stride, 1), `im2col stride ${stride}`).toThrow(ShapeError)
+        expect(() => be.col2im(be.zeros(9 * 16), 1, 4, 4, 3, 3, stride, 1), `col2im stride ${stride}`).toThrow(ShapeError)
+      }
+      // A valid geometry still works: 1x1 kernel, stride 3 over 4x4 -> 2x2.
+      expect(Array.from(await be.read(be.im2col(be.upload(Float32Array.from({ length: 16 }, (_, i) => i)), 1, 4, 4, 1, 1, 3, 0)))).toEqual([0, 3, 12, 15])
+    })
+
     it("sums accumulate beyond float32 precision", async () => {
       const be = await make()
       const a = be.upload(f(16777216, 1, 1, 1, 1))

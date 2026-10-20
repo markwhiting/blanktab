@@ -1,4 +1,4 @@
-import { ResourceError, ShapeError, broadcastShape } from "./backend"
+import { ResourceError, ShapeError, broadcastShape, im2colGeometry } from "./backend"
 import type { Backend, Storage } from "./backend"
 import { adamKernel } from "./kernels/adam.wgsl"
 import { MAX_RANK, binaryKernel } from "./kernels/binary.wgsl"
@@ -406,18 +406,14 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
     im2col(xs, c, h, w, kh, kw, stride, pad) {
       const x = get(xs)
       checkLen("im2col", xs, c * h * w)
-      const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
-      const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
-      if (oh < 0 || ow < 0) throw new ShapeError(`im2col: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
+      const [oh, ow] = im2colGeometry("im2col", c, h, w, kh, kw, stride, pad)
       const n = c * kh * kw * oh * ow
       return produce(n, (o) => dispatch1d("im2col", im2colKernel, [x, o], [c, h, w, kh, kw, stride, pad, oh, ow, n].map(u), n))
     },
 
     col2im(cs, c, h, w, kh, kw, stride, pad) {
       const cols = get(cs)
-      const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
-      const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
-      if (oh < 0 || ow < 0) throw new ShapeError(`col2im: kernel ${kh}x${kw} does not fit ${c}x${h}x${w} with pad ${pad}`)
+      const [oh, ow] = im2colGeometry("col2im", c, h, w, kh, kw, stride, pad)
       checkLen("col2im", cs, c * kh * kw * oh * ow)
       const n = c * h * w
       return produce(n, (o) => dispatch1d("col2im", col2imKernel, [cols, o], [c, h, w, kh, kw, stride, pad, oh, ow, n].map(u), n))

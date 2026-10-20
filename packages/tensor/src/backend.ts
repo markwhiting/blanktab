@@ -39,6 +39,26 @@ export interface Backend {
 
 const fmt = (s: number[]) => `[${s.join(",")}]`
 
+/**
+ * Output size [oh, ow] of im2col/col2im, shared by every backend so geometry rules cannot drift.
+ * Throws ShapeError unless stride >= 1, kh, kw >= 1, pad >= 0 (all integers) and the output is non-empty.
+ */
+export function im2colGeometry(what: string, c: number, h: number, w: number, kh: number, kw: number, stride: number, pad: number): [number, number] {
+  const dims = { c, h, w, kh, kw, stride, pad }
+  for (const [name, v] of Object.entries(dims)) {
+    if (!Number.isInteger(v)) throw new ShapeError(`${what}: ${name} must be an integer, got ${v}`)
+  }
+  if (stride < 1) throw new ShapeError(`${what}: stride must be >= 1, got ${stride}`)
+  if (kh < 1 || kw < 1) throw new ShapeError(`${what}: kernel ${kh}x${kw} must be at least 1x1`)
+  if (pad < 0 || c < 0 || h < 0 || w < 0) throw new ShapeError(`${what}: negative size in ${c}x${h}x${w} pad ${pad}`)
+  const oh = Math.floor((h + 2 * pad - kh) / stride) + 1
+  const ow = Math.floor((w + 2 * pad - kw) / stride) + 1
+  if (oh < 1 || ow < 1) {
+    throw new ShapeError(`${what}: kernel ${kh}x${kw} stride ${stride} does not fit ${c}x${h}x${w} with pad ${pad} (output ${oh}x${ow})`)
+  }
+  return [oh, ow]
+}
+
 /** NumPy broadcasting; throws ShapeError naming both shapes on mismatch. */
 export function broadcastShape(a: number[], b: number[]): number[] {
   const n = Math.max(a.length, b.length)

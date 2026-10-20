@@ -1,4 +1,4 @@
-import { ShapeError } from "./backend"
+import { ShapeError, im2colGeometry } from "./backend"
 import { add, addScalar, composite, div, im2col, matmul, mean, mul, reshape, scale, sigmoid, square, sqrt, sub, sumLast, tanh } from "./ops"
 import { param } from "./tensor"
 import type { Tensor } from "./tensor"
@@ -26,8 +26,7 @@ export function conv2d(
   return composite(() => {
     const cols = im2col(x, kh, kw, stride, pad)
     const y = matmul(w, cols) // [O, outH*outW]
-    const outH = Math.floor((x.shape[1]! + 2 * pad - kh) / stride) + 1
-    const outW = Math.floor((x.shape[2]! + 2 * pad - kw) / stride) + 1
+    const [outH, outW] = im2colGeometry("conv2d", x.shape[0]!, x.shape[1]!, x.shape[2]!, kh, kw, stride, pad)
     return reshape(b ? add(y, b) : y, [w.shape[0]!, outH, outW])
   })
 }
