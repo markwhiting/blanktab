@@ -2,6 +2,7 @@ import {
   FOVEA, PERIPHERY, WORLD, isValidAction, decodeMove,
   type Action, type Observation, type WorldView,
 } from "@blanktab/interface"
+import type { Context2DLike } from "./gfx"
 import { BACKGROUND, TASKBAR_HEIGHT, iconContains, layoutCrib, shapeContains, type Crib } from "./crib"
 
 export interface TraceEvent { tick: number; kind: "hover" | "click" | "respond"; elementId: string }
@@ -11,18 +12,7 @@ export interface World extends WorldView {
   drainTrace(): TraceEvent[] // privileged; harness only
 }
 
-/** The minimal 2D-context subset the world draws with (fits OffscreenCanvas and @napi-rs/canvas). */
-export interface Context2DLike {
-  fillStyle: string | CanvasGradient | CanvasPattern
-  fillRect(x: number, y: number, w: number, h: number): void
-  beginPath(): void
-  arc(x: number, y: number, r: number, start: number, end: number): void
-  moveTo(x: number, y: number): void
-  lineTo(x: number, y: number): void
-  closePath(): void
-  fill(): void
-  getImageData(sx: number, sy: number, sw: number, sh: number): { data: Uint8ClampedArray }
-}
+export type { Context2DLike }
 
 export interface CanvasLike {
   width: number
