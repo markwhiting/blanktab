@@ -321,6 +321,14 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
       release(g.buffer)
     },
 
+    copy(s) {
+      const x = get(s)
+      // Recorded in the open batch (no compute pass, so no uniform slot), ordered after pending writers of x.
+      return produce(s.length, (o) => {
+        if (s.length > 0) beginBatch().copyBufferToBuffer(x, 0, o, 0, s.length * 4)
+      })
+    },
+
     unary(op, a) {
       const x = get(a)
       const out = produce(a.length, (o) => dispatch1d(`unary:${op}`, () => unaryKernel(op), [x, o], [u(a.length)], a.length))

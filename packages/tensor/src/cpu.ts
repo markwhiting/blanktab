@@ -79,6 +79,8 @@ export function createCpuBackend(): Backend {
       stats.liveBuffers--
     },
 
+    copy: (s) => make(Float32Array.from(get(s))),
+
     unary(op, a) {
       const x = get(a)
       const f = unaryFns[op]

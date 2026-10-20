@@ -35,6 +35,27 @@ export function describeBackendContract(label: string, make: () => Promise<Backe
       await expect(p).rejects.toThrow(ResourceError)
     })
 
+    it("copy returns an independent storage with the same values and costs no FLOPs", async () => {
+      const be = await make()
+      const a = be.upload(f(1, NaN, -0, 4))
+      const live = be.stats.liveBuffers
+      const flops = be.stats.flops
+      const c = be.copy(a)
+      expect(c).not.toBe(a)
+      expect(be.stats.liveBuffers).toBe(live + 1)
+      expect(be.stats.flops).toBe(flops)
+      be.adam(a, be.upload(f(1, 1, 1, 1)), be.zeros(4), be.zeros(4), 0.5, 0.9, 0.999, 1e-8, 1) // mutate a in place
+      be.dispose(a)
+      const got = Array.from(await be.read(c))
+      expect(got[0]).toBe(1)
+      expect(Number.isNaN(got[1])).toBe(true)
+      expect(Object.is(got[2], -0)).toBe(true)
+      expect(got[3]).toBe(4)
+      expect(Array.from(await be.read(be.copy(be.zeros(0))))).toEqual([])
+      be.dispose(c)
+      expect(() => be.copy(a)).toThrow(ResourceError)
+    })
+
     it("zero-length storages round-trip", async () => {
       const be = await make()
       expect(Array.from(await be.read(be.upload(f())))).toEqual([])

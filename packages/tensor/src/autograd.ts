@@ -1,4 +1,4 @@
-import { ShapeError } from "./backend"
+import { ResourceError, ShapeError } from "./backend"
 import type { Storage } from "./backend"
 import { Tensor, noGrad } from "./tensor"
 
@@ -130,12 +130,22 @@ export function backward(loss: Tensor): void {
  * tensor built inside a composite (e.g. conv2d's im2col of a constant input): the caller never sees
  * it, so it is graph-owned (`_graphOwned`) and freed here like an intermediate.
  *
- * Kept tensors are detached (PyTorch `.detach()` semantics): their node is removed and
- * `requiresGrad` set to false, so reusing one in a later graph (e.g. carried recurrent state)
- * propagates no gradient into it and never accrues an orphan `.grad`.
+ * Every tensor in `keep` must be reachable from `loss`; otherwise this throws ResourceError
+ * ("kept tensor not part of this graph — use detach()") before freeing anything. Kept tensors
+ * survive and are detached in place (node removed, `requiresGrad` false); they become caller-owned.
+ * Use `keep` to read a value (e.g. the loss) after freeing the graph. To carry recurrent state into
+ * the next step, prefer `detach(h)` before calling this, which copies it out of the graph.
  */
 export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
   const order = topoOrder(loss)
+  // Validate before freeing anything: a kept tensor outside this graph would otherwise be ignored
+  // silently while the caller believes it was detached (its own graph then leaks every step).
+  const inGraph = new Set(order)
+  keep.forEach((t, i) => {
+    if (!inGraph.has(t)) {
+      throw new ResourceError(`disposeGraph: kept tensor not part of this graph — use detach() (keep[${i}], shape [${t.shape.join(",")}])`)
+    }
+  })
   const keepSet = new Set(keep)
   const protectedStorages = new Set<Storage>()
   const isLeaf = (t: Tensor) => !t._node && !t._graphOwned
@@ -163,4 +173,15 @@ export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
       t.grad = null
     }
   }
+}
+
+/**
+ * A copy of `t` outside any graph: no node, requiresGrad false, its own storage (`t` and its graph
+ * can then be freed independently). The way to carry recurrent state from one training step to the
+ * next — `const next = detach(h2); disposeGraph(loss, []); h.dispose(); h = next` — so no gradient
+ * flows through time and the old graph does not stay alive. Costs one copy and 0 FLOPs; the result
+ * is caller-owned (dispose it when replaced).
+ */
+export function detach(t: Tensor): Tensor {
+  return new Tensor(t.backend.copy(t.storage), t.shape)
 }

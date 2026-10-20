@@ -1,4 +1,4 @@
-import { Adam, add, backward, conv2d, createRng, disposeGraph, gruCell, linear, logSoftmax, mean, mse, mul, neg, randn, relu, reshape, tensor } from "../src/index"
+import { Adam, add, backward, conv2d, createRng, detach, disposeGraph, gruCell, linear, logSoftmax, mean, mse, mul, neg, randn, relu, reshape, tensor } from "../src/index"
 import type { Backend, GruParams, Tensor } from "../src/index"
 
 /**
@@ -136,10 +136,12 @@ export function createBenchModel(backend: Backend, widths: BenchWidths = DEFAULT
       backward(loss)
       opt.step()
       opt.zeroGrad()
-      disposeGraph(loss, readLoss ? [h2, loss] : [h2])
+      // Carried state, no gradient through time: copy h2 out of the graph, then free the graph.
+      const next = detach(h2)
+      disposeGraph(loss, readLoss ? [loss] : [])
       for (const t of inputs) t.dispose()
       h.dispose()
-      h = h2 // detached by disposeGraph: carried state, no gradient through time
+      h = next
 
       if (!readLoss) return null
       try {

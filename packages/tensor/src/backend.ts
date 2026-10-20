@@ -16,6 +16,8 @@ export interface Backend {
   zeros(length: number): Storage
   read(s: Storage): Promise<Float32Array>
   dispose(s: Storage): void
+  /** A new storage holding the same values (0 FLOPs; a copy, not arithmetic). */
+  copy(s: Storage): Storage
   unary(op: UnaryOp, a: Storage): Storage
   /** a op c elementwise */
   scalar(op: BinaryOp, a: Storage, c: number): Storage

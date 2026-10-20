@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
-  Adam, ShapeError, Tensor, add, addScalar, backward, createRng, disposeGraph, div, exp, gatherRows, getDefaultBackend,
+  Adam, ResourceError, ShapeError, Tensor, add, addScalar, backward, createRng, detach, disposeGraph, div, exp, gatherRows, getDefaultBackend,
   gradCheck, log, logSoftmax, matmul, mean, mul, neg, noGrad, param, relu, reshape, scale, sigmoid, softmax, sqrt,
   square, sub, sum, sumLast, tanh, tensor,
 } from "../src/index"
@@ -220,6 +220,72 @@ describe("disposeGraph", () => {
     }
     expect(new Set(counts).size).toBe(1)
     expect(Array.from(await h.read())).toEqual([1, 4])
+  })
+  it("a kept tensor not reachable from loss throws ResourceError naming it, and frees nothing", async () => {
+    const be = getDefaultBackend()
+    const x = param(new Float32Array([1, 2]), [2])
+    const other = tanh(x) // a different graph
+    const loss = sum(mul(x, x))
+    backward(loss)
+    const live = be.stats.liveBuffers
+    expect(() => disposeGraph(loss, [other])).toThrow(ResourceError)
+    expect(() => disposeGraph(loss, [other])).toThrow("kept tensor not part of this graph — use detach()")
+    expect(() => disposeGraph(loss, [loss, other])).toThrow(/keep\[1\].*\[2\]/)
+    expect(be.stats.liveBuffers).toBe(live)
+    expect(loss._node).toBeDefined()
+    await expect(loss.read()).resolves.toBeInstanceOf(Float32Array)
+    disposeGraph(loss, [])
+    disposeGraph(other, [])
+    x.grad?.dispose()
+    x.grad = null
+    expect(be.stats.liveBuffers).toBe(live - 3 - 1) // loss, mul, other freed; x.grad freed
+  })
+  it("detach copies a tensor out of its graph: node-less, no grad, independent storage", async () => {
+    const be = getDefaultBackend()
+    const x = param(new Float32Array([1, 2]), [2])
+    const h = mul(x, x)
+    const loss = sum(h)
+    const before = be.stats.liveBuffers
+    const d = detach(h)
+    expect(be.stats.liveBuffers).toBe(before + 1)
+    expect(d._node).toBeUndefined()
+    expect(d.requiresGrad).toBe(false)
+    expect(d.storage).not.toBe(h.storage)
+    expect(d.shape).toEqual([2])
+    expect(h._node).toBeDefined() // the original is untouched
+    backward(loss)
+    disposeGraph(loss, [])
+    x.grad?.dispose()
+    x.grad = null
+    await expect(h.read()).rejects.toThrow() // the old graph is freed...
+    expect(Array.from(await d.read())).toEqual([1, 4]) // ...the detached copy survives
+    d.dispose()
+  })
+  it("carrying recurrent state via detach over 10 steps keeps liveBuffers flat", async () => {
+    const be = getDefaultBackend()
+    const w = param(new Float32Array([0.5, -0.25, 0.75, 0.1]), [2, 2])
+    const opt = new Adam([w], { lr: 0.01 })
+    let h = tensor([0.3, -0.6], [1, 2])
+    const counts: number[] = []
+    const values: number[][] = []
+    for (let i = 0; i < 10; i++) {
+      const h2 = tanh(add(matmul(h, w), h))
+      const loss = sum(square(h2))
+      backward(loss)
+      opt.step()
+      opt.zeroGrad()
+      const next = detach(h2)
+      disposeGraph(loss, [])
+      h.dispose()
+      h = next
+      expect(h.requiresGrad).toBe(false)
+      values.push(Array.from(await h.read()))
+      counts.push(be.stats.liveBuffers)
+    }
+    expect(new Set(counts).size).toBe(1)
+    expect(values[9]).not.toEqual(values[0]) // the state really evolves
+    h.dispose()
+    opt.dispose()
   })
   it("never disposes a leaf through a reshaped view of it, and spares kept tensors", async () => {
     const x = param(new Float32Array([1, 2, 3, 4]), [4])
