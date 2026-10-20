@@ -42,12 +42,13 @@ export function createGfx(ctx: Context2DLike): Gfx {
       ctx.fill()
     },
     text(s, x, y, color, scale = 1) {
+      ctx.fillStyle = color
       let cx = x
       for (const ch of s) {
         const rows = glyph(ch) ?? BOX
         for (let r = 0; r < GLYPH_H; r++) {
           for (let c = 0; c < GLYPH_W; c++) {
-            if ((rows[r]! >> (GLYPH_W - 1 - c)) & 1) rect(cx + c * scale, y + r * scale, scale, scale, color)
+            if ((rows[r]! >> (GLYPH_W - 1 - c)) & 1) ctx.fillRect(cx + c * scale, y + r * scale, scale, scale)
           }
         }
         cx += GLYPH_ADVANCE * scale

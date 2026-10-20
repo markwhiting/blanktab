@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest"
 import { createCanvas } from "@napi-rs/canvas"
 import { glyph, textWidth, GLYPH_W, GLYPH_H } from "../src/font"
-import { createGfx } from "../src/gfx"
-import { WORDS } from "../src/words"
+import { createGfx, type Context2DLike } from "../src/gfx"
+import { WORDS, validateWords } from "../src/words"
 import { hashSeed } from "../src/rng"
 
 describe("font", () => {
@@ -43,6 +43,20 @@ describe("font", () => {
     const px = (x: number, y: number) => d[(y * 10 + x) * 4]
     expect(px(0, 0)).toBe(0); expect(px(4, 6)).toBe(0); expect(px(2, 3)).toBe(255)
   })
+  it("text sets fillStyle once per call, not once per pixel", () => {
+    const c = createCanvas(40, 10)
+    const real = c.getContext("2d")
+    let sets = 0
+    const spy = new Proxy(real, {
+      set(t, k, v) { if (k === "fillStyle") sets++; return Reflect.set(t, k, v) },
+      get(t, k) { const v = Reflect.get(t, k); return typeof v === "function" ? v.bind(t) : v },
+    }) as unknown as Context2DLike
+    createGfx(spy).text("AB?", 0, 0, "rgb(0,0,0)")
+    expect(sets).toBe(1)
+    const d = real.getImageData(0, 0, 40, 10).data
+    expect(d[3]).toBe(0) // A's top-left pixel is off (transparent)
+    expect(d[(0 * 40 + 1) * 4 + 3]).toBe(255) // A's top row pixel 1 is on
+  })
   it("clips drawing", () => {
     const c = createCanvas(10, 10)
     const ctx = c.getContext("2d")
@@ -63,6 +77,12 @@ describe("words", () => {
     expect(WORDS.length).toBeGreaterThanOrEqual(500)
     for (const w of WORDS) expect(w).toMatch(/^[a-z]{2,10}$/)
   })
+  it("rejects malformed entries loudly instead of filtering them", () => {
+    expect(validateWords(["cat", "dog"])).toEqual(["cat", "dog"])
+    for (const bad of ["Cat", "a", "elevenletter", "e-mail", "caf\u00e9", ""]) {
+      expect(() => validateWords(["cat", bad]), JSON.stringify(bad)).toThrow(/word/)
+    }
+  })
 })
 
 describe("hashSeed", () => {
@@ -70,6 +90,9 @@ describe("hashSeed", () => {
     expect(hashSeed(1, "toys")).not.toBe(hashSeed(1, "crib"))
     expect(hashSeed(1, "toys")).toBe(hashSeed(1, "toys"))
     expect(hashSeed(2, "toys")).not.toBe(hashSeed(1, "toys"))
+    // pinned: room layouts are derived from these, so a change silently reseeds every world
+    expect(hashSeed(1, "crib")).toBe(1517135794)
+    expect(hashSeed(42, "toys")).toBe(3142927674)
     const h = hashSeed(123456, "x")
     expect(Number.isInteger(h) && h >= 0 && h <= 0xffffffff).toBe(true)
   })

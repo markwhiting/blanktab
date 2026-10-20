@@ -55,7 +55,16 @@ const MISC = group(`yes no maybe up down left right near far here there inside o
   over front behind between around always never often again together alone many few some all each
   every more less most same other next last high low deep`)
 
-export const WORDS: readonly string[] = [...new Set([
+const WORD = /^[a-z]{2,10}$/
+
+/** Returns `list` unchanged, or throws on the first entry that is not 2-10 lowercase a-z letters. */
+export function validateWords(list: readonly string[]): readonly string[] {
+  for (const w of list) if (!WORD.test(w)) throw new Error(`invalid word ${JSON.stringify(w)}: must match ${WORD}`)
+  return list
+}
+
+// Validated at module load: a bad entry fails loudly rather than vanishing from the vocabulary.
+export const WORDS: readonly string[] = validateWords([...new Set([
   ...ANIMALS, ...COLOURS, ...BODY, ...HOME, ...FOOD, ...CLOTHES, ...NATURE, ...PLACES, ...TIME,
   ...NUMBERS, ...PEOPLE, ...THINGS, ...VERBS, ...ADJECTIVES, ...MISC,
-])].filter(w => /^[a-z]{2,10}$/.test(w))
+])])
