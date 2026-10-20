@@ -79,13 +79,16 @@ export function backward(loss: Tensor): void {
         const node = t._node
         if (node) {
           const needs = node.parents.map((p) => p.requiresGrad)
-          const pg = node.backward(g, needs)
-          node.parents.forEach((p, j) => {
-            const gp = pg[j]
-            if (needs[j] && gp) accumulate(p, gp)
-            else if (gp && gp.storage !== g.storage && !refs.has(gp.storage)) be.dispose(gp.storage)
-          })
-          release(g)
+          try {
+            const pg = node.backward(g, needs)
+            node.parents.forEach((p, j) => {
+              const gp = pg[j]
+              if (needs[j] && gp) accumulate(p, gp)
+              else if (gp && gp.storage !== g.storage && !refs.has(gp.storage)) be.dispose(gp.storage)
+            })
+          } finally {
+            release(g)
+          }
         } else if (t.requiresGrad) {
           assignLeafGrad(t, g)
         } else {
@@ -93,7 +96,8 @@ export function backward(loss: Tensor): void {
         }
       }
     } finally {
-      // Only reached with entries left if a rule threw; free them so a failed backward leaks nothing.
+      // Entries remain only if a rule threw (the throwing node's own g is released above); free them
+      // so a failed backward leaks nothing. Leaf grads already assigned in this pass are kept.
       for (const g of grads.values()) release(g)
     }
 
@@ -119,7 +123,14 @@ export function backward(loss: Tensor): void {
  * Frees the graph under `loss`: every non-leaf tensor reachable from it (including `loss`) and any
  * gradient stored on them, except tensors in `keep`. Leaves (params, inputs, constants) are never
  * freed, nor is any storage they share with a reshaped view. Each storage is freed at most once.
- * Visited non-leaf tensors (kept ones too) are detached from the graph.
+ *
+ * "Non-leaf" means "has a graph node". A tensor computed only from tensors that do not require grad
+ * (or under noGrad) has no node, so it is treated as a leaf and is NOT freed here — create such
+ * constants once, outside training loops, and dispose them yourself.
+ *
+ * Kept tensors are detached (PyTorch `.detach()` semantics): their node is removed and
+ * `requiresGrad` set to false, so reusing one in a later graph (e.g. carried recurrent state)
+ * propagates no gradient into it and never accrues an orphan `.grad`.
  */
 export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
   const order = topoOrder(loss)
@@ -138,7 +149,10 @@ export function disposeGraph(loss: Tensor, keep: Tensor[]): void {
   for (const t of order) {
     if (!t._node) continue
     delete t._node
-    if (keepSet.has(t)) continue
+    if (keepSet.has(t)) {
+      t.requiresGrad = false
+      continue
+    }
     free(t.storage)
     if (t.grad) {
       free(t.grad.storage)

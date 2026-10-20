@@ -70,6 +70,23 @@ describe("gradCheck on every op (3x4 inputs)", () => {
     const f = (x: Tensor, w: Tensor, b: Tensor) => mean(square(tanh(add(matmul(x, w), b))))
     expect(gradCheck(f, [rand([3, 4]), rand([4, 2]), rand([2])])).toBeLessThan(1e-3)
   })
+  it("detects a sign-flipped or zeroed gradient on a small-scale function", () => {
+    const tiny = (rule: (t: Tensor) => Tensor) => (a: Tensor) => {
+      const out = scale(square(a), 1e-4)
+      const orig = out._node!.backward
+      out._node!.backward = (g, needs) =>
+        orig(g, needs).map((t) => {
+          if (!t) return t
+          const r = rule(t)
+          t.dispose()
+          return r
+        })
+      return out
+    }
+    expect(gradCheck(tiny((t) => neg(t)), [rand([3, 4])])).toBeGreaterThan(0.5)
+    expect(gradCheck(tiny((t) => scale(t, 0)), [rand([3, 4])])).toBeGreaterThan(0.5)
+    expect(gradCheck((a: Tensor) => scale(square(a), 1e-4), [rand([3, 4])])).toBeLessThan(1e-3)
+  })
   it("detects a wrong gradient", () => {
     // Forward of a+a, but gradient flows only once: relative error ~ 0.5.
     const f = (a: Tensor) => {
@@ -121,6 +138,22 @@ describe("backward", () => {
   })
 })
 
+describe("backward failure", () => {
+  it("frees every gradient it allocated when a rule throws", () => {
+    const be = getDefaultBackend()
+    const x = param(new Float32Array([1, 2]), [2])
+    const h = mul(x, x)
+    h._node!.backward = () => {
+      throw new Error("boom")
+    }
+    const loss = sum(scale(h, 2))
+    const before = be.stats.liveBuffers
+    expect(() => backward(loss)).toThrow("boom")
+    expect(be.stats.liveBuffers).toBe(before)
+    expect(x.grad).toBeNull()
+  })
+})
+
 describe("noGrad", () => {
   it("records no graph node", () => {
     const x = param(new Float32Array([1, 2]), [2])
@@ -158,6 +191,35 @@ describe("disposeGraph", () => {
     disposeGraph(loss, [])
     opt.zeroGrad()
     expect(be.stats.liveBuffers).toBe(before)
+  })
+  it("a kept tensor is detached: reused in later graphs it gets no grad and nothing leaks", async () => {
+    const be = getDefaultBackend()
+    const x = param(new Float32Array([1, 2]), [2])
+    const w = param(new Float32Array([0.5, -0.5]), [2])
+    const c = tensor([3, 4], [2])
+    const opt = new Adam([x, w], { lr: 0.01 })
+    const h = mul(x, x)
+    const l1 = sum(h)
+    backward(l1)
+    disposeGraph(l1, [h])
+    opt.zeroGrad()
+    expect(h.requiresGrad).toBe(false)
+    expect(h._node).toBeUndefined()
+    const counts: number[] = []
+    for (let i = 0; i < 10; i++) {
+      // h feeds an op with a grad-carrying input directly; a constant like mul(h, c) built inside
+      // the loop would itself be an unfreed leaf (see disposeGraph docs).
+      const l = sum(mul(add(h, w), c))
+      backward(l)
+      expect(h.grad).toBeNull()
+      expect(w.grad).not.toBeNull()
+      opt.step()
+      disposeGraph(l, [])
+      opt.zeroGrad()
+      counts.push(be.stats.liveBuffers)
+    }
+    expect(new Set(counts).size).toBe(1)
+    expect(Array.from(await h.read())).toEqual([1, 4])
   })
   it("never disposes a leaf through a reshaped view of it, and spares kept tensors", async () => {
     const x = param(new Float32Array([1, 2, 3, 4]), [4])

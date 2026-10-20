@@ -10,15 +10,17 @@ import { Tensor, getDefaultBackend, tensor } from "./tensor"
  *
  * A non-scalar output is projected to a scalar with fixed pseudo-random weights w in ±[0.5, 1.5]
  * (L = Σ w·f), so every output element is checked — plain `sum` would hide errors in e.g. softmax,
- * whose rows always sum to 1. Differences and the projection are computed in float64; the step is
- * divided by the actual float32 perturbation (f32(x+eps) − f32(x−eps)), not by 2·eps.
+ * whose rows always sum to 1. The numeric gradient is a Richardson extrapolation of central
+ * differences at steps eps and 2·eps, (4·D(eps) − D(2·eps)) / 3, error O(eps⁴), computed in float64.
+ * Each difference is divided by the actual float32 perturbation, not by 2·step.
  *
- * Returns max over all input elements of |analytic − numeric| / max(1, |analytic|, |numeric|)
- * (relative for large gradients, absolute below 1, so float32 noise on near-zero gradients does
- * not dominate). Runs on the default backend, which must be the CPU backend; `f` must build its
+ * Returns max over all input elements of |analytic − numeric| / max(|analytic|, |numeric|, 1e-2·S, 1e-12),
+ * where S = max |numeric| over every checked element. The floor is scale-invariant: a function
+ * scaled by 1e-4 is judged exactly like the unscaled one, while float32 noise on gradients far
+ * below the function's own gradient scale does not dominate. Runs on the default backend, which must be the CPU backend; `f` must build its
  * result from its arguments (any constants it creates internally are not freed).
  */
-export function gradCheck(f: (...xs: Tensor[]) => Tensor, inputs: { data: Float32Array; shape: number[] }[], eps = 1e-3): number {
+export function gradCheck(f: (...xs: Tensor[]) => Tensor, inputs: { data: Float32Array; shape: number[] }[], eps = 2e-2): number {
   const be = getDefaultBackend()
   if (be.name !== "cpu") throw new ResourceError(`gradCheck runs on the CPU backend only, default backend is "${be.name}"`)
   if (!(eps > 0)) throw new RangeError(`gradCheck: eps must be > 0, got ${eps}`)
@@ -54,20 +56,31 @@ export function gradCheck(f: (...xs: Tensor[]) => Tensor, inputs: { data: Float3
     return acc
   }
 
-  let worst = 0
+  const numeric = base.map((d) => new Float64Array(d.length))
   base.forEach((data, i) => {
     for (let j = 0; j < data.length; j++) {
-      const orig = data[j]!
-      const plus = base.map((d) => Float32Array.from(d))
-      const minus = base.map((d) => Float32Array.from(d))
-      plus[i]![j] = orig + eps
-      minus[i]![j] = orig - eps
-      const h = plus[i]![j]! - minus[i]![j]!
-      const numeric = (project(plus) - project(minus)) / h
-      const a = analytic[i]![j]!
-      const err = Math.abs(a - numeric) / Math.max(1, Math.abs(a), Math.abs(numeric))
-      if (!(err <= worst)) worst = err // NaN propagates as a failure
+      /** Central difference with step `step`, divided by the actual float32 perturbation. */
+      const central = (step: number) => {
+        const plus = base.map((d) => Float32Array.from(d))
+        const minus = base.map((d) => Float32Array.from(d))
+        plus[i]![j] = data[j]! + step
+        minus[i]![j] = data[j]! - step
+        return (project(plus) - project(minus)) / (plus[i]![j]! - minus[i]![j]!)
+      }
+      // Richardson extrapolation: cancels the O(h²) truncation term, so h can be large enough
+      // that float32 roundoff in the forward pass stays small.
+      numeric[i]![j] = (4 * central(eps) - central(2 * eps)) / 3
     }
   })
+  let scale = 0
+  for (const n of numeric) for (const v of n) scale = Math.max(scale, Math.abs(v))
+  let worst = 0
+  numeric.forEach((ns, i) =>
+    ns.forEach((n, j) => {
+      const a = analytic[i]![j]!
+      const err = Math.abs(a - n) / Math.max(Math.abs(a), Math.abs(n), 1e-2 * scale, 1e-12)
+      if (!(err <= worst)) worst = err // NaN propagates as a failure
+    }),
+  )
   return worst
 }
