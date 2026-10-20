@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.base.json",
-  "include": ["tools", "tests", "vitest.config.ts", "playwright.config.ts", "eslint.config.js"],
+  "include": ["tools", "tests", "vitest.config.ts", "vitest.gpu.config.ts", "playwright.config.ts", "eslint.config.js"],
   "compilerOptions": { "allowJs": true, "types": ["node"] }
 }

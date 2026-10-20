@@ -16,6 +16,7 @@ app/dist/
 app/dist-e2e/
 test-results/
 playwright-report/
+.vitest/
 
 # Local agent harness state
 .claude/scheduled_tasks.lock

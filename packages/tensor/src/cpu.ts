@@ -184,12 +184,14 @@ export function createCpuBackend(): Backend {
     reduceLast(op, a, rows, cols) {
       const x = get(a)
       checkLen("reduceLast", a, rows * cols)
+      if (op === "max" && cols === 0) throw new ShapeError(`reduceLast max: cannot reduce ${rows} empty rows`)
       const out = new Float32Array(rows)
       for (let r = 0; r < rows; r++) {
+        // max: a NaN anywhere in the row makes the row max NaN (Math.max semantics).
         let acc = op === "sum" ? 0 : -Infinity
         for (let c = 0; c < cols; c++) {
           const v = x[r * cols + c]!
-          acc = op === "sum" ? acc + v : v > acc ? v : acc
+          acc = op === "sum" ? acc + v : Math.max(acc, v)
         }
         out[r] = acc
       }
@@ -276,6 +278,7 @@ export function createCpuBackend(): Backend {
       if (gd.length !== pd.length || md.length !== pd.length || vd.length !== pd.length) {
         throw new ShapeError("adam: p, g, m, v must have equal length")
       }
+      if (new Set([p, g, m, v]).size !== 4) throw new ShapeError("adam: p, g, m, v must be distinct storages")
       const c1 = 1 - Math.pow(b1, t)
       const c2 = 1 - Math.pow(b2, t)
       for (let i = 0; i < pd.length; i++) {
