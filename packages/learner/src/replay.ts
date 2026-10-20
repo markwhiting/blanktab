@@ -2,7 +2,8 @@ import type { Action, Observation } from "@blanktab/interface"
 
 /**
  * One learning transition, kept as raw data so it can be replayed and checkpointed (no tensors).
- * Replaying it means: h = core(obsToInputs(obs), hIn), then predict(h, action) against targetsFromObs(next).
+ * Replaying it means: h = core(obsToInputs(obs), hIn), then predict(h, action, targetsFromObs(obs)) against
+ * targetsFromObs(next) (the residual base is recomputed from `obs`, so it is not stored).
  * `obs` and `next` are the learner's own copies of the observations; consecutive transitions share the
  * frame between them (`next` of one is `obs` of the following), so a frame is stored once.
  */

@@ -1,8 +1,8 @@
 import { BUTTON_OPTIONS, FOVEA, KEYS, MOVE_OPTIONS, PERIPHERY, PRED_FOVEA, PRED_PERIPHERY, SCROLL_OPTIONS } from "@blanktab/interface"
 import type { Action, Learner, Observation } from "@blanktab/interface"
 import {
-  Adam, add, addScalar, backward, composite, createRng, disposeGraph, exp, gatherRows, logSoftmax, mse, mul, neg,
-  noGrad, reshape, scale, square, sub, sum, tensor,
+  Adam, add, addScalar, backward, composite, createRng, disposeGraph, exp, gatherRows, logSoftmax, matmul, mse, mul,
+  neg, noGrad, reshape, scale, square, sum, tensor,
 } from "@blanktab/tensor"
 import type { Backend, Tensor } from "@blanktab/tensor"
 import { ACTION_DIM, actionOneHot, copyLastBaseline, obsToInputs, targetsFromObs } from "./encode"
@@ -22,7 +22,7 @@ export interface UpdateInfo {
   lossBefore: number
   /** The same loss with the updated weights (L_after); NaN if not measured. */
   lossAfter: number
-  /** Curiosity: clamp(L_before − L_after, −1, 1), 0 when either is non-finite. */
+  /** Curiosity: clamp((L_before − L_after) / max(predLoss EMA, 1e-6), −1, 1), 0 when non-finite. */
   reward: number
   /** TD advantage curiosityWeight·reward + γ·V(h_t) − V(h_{t-1}); NaN if the actor-critic update did not run. */
   advantage: number
@@ -68,9 +68,16 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   return { ...s, lr: Math.min(LR_RANGE[1], Math.max(LR_RANGE[0], s.lr)) }
 }
 
-/** Learning progress on one transition: clamp(L_before − L_after, −1, 1); 0 if either loss is non-finite. */
-export function curiosityReward(lossBefore: number, lossAfter: number): number {
-  const d = lossBefore - lossAfter
+/** Floor of the curiosity scale, so progress on a near-zero loss cannot blow up. */
+export const CURIOSITY_SCALE_FLOOR = 1e-6
+
+/**
+ * Relative learning progress on one transition: clamp((L_before − L_after) / max(scale, 1e-6), −1, 1), where
+ * `scale` is the running prediction loss (the predLoss EMA). Relative, so the reward keeps steering the policy as
+ * the loss shrinks. 0 if anything is non-finite.
+ */
+export function curiosityReward(lossBefore: number, lossAfter: number, scale: number): number {
+  const d = (lossBefore - lossAfter) / Math.max(scale, CURIOSITY_SCALE_FLOOR)
   return Number.isFinite(d) ? Math.min(1, Math.max(-1, d)) : 0
 }
 
@@ -103,21 +110,27 @@ const copyObs = (o: Observation): Observation => ({
 
 interface InputTensors { periphery: Tensor; fovea: Tensor; proprio: Tensor }
 
+interface TargetTensors { periphery: Tensor; fovea: Tensor }
+
 /** The previous step: what the next step learns from (all caller-owned). */
 interface Last {
   obs: Observation
   inputs: InputTensors
   action: Action
   targets: Targets
+  /** Its targets on the device: the residual predictor's base for the next transition. */
+  targetTensors: TargetTensors
 }
 
 /**
  * The online learner, condition A (one set of weights). Each `step(obs_t)`:
  *  1. learns to predict y_t from the last transition: h_{t-1} = core(inputs_{t-1}, h_{t-2}) is recomputed with
  *     gradient from the stored, detached h_{t-2} (truncated BPTT of length 1, no graph lives across steps),
- *     L_before = mse(predict(h_{t-1}, a_{t-1}), y_t) over both outputs, then backward and one Adam step;
- *  2. measures curiosity r = clamp(L_before − L_after, −1, 1), L_after being the same loss with the new weights;
- *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 76-float logits read; a_t is sampled
+ *     L_before = mse(predict(h_{t-1}, a_{t-1}, y_{t-1}), y_t) over both outputs (residual on the current frame),
+ *     then backward and one Adam step;
+ *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA, 1e-6), −1, 1), L_after being the same
+ *     loss with the new weights;
+ *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float read (logits, V(h_t)); a_t is sampled
  *     per factor with the learner's seeded RNG;
  *  4. updates the actor-critic on a_{t-1}: A = curiosityWeight·r + γ·V(h_t) − V(h_{t-1}),
  *     loss = −logπ(a_{t-1})·stopgrad(A) + A² − entropyWeight·H(π), one Adam step;
@@ -163,20 +176,33 @@ export async function createLearner(opts: {
     fovea: t(i.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
     proprio: t(i.proprio, [1, 3]),
   })
-  const disposeInputs = (i: InputTensors) => { i.periphery.dispose(); i.fovea.dispose(); i.proprio.dispose() }
+  const disposeLast = (l: Last) => {
+    for (const x of [l.inputs.periphery, l.inputs.fovea, l.inputs.proprio, l.targetTensors.periphery, l.targetTensors.fovea]) x.dispose()
+  }
+  // concat(logits [1,76], value [1,1]) -> [1,77] as two exact 0/1 selection matmuls (no concat op in @blanktab/tensor),
+  // so acting reads the heads once. Caller-owned constants, freed in dispose().
+  const selLogits = new Float32Array(ACTION_DIM * (ACTION_DIM + 1))
+  for (let k = 0; k < ACTION_DIM; k++) selLogits[k * (ACTION_DIM + 1) + k] = 1
+  const selValue = new Float32Array(ACTION_DIM + 1)
+  selValue[ACTION_DIM] = 1
+  const selL = t(selLogits, [ACTION_DIM, ACTION_DIM + 1])
+  const selV = t(selValue, [1, ACTION_DIM + 1])
   const scalar = async (x: Tensor) => (await x.read())[0]!
   const ema = (prev: number, v: number) => (Number.isFinite(prev) ? prev + STATS_ALPHA * (v - prev) : v)
 
-  /** Size-weighted MSE of predict(core(inputs, hIn), action) against the targets. Builds a graph unless under noGrad. */
-  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, yP: Tensor, yF: Tensor) => {
-    const p = model.predict(model.core(inputs, hIn), action)
-    return add(scale(mse(p.periphery, yP), W_P), scale(mse(p.fovea, yF), W_F))
+  /**
+   * Size-weighted MSE of predict(core(inputs, hIn), action, base) against y. `base` is the targets of the frame
+   * `inputs` came from (residual predictor). Builds a graph unless under noGrad.
+   */
+  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) => {
+    const p = model.predict(model.core(inputs, hIn), action, base)
+    return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
   }
 
   /** −logπ(a)·A + (target − V)² − β·H(π) on the heads at the detached h. `adv` is stopgrad(target − V). */
-  const actorCriticLoss = (hPrev: Tensor, action: Action, target: Tensor) => {
+  const actorCriticLoss = (hPrev: Tensor, action: Action, target: number) => {
     const { logits, value } = model.heads(hPrev)
-    const adv = noGrad(() => composite(() => sub(target, value)))
+    const adv = noGrad(() => composite(() => addScalar(neg(value), target)))
     const flat = reshape(logits, [ACTION_DIM, 1])
     const chosen = [action.move, action.button, action.scroll, action.key]
     let logp: Tensor | null = null
@@ -190,7 +216,7 @@ export async function createLearner(opts: {
       negEntropy = negEntropy ? add(negEntropy, ne) : ne
     }
     const actor = neg(sum(mul(logp!, adv)))
-    const critic = sum(square(sub(target, value)))
+    const critic = sum(square(addScalar(neg(value), target)))
     return { loss: add(add(actor, critic), scale(negEntropy!, settings.entropyWeight)), adv }
   }
 
@@ -199,23 +225,20 @@ export async function createLearner(opts: {
     const obs = copyObs(o)
     const y = targetsFromObs(obs) // validates the frames (RangeError) before any state changes
     const inputs = upload(obsToInputs(obs))
+    const yT: TargetTensors = { periphery: t(y.periphery, [1, PRED_P]), fovea: t(y.fovea, [1, PRED_F]) }
     stats.steps++
 
     let info: UpdateInfo | null = null
     let aT: Tensor | null = null
-    let yP: Tensor | null = null
-    let yF: Tensor | null = null
     if (last && hIn) {
       const prev: Last = last
       const hPrev2: Tensor = hIn
       aT = t(actionOneHot(prev.action), [1, ACTION_DIM])
-      yP = t(y.periphery, [1, PRED_P])
-      yF = t(y.fovea, [1, PRED_F])
-      const [a1, p1, f1] = [aT, yP, yF]
+      const a1 = aT
       info = { step: stats.steps, lossBefore: Number.NaN, lossAfter: Number.NaN, reward: 0, advantage: Number.NaN, skipped: true }
 
-      // 1. Prediction update (TBPTT-1 through the core).
-      const lossBefore = predictionLoss(prev.inputs, hPrev2, a1, p1, f1)
+      // 1. Prediction update (TBPTT-1 through the core); the residual base is y_{t-1}.
+      const lossBefore = predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)
       const lb = await scalar(lossBefore)
       if (Number.isFinite(lb)) {
         backward(lossBefore)
@@ -223,27 +246,31 @@ export async function createLearner(opts: {
         opt.zeroGrad()
       }
       disposeGraph(lossBefore, [])
-      // 2. Curiosity: the same loss with the updated weights.
+      // 2. Curiosity: the same loss with the updated weights, relative to the running loss.
       if (Number.isFinite(lb)) {
         info.lossBefore = lb
-        const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, p1, f1)))
+        stats.predLoss = ema(stats.predLoss, lb)
+        const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)))
         const la = await scalar(after)
         after.dispose()
         if (Number.isFinite(la)) {
           info.lossAfter = la
-          info.reward = curiosityReward(lb, la)
+          info.reward = curiosityReward(lb, la, stats.predLoss)
         }
-        stats.predLoss = ema(stats.predLoss, lb)
       }
       const base = copyLastBaseline(prev.targets, y)
       if (Number.isFinite(base)) stats.baselineLoss = ema(stats.baselineLoss, base)
     }
 
-    // 3. Act: h_t and the heads, no graph.
+    // 3. Act: h_t and the heads (one [1,77] read: 76 logits then V(h_t)), no graph.
     const hNext = noGrad(() => composite(() => model.core(inputs, h)))
-    const logitsT = noGrad(() => composite(() => model.heads(hNext).logits))
-    const valueT = noGrad(() => composite(() => model.heads(hNext).value))
-    const [logits, hNextData] = await Promise.all([logitsT.read(), hNext.read()])
+    const headsT = noGrad(() => composite(() => {
+      const { logits, value } = model.heads(hNext)
+      return add(matmul(logits, selL), matmul(value, selV))
+    }))
+    const [headsOut, hNextData] = await Promise.all([headsT.read(), hNext.read()])
+    const logits = headsOut.subarray(0, ACTION_DIM)
+    const valueNext = headsOut[ACTION_DIM]!
     const action: Action = {
       move: sampleFactor(logits, OFFSETS[0]!, FACTORS[0], rng),
       button: sampleFactor(logits, OFFSETS[1]!, FACTORS[1], rng),
@@ -253,8 +280,7 @@ export async function createLearner(opts: {
 
     // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
     if (last && info && Number.isFinite(info.lossAfter)) {
-      const reward = settings.curiosityWeight * info.reward
-      const target = noGrad(() => composite(() => addScalar(scale(valueT, GAMMA), reward)))
+      const target = settings.curiosityWeight * info.reward + GAMMA * valueNext
       const { loss, adv } = actorCriticLoss(h, last.action, target)
       const [lac, advantage] = await Promise.all([scalar(loss), scalar(adv)])
       if (Number.isFinite(lac)) {
@@ -266,20 +292,20 @@ export async function createLearner(opts: {
       }
       disposeGraph(loss, [])
       adv.dispose()
-      target.dispose()
     }
     if (info?.skipped) stats.skippedUpdates++
 
     // 5. Store the transition, carry the state, free the rest.
     if (last) replay.push({ obs: last.obs, hIn: hInData, action: last.action, next: obs })
-    for (const x of [aT, yP, yF, logitsT, valueT]) x?.dispose()
-    if (last) disposeInputs(last.inputs)
+    aT?.dispose()
+    headsT.dispose()
+    if (last) disposeLast(last)
     hIn?.dispose()
     hIn = h
     hInData = hData
     h = hNext
     hData = hNextData
-    last = { obs, inputs, action, targets: y }
+    last = { obs, inputs, action, targets: y, targetTensors: yT }
 
     stats.cu += (backend.stats.flops - flops0) / 1e9
     if (info) opts.onUpdate?.(info)
@@ -307,8 +333,10 @@ export async function createLearner(opts: {
     dispose() {
       if (disposed) return
       disposed = true
-      if (last) disposeInputs(last.inputs)
+      if (last) disposeLast(last)
       last = null
+      selL.dispose()
+      selV.dispose()
       h.dispose()
       hIn?.dispose()
       hIn = null

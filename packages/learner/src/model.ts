@@ -1,5 +1,5 @@
 import { FOVEA, PERIPHERY, PRED_FOVEA, PRED_PERIPHERY } from "@blanktab/interface"
-import { add, conv2d, createRng, gruCell, linear, relu, reshape, sigmoid, tensor, zeros } from "@blanktab/tensor"
+import { add, conv2d, createRng, gruCell, linear, relu, reshape, tanh, tensor, zeros } from "@blanktab/tensor"
 import type { Backend, GruParams, Tensor } from "@blanktab/tensor"
 import { ACTION_DIM } from "./encode"
 
@@ -29,8 +29,13 @@ export interface Model {
   core(inp: { periphery: Tensor; fovea: Tensor; proprio: Tensor }, h: Tensor): Tensor
   /** Policy logits [1,76] (the four action factors concatenated, see ACTION_DIM) and value [1,1]. */
   heads(h: Tensor): { logits: Tensor; value: Tensor }
-  /** Next-frame prediction (sigmoid outputs in 0..1) conditioned on the chosen action one-hot [1,76]: periphery [1,3000], fovea [1,768] (HWC). */
-  predict(h: Tensor, action: Tensor): { periphery: Tensor; fovea: Tensor }
+  /**
+   * Residual next-frame prediction conditioned on the chosen action one-hot [1,76]: for each output,
+   * base + tanh(linear(z)), where `base` is the current frame's targets (targetsFromObs of the observation
+   * the core just saw): periphery [1,3000], fovea [1,768] (HWC, 0..1). The two output layers start at zero,
+   * so a fresh model predicts exactly copy-last (no change) and learns only the change.
+   */
+  predict(h: Tensor, action: Tensor, base: { periphery: Tensor; fovea: Tensor }): { periphery: Tensor; fovea: Tensor }
   /** [1,hidden] zeros, caller-owned. */
   zeroState(): Tensor
   /** Frees every parameter (and any gradient on it). The model must not be used afterwards. */
@@ -51,6 +56,12 @@ export function createModel(backend: Backend, seed: number, widths: Widths): Mod
     const lim = 1 / Math.sqrt(fanIn)
     const n = shape.reduce((a, d) => a * d, 1)
     const t = tensor(Float32Array.from({ length: n }, () => (2 * rng() - 1) * lim), shape, { requiresGrad: true, backend })
+    params.push(t)
+    return t
+  }
+  /** Trainable, all zeros; draws nothing from the rng. */
+  const p0 = (shape: number[]): Tensor => {
+    const t = zeros(shape, { requiresGrad: true, backend })
     params.push(t)
     return t
   }
@@ -76,8 +87,9 @@ export function createModel(backend: Backend, seed: number, widths: Widths): Mod
   const headValue = dense(hidden, 1)
   const predH = dense(hidden, enc)
   const predA = dense(ACTION_DIM, enc)
-  const headP = dense(enc, PRED_P)
-  const headF = dense(enc, PRED_F)
+  // Residual output layers, zero-initialised (weights and biases): the predictor starts at copy-last.
+  const headP = { w: p0([enc, PRED_P]), b: p0([PRED_P]) }
+  const headF = { w: p0([enc, PRED_F]), b: p0([PRED_F]) }
 
   return {
     params,
@@ -99,9 +111,12 @@ export function createModel(backend: Backend, seed: number, widths: Widths): Mod
       return { logits: linear(h, headPolicy.w, headPolicy.b), value: linear(h, headValue.w, headValue.b) }
     },
 
-    predict(h, action) {
+    predict(h, action, base) {
       const z = relu(add(linear(h, predH.w, predH.b), linear(action, predA.w, predA.b)))
-      return { periphery: sigmoid(linear(z, headP.w, headP.b)), fovea: sigmoid(linear(z, headF.w, headF.b)) }
+      return {
+        periphery: add(base.periphery, tanh(linear(z, headP.w, headP.b))),
+        fovea: add(base.fovea, tanh(linear(z, headF.w, headF.b))),
+      }
     },
 
     zeroState() {

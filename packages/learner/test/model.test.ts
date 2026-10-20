@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { Adam, add, backward, createCpuBackend, createRng, detach, disposeGraph, getDefaultBackend, gradCheck, mean, tensor } from "@blanktab/tensor"
+import { Adam, add, backward, readSyncCpu, createCpuBackend, createRng, detach, disposeGraph, getDefaultBackend, gradCheck, mean, tensor } from "@blanktab/tensor"
 import type { Tensor } from "@blanktab/tensor"
 import { PERIPHERY, FOVEA } from "@blanktab/interface"
 import { ACTION_DIM } from "../src/encode"
@@ -15,6 +15,15 @@ const inputs = (be = getDefaultBackend()) => ({
   fovea: tensor(rand(FOVEA.width * FOVEA.height * 3, 2), [3, FOVEA.height, FOVEA.width], { backend: be }),
   proprio: tensor(rand(3, 3), [1, 3], { backend: be }),
 })
+const base = (be = getDefaultBackend()) => ({
+  periphery: tensor(rand(3000, 4), [1, 3000], { backend: be }),
+  fovea: tensor(rand(768, 5), [1, 768], { backend: be }),
+})
+/** White-box: overwrite a CPU parameter's values in place (tests only). */
+const poke = (t: Tensor, f: (i: number) => number) => {
+  const d = (t.storage as unknown as { data: Float32Array }).data
+  for (let i = 0; i < d.length; i++) d[i] = f(i)
+}
 const oneHot = (be = getDefaultBackend()) => {
   const a = new Float32Array(ACTION_DIM)
   for (const i of [3, 25, 28, 40]) a[i] = 1
@@ -35,7 +44,7 @@ describe("model", () => {
       const { logits, value } = m.heads(h)
       expect([...logits.shape]).toEqual([1, 76])
       expect([...value.shape]).toEqual([1, 1])
-      const p = m.predict(h, a)
+      const p = m.predict(h, a, base(be))
       expect([...p.periphery.shape]).toEqual([1, 3000])
       expect([...p.fovea.shape]).toEqual([1, 768])
       expect(m.paramCount).toBe(m.params.reduce((s, t) => s + t.size, 0))
@@ -60,17 +69,38 @@ describe("model", () => {
     expect(c).not.toEqual(a)
   })
 
-  it("passes gradCheck on predict with tiny widths", () => {
+  it("starts at copy-last: a fresh predictor returns its base exactly", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 2, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const b = base(be)
+    const p = m.predict(m.zeroState(), oneHot(be), b)
+    expect(await p.periphery.read()).toEqual(await b.periphery.read())
+    expect(await p.fovea.read()).toEqual(await b.fovea.read())
+  })
+
+  it("passes gradCheck on predict with tiny widths (output layers made non-zero)", () => {
     const w: Widths = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
     const m = createModel(getDefaultBackend(), 3, w)
+    // The residual output layers start at zero (gradient to h and the action would be trivially 0): randomise them.
+    const r0 = createRng(12)
+    for (const t of m.params.slice(-4)) poke(t, () => (r0() < 0.5 ? -1 : 1) * (0.2 + 0.4 * r0()))
     const r = createRng(11)
     const h = Float32Array.from({ length: 4 }, () => (r() < 0.5 ? -1 : 1) * (0.3 + 0.5 * r()))
     const a = Float32Array.from({ length: ACTION_DIM }, () => (r() < 0.5 ? -1 : 1) * (0.3 + 0.5 * r()))
-    // Only the periphery output goes through gradCheck's single-output interface; the fovea head is checked via a second call.
+    // The base enters as `base + residual` (gradient: identity); checked below without finite differences.
+    const b = base()
     for (const which of ["periphery", "fovea"] as const) {
-      const err = gradCheck((hh, aa) => m.predict(hh, aa)[which], [{ data: h, shape: [1, 4] }, { data: a, shape: [1, ACTION_DIM] }])
+      const err = gradCheck((hh, aa) => m.predict(hh, aa, b)[which], [{ data: h, shape: [1, 4] }, { data: a, shape: [1, ACTION_DIM] }])
       expect(err).toBeLessThan(5e-2)
     }
+    const hT = tensor(h, [1, 4])
+    const aT = tensor(a, [1, ACTION_DIM])
+    const bp = tensor(rand(3000, 9), [1, 3000], { requiresGrad: true })
+    const out = m.predict(hT, aT, { periphery: bp, fovea: b.fovea }).periphery
+    const loss = mean(out)
+    backward(loss)
+    expect(Array.from(readSyncCpu(bp.grad!.storage)).every((g) => Math.abs(g - 1 / 3000) < 1e-9)).toBe(true)
+    disposeGraph(loss, [])
   })
 
   it("leaves liveBuffers unchanged over 3 training iterations with a real Adam (backward, step, zeroGrad, disposeGraph)", () => {
@@ -79,12 +109,13 @@ describe("model", () => {
     const opt = new Adam([...m.params], { lr: 1e-3 })
     const x = inputs(be)
     const a = oneHot(be)
+    const b = base(be)
     let h = m.zeroState()
     const counts: number[] = []
     for (let i = 0; i < 3; i++) {
       const h2 = m.core(x, h)
       const { logits, value } = m.heads(h2)
-      const p = m.predict(h2, a)
+      const p = m.predict(h2, a, b)
       const loss = add(add(mean(logits), mean(value)), add(mean(p.periphery), mean(p.fovea)))
       backward(loss)
       opt.step()
@@ -99,7 +130,7 @@ describe("model", () => {
     expect(counts).toEqual([counts[0], counts[0], counts[0]])
     expect(m.params.every((t) => t.grad === null)).toBe(true)
     h.dispose()
-    for (const t of [x.periphery, x.fovea, x.proprio, a]) (t as Tensor).dispose()
+    for (const t of [x.periphery, x.fovea, x.proprio, a, b.periphery, b.fovea]) (t as Tensor).dispose()
     opt.dispose()
     m.dispose()
     expect(be.stats.liveBuffers).toBe(0)
