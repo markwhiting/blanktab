@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
-import { deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
+import { checkpointMetas, deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
 import { openQueue } from "../src/queue"
 import { openDb } from "../src/db"
 import { mkFile } from "./helpers"
@@ -110,6 +110,33 @@ describe("checkpoints", () => {
     expect((await q.pending()).map(f => f.seq)).toEqual([0])
     await saveCheckpoint(idb, cp(A, 3))
     expect((await loadCheckpoint(idb, A))?.steps).toBe(3)
+  })
+})
+
+describe("checkpoint meta records", () => {
+  it("are written and removed with their checkpoints, and built for checkpoints a v2 database already holds", async () => {
+    const idb = new IDBFactory()
+    await new Promise<void>((res, rej) => {
+      const req = idb.open("blanktab", 2)
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore("outbox", { keyPath: ["learnerId", "seq"] })
+        req.result.createObjectStore("checkpoints", { keyPath: "learnerId" })
+      }
+      req.onerror = () => rej(req.error)
+      req.onsuccess = () => {
+        const db = req.result
+        const tx = db.transaction("checkpoints", "readwrite")
+        tx.objectStore("checkpoints").put({ ...cp(A, 7), learnerState: { version: 1, w: Float32Array.of(1) } })
+        tx.oncomplete = () => { db.close(); res() }
+        tx.onerror = () => rej(tx.error)
+      }
+    })
+    expect(await checkpointMetas(idb)).toEqual([{ learnerId: A, savedAt: cp(A, 7).savedAt, version: 1, steps: 7, seq: 1 }])
+    await saveCheckpoint(idb, cp(B, 3))
+    expect((await checkpointMetas(idb)).map(m => [m.learnerId, m.steps])).toEqual([[A, 7], [B, 3]])
+    await (await openQueue(idb)).put(mkFile(B, 1, { final: true }), { remove: B })
+    await deleteCheckpoint(idb, A)
+    expect(await checkpointMetas(idb)).toEqual([])
   })
 })
 

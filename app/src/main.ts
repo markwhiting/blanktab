@@ -2,7 +2,7 @@
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
   DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
-  createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, webLock,
+  createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue,
 } from "@blanktab/harness"
 import { seedsOf, type LifeConfig } from "./life"
@@ -71,7 +71,17 @@ function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConf
  */
 function lockLearner(id: string): Promise<(() => void) | null> {
   if (!("locks" in navigator)) return Promise.resolve(() => {})
-  return webLock(navigator.locks)(id)
+  return webLock(navigator.locks)(id).then(h => h && h.release)
+}
+
+/**
+ * This tab's own learner's lock (a reload, or a tab the browser restored): waited for, up to OWN_LOCK_WAIT_MS, since
+ * another tab's sweep may be looking at it for a moment (and, seeing this request waiting, lets it go). Null if
+ * another tab lives it (a duplicated tab).
+ */
+function lockOwn(id: string): Promise<(() => void) | null> {
+  if (!("locks" in navigator)) return Promise.resolve(() => {})
+  return waitLock(navigator.locks, id).then(h => h && h.release)
 }
 
 interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void }
@@ -121,7 +131,11 @@ async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
     else if (m.type === "learner") ui.settings(m.settings)
     else if (m.type === "curve") ui.curve(m.points, m.reset)
     else if (m.type === "status") ui.status(m.message)
-    else if (m.type === "queued") { ui.progress(m.steps, m.cu); queued(m.final) }
+    else if (m.type === "queued") {
+      ui.progress(m.steps, m.cu)
+      // Without a token nothing is ever sent: keep the outbox bounded (never this learner's files).
+      void queue.capUnsent(MAX_UNSENT, [id]).catch(() => {}).then(() => queued(m.final))
+    }
     else if (m.type === "error") end(() => ui.error(`${m.message}. A newborn takes its place.`))
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
@@ -130,6 +144,10 @@ async function live(id: string, ctx: Ctx, held?: () => void): Promise<void> {
 }
 
 async function main(ui: Ui): Promise<void> {
+  // Before anything else (anything awaited): this tab's own learner, if it has one, is asked for at once, so no other
+  // tab's startup sweep takes its checkpoint for an orphan while this page loads.
+  const own = storedLearnerId(sessionStorage)
+  const ownLock = own === null ? Promise.resolve(null) : lockOwn(own)
   answerPresence()
   const showTokenState = () => {
     const stored = getToken(localStorage) !== null
@@ -168,15 +186,14 @@ async function main(ui: Ui): Promise<void> {
   flush() // logs left by earlier tabs or lives
 
   const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued }
-  // This tab's own learner (a reload) is locked first, so no other tab's sweep can adopt it meanwhile.
-  const own = storedLearnerId(sessionStorage)
-  const ownLock = own === null ? null : await lockLearner(own)
-  if (own !== null && ownLock !== null) {
+  const release = await ownLock
+  if (own !== null && release !== null) {
     await sweep(false, own)
-    return live(own, ctx, ownLock)
+    return live(own, ctx, release)
   }
   // A new tab (or a duplicated one, whose learner lives in the original): adopt a closed tab's learner, if any.
-  const adopted = own === null ? await sweep(true) : (await sweep(false), null)
+  // The sweep never touches the learner in this tab's sessionStorage.
+  const adopted = own === null ? await sweep(true) : (await sweep(false, own), null)
   if (adopted) {
     adoptLearnerId(sessionStorage, adopted.learnerId)
     ui.notice(`Adopted learner ${adopted.learnerId}: its tab was closed, so this tab lives the rest of its life.`)

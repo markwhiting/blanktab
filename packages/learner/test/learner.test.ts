@@ -92,7 +92,7 @@ describe("learner", () => {
     expect(b.learner.stats()).toEqual(a.learner.stats())
     expect(c.updates).not.toEqual(a.updates)
     for (const r of [a, b, c]) r.learner.dispose()
-  })
+  }, 30_000) // ~2.7 s unloaded; timed out at the 5 s default under load (controller ruling: >= 2x, min 30 s)
 
   it("returns only valid actions, counts steps and compute", async () => {
     const { learner, actions, updates } = await run({ seed: 4, steps: 200 })
@@ -320,7 +320,7 @@ describe("learner", () => {
       expect(firstDifference(await second.learner.save(), await full.learner.save())).toBeNull()
       full.learner.dispose()
       second.learner.dispose()
-    }, 25_000)
+    }, 30_000) // ~7.6 s unloaded (controller ruling: >= 2x, min 30 s)
 
     it("restores a learner saved before its first step and one saved after a single step", async () => {
       for (const n of [0, 1]) {
@@ -362,7 +362,7 @@ describe("learner", () => {
       expect(b.updates).toEqual(a.updates)
       for (const r of [a, b]) r.learner.dispose()
       learner.dispose()
-    })
+    }, 30_000) // ~2.8 s unloaded; timed out at the 5 s default under load (controller ruling)
 
     it("rejects a state that does not fit, before allocating anything", async () => {
       const { learner } = await run({ seed: 14, steps: 5 })

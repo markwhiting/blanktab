@@ -1,6 +1,6 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
-import { CHECKPOINTS, done, openDb, result } from "./db"
+import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
 import { KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
@@ -60,12 +60,36 @@ export async function toRecord<S>(c: Checkpoint<S>): Promise<Checkpoint<unknown>
   return { ...c, learnerState: await packLearnerState(c.learnerState) }
 }
 
+/** Puts a checkpoint record and its meta record, in `tx` (which must cover CHECKPOINT_STORES). */
+export function putCheckpoint(tx: IDBTransaction, record: Checkpoint<unknown>): void {
+  tx.objectStore(CHECKPOINTS).put(record)
+  tx.objectStore(CHECKPOINT_META).put(metaOf(record))
+}
+
+/** Removes a learner's checkpoint and its meta record, in `tx` (which must cover CHECKPOINT_STORES). */
+export function removeCheckpoint(tx: IDBTransaction, learnerId: string): void {
+  tx.objectStore(CHECKPOINTS).delete(learnerId)
+  tx.objectStore(CHECKPOINT_META).delete(learnerId)
+}
+
 export async function saveCheckpoint<S>(idb: IDBFactory, c: Checkpoint<S>): Promise<void> {
   const record = await toRecord(c)
-  const tx = (await openDb(idb)).transaction(CHECKPOINTS, "readwrite")
+  const tx = (await openDb(idb)).transaction(CHECKPOINT_STORES, "readwrite")
   const finished = done(tx)
-  tx.objectStore(CHECKPOINTS).put(record)
+  try {
+    putCheckpoint(tx, record)
+  } catch (e) {
+    finished.catch(() => {})
+    tx.abort()
+    throw e
+  }
   await finished
+}
+
+/** Every checkpoint's meta record (small: read these, not the checkpoints, to judge them). */
+export async function checkpointMetas(idb: IDBFactory): Promise<CheckpointMeta[]> {
+  const db = await openDb(idb)
+  return result(db.transaction(CHECKPOINT_META).objectStore(CHECKPOINT_META).getAll() as IDBRequest<CheckpointMeta[]>)
 }
 
 /** A learner's checkpoint record as stored (learner state still packed), or undefined. Not checked. */
@@ -101,8 +125,8 @@ export async function hasCheckpoint(idb: IDBFactory, learnerId: string): Promise
 }
 
 export async function deleteCheckpoint(idb: IDBFactory, learnerId: string): Promise<void> {
-  const tx = (await openDb(idb)).transaction(CHECKPOINTS, "readwrite")
+  const tx = (await openDb(idb)).transaction(CHECKPOINT_STORES, "readwrite")
   const finished = done(tx)
-  tx.objectStore(CHECKPOINTS).delete(learnerId)
+  removeCheckpoint(tx, learnerId)
   await finished
 }

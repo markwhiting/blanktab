@@ -313,8 +313,12 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
       const db = req.result
       const get = db.transaction("checkpoints").objectStore("checkpoints").get(id)
       get.onsuccess = () => {
-        const tx = db.transaction("checkpoints", "readwrite")
-        for (const o of others) tx.objectStore("checkpoints").put({ ...get.result, learnerId: o.learnerId, savedAt: new Date(Date.now() - o.hoursAgo * 3_600_000).toISOString() })
+        const tx = db.transaction(["checkpoints", "checkpointMeta"], "readwrite")
+        for (const o of others) {
+          const rec = { ...get.result, learnerId: o.learnerId, savedAt: new Date(Date.now() - o.hoursAgo * 3_600_000).toISOString() }
+          tx.objectStore("checkpoints").put(rec)
+          tx.objectStore("checkpointMeta").put({ learnerId: rec.learnerId, savedAt: rec.savedAt, version: rec.learnerState.version, steps: rec.steps, seq: rec.seq })
+        }
         tx.oncomplete = () => { db.close(); res() }
         tx.onerror = () => rej(tx.error)
       }
@@ -341,6 +345,24 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
     }
   }))
   expect(ids.sort()).toEqual([id, others[0]!.learnerId, others[1]!.learnerId].sort())
+})
+
+test("two tabs start at once, one reloading and one new: the reloading tab keeps its learner", async ({ page, context }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0) // its checkpoint is written: the only one, and the newest
+  const fresh = await context.newPage()
+  await setup(fresh, { knowledge: "ok" })
+  // While the reload is under way its learner's lock is free: the new tab's sweep must not take it for an orphan.
+  await Promise.all([page.reload(), fresh.goto(LONG)])
+  await expect(page.getByTestId("learner-id")).toHaveText(id)
+  await expect(page.getByTestId("status")).toContainText("resumed from its checkpoint")
+  await expect(fresh.getByTestId("learner-id")).toHaveText(ID_RE)
+  await expect(fresh.getByTestId("learner-id")).not.toHaveText(id)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
+  await expect.poll(() => stepsLived(fresh)).toBeGreaterThan(0)
 })
 
 test("a hidden page gets no frames; the learner lives on, and frames come back when the page is shown", async ({ page }) => {

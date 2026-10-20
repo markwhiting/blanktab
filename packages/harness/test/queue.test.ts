@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
-import { openQueue } from "../src/queue"
+import { MAX_UNSENT, openQueue } from "../src/queue"
+import { saveCheckpoint } from "../src/checkpoint"
 import { parseLogFile } from "../src/log"
 import { mkFile } from "./helpers"
 
@@ -51,5 +52,24 @@ describe("queue", () => {
     expect((await q.files(B)).map(f => f.seq)).toEqual([0, 1]) // B's final file is not sent yet
     expect((await q.files(C)).map(f => f.seq)).toEqual([0, 1]) // C is still living
     expect(await q.prune()).toBe(0)
+  })
+  it("capUnsent keeps at most max unsent files: the oldest learners' go first, never this tab's or one with a checkpoint", async () => {
+    const idb = new IDBFactory()
+    const q = await openQueue(idb)
+    const L = (n: number) => `lrn_${n.toString(16).padStart(16, "0")}`
+    const at = (n: number) => new Date(Date.UTC(2026, 9, 1) + n * 3_600_000).toISOString()
+    // Six finished lives of 3 files each, written an hour apart (L1 oldest), none sent (no token).
+    for (let n = 1; n <= 6; n++) for (let s = 0; s < 3; s++) await q.put(mkFile(L(n), s, { writtenAt: at(n), final: s === 2 }))
+    await saveCheckpoint(idb, { learnerId: L(2), savedAt: at(2), steps: 1, cu: 0, seq: 3, curveTail: [], restores: 0, lostCU: 0, lostSkips: 0, learnerState: {} })
+    expect(await q.capUnsent(10, [L(1)])).toBe(9) // L1 is this tab's, L2 has a checkpoint: L3, L4 and L5 go
+    const pending = await q.pending()
+    expect(pending.length).toBeLessThanOrEqual(10)
+    expect([...new Set(pending.map(f => f.learnerId))]).toEqual([L(1), L(2), L(6)])
+    for (const n of [3, 4, 5]) {
+      expect((await q.files(L(n))).map(f => f.seq)).toEqual([2]) // the final file stays, as sent
+      expect((await q.latest(L(n)))?.final).toBe(true)
+    }
+    expect(await q.capUnsent(10, [L(1)])).toBe(0)
+    expect(MAX_UNSENT).toBe(200)
   })
 })
