@@ -29,7 +29,7 @@ class Wait extends Error { constructor(readonly ms: number, readonly why: string
 const runPath = (id: string) => `data/runs/${id}`
 const branchOf = (id: string) => `run/${id}`
 
-export function createContributor(deps: ContributorDeps): { flush(): Promise<void> } {
+export function createContributor(deps: ContributorDeps): { flush(): Promise<void>; report(): Promise<void> } {
   const { queue, ls, fetchFn, now, onStatus } = deps
   const sleep = deps.sleep ?? (ms => new Promise<void>(r => setTimeout(r, ms)))
   const schedule = deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms))
@@ -37,7 +37,11 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
   let retryArmed = false
   let backoff = BACKOFF_START_MS
 
-  const status = (state: ContributorStatus["state"], message: string, pending: number) => onStatus({ state, message, pending })
+  let lastState: ContributorStatus["state"] | null = null
+  const status = (state: ContributorStatus["state"], message: string, pending: number) => { lastState = state; onStatus({ state, message, pending }) }
+  const idle = (pending: number) => status("idle", pending === 0
+    ? "All session logs are shared."
+    : `${pending} session log${pending === 1 ? "" : "s"} waiting; they are sent every 10 minutes and when a life ends.`, pending)
 
   const armRetry = (ms: number) => {
     if (retryArmed) return
@@ -164,12 +168,12 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const token = getToken(ls)
     if (token === null) return status("no-token", "Add a GitHub token to share your session logs.", await count())
     const before = await count()
-    if (before === 0) return status("idle", "All session logs are shared.", 0)
+    if (before === 0) return idle(0)
     status("sending", `Sending ${before} session log${before === 1 ? "" : "s"} to GitHub…`, before)
     try {
       await sendAll(token)
       backoff = BACKOFF_START_MS
-      status("idle", "All session logs are shared.", await count())
+      idle(await count())
     } catch (e) {
       const pending = await count()
       if (e instanceof GitHubError && e.status === 401) return status("error", REJECTED_MESSAGE, pending)
@@ -198,6 +202,13 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
   // so a file queued mid-flight is not left waiting for the next timer.
   let again: Promise<void> | null = null
   const contributor = {
+    /** Show how many logs are waiting, without sending. Leaves a running send or an error the user must act on alone. */
+    async report(): Promise<void> {
+      if (inFlight !== null || lastState === "error") return
+      const pending = (await queue.pending()).length
+      if (getToken(ls) === null) return status("no-token", "Add a GitHub token to share your session logs.", pending)
+      idle(pending)
+    },
     flush(): Promise<void> {
       if (inFlight === null) {
         inFlight = run().finally(() => { inFlight = null })

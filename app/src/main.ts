@@ -137,7 +137,7 @@ async function main(): Promise<void> {
   const flush = () => void contributor.flush().catch((e: unknown) => {
     ui.contribution({ state: "error", message: `Couldn't read the saved logs (${e instanceof Error ? e.message : String(e)}); will try again.`, pending: 0 })
   })
-  const policy = flushPolicy(flush)
+  const policy = flushPolicy(flush, undefined, () => void contributor.report())
   ui.onTokenSubmit(async token => {
     const r = await checkToken(token, fetchFn) // check first: a token is stored only once GitHub accepts it
     if (!r.ok) return r.reason

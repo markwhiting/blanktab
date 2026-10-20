@@ -5,7 +5,6 @@ const TOKEN = "test-token"
 const UP = "markwhiting/blanktab"
 const LIFETIME = 600
 const PAGE = `/blanktab/?testLifetime=${LIFETIME}&testStepsPerSecond=100`
-const SHOTS = "/Users/mark/Developer/Hyrarchical Learning/.superpowers/sdd/2026-10-19-01-end-to-end-loop"
 const ID_RE = /lrn_[0-9a-f]{16}/
 
 const row = (id: string) => ({
@@ -76,7 +75,7 @@ test("the loop: knowledge in, a session runs, logs go to GitHub as one PR, a new
   const panel = page.getByTestId("token-panel")
   await expect(panel).toBeVisible()
   await expect(page.getByTestId("change-token")).toBeHidden()
-  await page.screenshot({ path: `${SHOTS}/final-page-notoken.png`, fullPage: true })
+  await page.screenshot({ path: test.info().outputPath("page-notoken.png"), fullPage: true })
   await expect(panel.getByRole("link")).toHaveAttribute("href", "https://github.com/settings/tokens/new?scopes=public_repo&description=blanktab")
   await expect(page.getByTestId("contribution")).toContainText(/token/i)
   expect(githubCalls()).toHaveLength(0)
@@ -157,7 +156,7 @@ test("token stored: a small 'change token' control clears it and brings the pane
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   await expect(change).toBeVisible()
   await expect(panel).toBeHidden()
-  await page.screenshot({ path: `${SHOTS}/final-page-token.png`, fullPage: true })
+  await page.screenshot({ path: test.info().outputPath("page-token.png"), fullPage: true })
   await change.click()
   await expect(panel).toBeVisible()
   await expect(change).toBeHidden()
@@ -173,7 +172,7 @@ test("permission error: the token panel comes back (with 'change token') instead
   await expect(page.getByTestId("contribution")).toContainText("can't write to the repo", { timeout: 30_000 })
   await expect(page.getByTestId("token-panel")).toBeVisible()
   await expect(page.getByTestId("change-token")).toBeVisible()
-  await page.screenshot({ path: `${SHOTS}/final-page-permission.png`, fullPage: true })
+  await page.screenshot({ path: test.info().outputPath("page-permission.png"), fullPage: true })
 })
 
 test("an unexpected failure while checking a token shows an error instead of hanging", async ({ page }) => {

@@ -459,3 +459,23 @@ describe("contributor: review fixes", () => {
     expect(t.gh.pulls).toHaveLength(1)
   })
 })
+
+describe("contributor: report() between sends", () => {
+  it("shows how many logs are waiting, without any request", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.report()
+    expect(t.gh.requests).toHaveLength(0)
+    expect(t.last()).toEqual({ state: "idle", message: "2 session logs waiting; they are sent every 10 minutes and when a life ends.", pending: 2 })
+  })
+  it("says all shared when nothing is waiting", async () => {
+    const t = await setup({ files: 1 })
+    await t.c.flush()
+    await t.c.report()
+    expect(t.last()).toEqual({ state: "idle", message: "All session logs are shared.", pending: 0 })
+  })
+  it("does not hide an error the user must act on", async () => {
+    const t = await setup({ withToken: false, files: 1 })
+    await t.c.report()
+    expect(t.last().state).toBe("no-token")
+  })
+})

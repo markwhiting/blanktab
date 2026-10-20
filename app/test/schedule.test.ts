@@ -40,3 +40,12 @@ describe("flush cadence", () => {
     expect(t.flushes()).toBe(1)
   })
 })
+
+it("a non-final queued log updates the waiting count instead of sending", () => {
+  let flushes = 0, reports = 0
+  const p = flushPolicy(() => { flushes++ }, () => {}, () => { reports++ })
+  p.queued(false)
+  expect([flushes, reports]).toEqual([0, 1])
+  p.queued(true)
+  expect([flushes, reports]).toEqual([1, 1])
+})

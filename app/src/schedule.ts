@@ -12,10 +12,15 @@ export const FLUSH_EVERY_MS = 10 * 60_000
  * Not after every queued log: each flush is a commit, and each commit runs the validate workflow.
  * (A flush with nothing pending makes no GitHub requests.)
  */
-export function flushPolicy(flush: () => void, every: (fn: () => void, ms: number) => unknown = (fn, ms) => setInterval(fn, ms)) {
+export function flushPolicy(
+  flush: () => void,
+  every: (fn: () => void, ms: number) => unknown = (fn, ms) => setInterval(fn, ms),
+  report: () => void = () => {},
+) {
   every(flush, FLUSH_EVERY_MS)
   return {
-    queued(final: boolean): void { if (final) flush() },
+    /** A final log is sent at once; any other log just updates the "waiting" count shown on the page. */
+    queued(final: boolean): void { if (final) flush(); else report() },
     tokenSaved(): void { flush() },
   }
 }
