@@ -95,7 +95,13 @@ export function isGradEnabled(): boolean {
   return gradEnabled
 }
 
-/** Runs `fn` with graph recording off (restored afterwards, even on throw). */
+/**
+ * Runs `fn` with graph recording off (restored afterwards, even on throw).
+ *
+ * Every tensor created inside has no graph node, so `disposeGraph` never frees it: it is caller-owned,
+ * like any op whose inputs are all constants. For acting/inference, return one result from
+ * `composite(() => ...)` inside noGrad (temporaries are then freed) and dispose that result yourself.
+ */
 export function noGrad<T>(fn: () => T): T {
   const prev = gradEnabled
   gradEnabled = false

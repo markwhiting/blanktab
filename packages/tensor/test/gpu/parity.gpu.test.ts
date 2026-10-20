@@ -132,6 +132,18 @@ it("a GPU validation error rejects the read that observes it, and later reads re
   expect(Array.from(await gpu.read(gpu.unary("neg", ok)))).toEqual([-1, -2])
 })
 
+it("documented rule: a GPU error skips its whole batch, including in-place Adam updates recorded in it", async () => {
+  const gpu = requireGpu()
+  const p = gpu.upload(new Float32Array([1, 2]))
+  await gpu.read(p) // starts a fresh batch
+  const bad = gpu.upload(new Float32Array([3, 4]))
+  ;(bad as unknown as { buffer: GPUBuffer }).buffer.destroy()
+  gpu.adam(p, gpu.upload(new Float32Array([1, 1])), gpu.zeros(2), gpu.zeros(2), 0.5, 0.9, 0.999, 1e-8, 1) // same batch
+  gpu.unary("neg", bad) // invalidates the batch's submit
+  await expect(gpu.read(p)).rejects.toThrow(ResourceError)
+  expect(Array.from(await gpu.read(p))).toEqual([1, 2]) // the Adam update never ran
+})
+
 describeBackendContract("webgpu", () => Promise.resolve(requireGpu()))
 
 describe("webgpu parity with cpu", () => {

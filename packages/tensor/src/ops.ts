@@ -31,6 +31,12 @@ function record(out: Tensor, parents: Tensor[], backward: GradNode["backward"]):
  *  - otherwise: dead, freed now.
  * Never touched: the result (and any storage it shares), and views sharing the storage of a tensor
  * from outside the scope (e.g. a reshape of the caller's input). Scopes nest.
+ *
+ * Rules: `fn` has exactly one output, its return value. Any other node-less tensor it creates is
+ * freed when it returns, even if `fn` stashed it in an outer variable — do not let tensors escape
+ * except through the result. Tensors with a graph node that escape stay owned by the graph
+ * (freed by `disposeGraph`). Wrap acting/inference code (under noGrad or on constants) in a
+ * composite so its temporaries are freed and only the result is left for the caller to dispose.
  */
 export function composite(fn: () => Tensor): Tensor {
   const recorded: Recorded[] = []

@@ -164,6 +164,20 @@ describe("composites leave no unreachable intermediates (non-grad inputs)", () =
     feat.dispose()
   })
 
+  it("documented rule: a node-less tensor stashed outside composite() is freed; only the result survives", async () => {
+    const x = c([2, 3]), w = c([3, 2])
+    let stashed: Tensor | null = null
+    const before = be.stats.liveBuffers
+    const y = noGrad(() => composite(() => {
+      stashed = relu(x)
+      return matmul(stashed, w)
+    }))
+    expect(be.stats.liveBuffers).toBe(before + 1)
+    await expect(stashed!.read()).rejects.toThrow()
+    expect((await y.read()).length).toBe(4)
+    y.dispose()
+  })
+
   it("a composite never frees a view of the caller's input", async () => {
     const x = c([2, 6]), w = p([3, 2])
     const n = leaked([w], () => sum(composite(() => matmul(reshape(x, [4, 3]), w))))
