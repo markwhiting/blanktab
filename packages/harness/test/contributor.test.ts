@@ -30,7 +30,7 @@ async function setup(opts: { canPush?: boolean; withToken?: boolean; files?: num
   return { idb, queue, ls, gh, c, statuses, scheduled, timers, last: () => statuses.at(-1)! }
 }
 
-const UP = "markwhiting/blanktab"
+const UP = "markwhiting/learner"
 const BR = `run/${ID}`
 const at = (r: { method: string; url: string }) => `${r.method} ${new URL(r.url).pathname}`
 const writes = (reqs: { method: string; url: string }[]) => reqs.filter(r => r.method !== "GET").map(at)
@@ -171,7 +171,7 @@ describe("contributor: fresh branch after merge (brief item 13)", () => {
     for (const canPush of [true, false]) {
       it(`after a merge (${canPush ? "push" : "fork"}, branch ${deleteBranch ? "deleted" : "kept"}) the next PR proposes only the new files`, async () => {
         const t = await setup({ canPush, files: 2 })
-        const repo = canPush ? UP : "ann/blanktab"
+        const repo = canPush ? UP : "ann/learner"
         await t.c.flush()
         t.gh.merge(t.gh.pulls[0]!, { deleteBranch })
         const main = t.gh.repos.get(UP)!.branches.get("main")!
@@ -210,27 +210,27 @@ describe("contributor: no push access", () => {
     const t = await setup({ canPush: false, files: 2 })
     await t.c.flush()
     const reqs = t.gh.requests.map(r => `${r.method} ${new URL(r.url).pathname}`)
-    const forkAt = reqs.indexOf("POST /repos/markwhiting/blanktab/forks")
+    const forkAt = reqs.indexOf("POST /repos/markwhiting/learner/forks")
     expect(forkAt).toBeGreaterThan(-1)
-    expect(reqs.indexOf("POST /repos/ann/blanktab/git/blobs")).toBeGreaterThan(forkAt)
-    expect(reqs.filter(r => r === "GET /repos/ann/blanktab").length).toBeGreaterThan(2)
-    expect(t.gh.file("ann/blanktab", `run/${ID}`, `data/runs/${ID}/1.json`)).toBeTruthy()
+    expect(reqs.indexOf("POST /repos/ann/learner/git/blobs")).toBeGreaterThan(forkAt)
+    expect(reqs.filter(r => r === "GET /repos/ann/learner").length).toBeGreaterThan(2)
+    expect(t.gh.file("ann/learner", `run/${ID}`, `data/runs/${ID}/1.json`)).toBeTruthy()
     expect(t.gh.pulls[0]).toMatchObject({ head: `ann:run/${ID}`, base: "main", draft: true })
     expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1]))
     // upstream is only read and asked for a PR (and the fork): no git writes there
-    expect(reqs.filter(r => r.startsWith("POST /repos/markwhiting/blanktab/git") || r.startsWith("PATCH /repos/markwhiting"))).toEqual([])
+    expect(reqs.filter(r => r.startsWith("POST /repos/markwhiting/learner/git") || r.startsWith("PATCH /repos/markwhiting"))).toEqual([])
     expect(await t.queue.pending()).toEqual([])
   })
 
   it("uses the full_name an existing differently named fork, without creating another", async () => {
-    const t = await setup({ canPush: false, files: 1, existingForkAs: "ann/blanktab-1" })
+    const t = await setup({ canPush: false, files: 1, existingForkAs: "ann/learner-1" })
     await t.c.flush()
-    expect(t.gh.file("ann/blanktab-1", `run/${ID}`, `data/runs/${ID}/0.json`)).toBeTruthy()
+    expect(t.gh.file("ann/learner-1", `run/${ID}`, `data/runs/${ID}/0.json`)).toBeTruthy()
     expect(t.gh.pulls[0]!.head).toBe(`ann:run/${ID}`)
   })
 
   it("does not create a second fork when one already exists", async () => {
-    const t = await setup({ canPush: false, files: 1, existingForkAs: "ann/blanktab" })
+    const t = await setup({ canPush: false, files: 1, existingForkAs: "ann/learner" })
     await t.c.flush()
     expect(t.gh.requests.some(r => r.url.endsWith("/forks"))).toBe(false)
   })

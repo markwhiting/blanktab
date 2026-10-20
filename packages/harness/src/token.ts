@@ -1,6 +1,6 @@
 import { GitHubError, NetworkError, createApi } from "./github"
 
-export const REPO = { owner: "markwhiting", name: "blanktab" } as const
+export const REPO = { owner: "markwhiting", name: "learner" } as const
 
 // The token lives here and nowhere else (decision 0010). Never IndexedDB, logs, or request bodies.
 const KEY = "blanktab:githubToken"

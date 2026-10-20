@@ -9,7 +9,7 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } })
 
 export function fakeGithub(opts: { token: string; login: string; canPush: boolean; existingForkAs?: string; scopes?: string }) {
-  const UP = "markwhiting/blanktab"
+  const UP = "markwhiting/learner"
   const repos = new Map<string, Repo>()
   const mk = (fork: boolean, parent?: string): Repo => ({ fork, ...(parent ? { parent } : {}), branches: new Map() })
 
@@ -70,7 +70,7 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     if (p === "/user") return json(200, { login: opts.login }, opts.scopes === undefined ? {} : { "x-oauth-scopes": opts.scopes })
     if (r.method === "GET" && p === `/repos/${UP}`) return json(200, { full_name: UP, permissions: { push: opts.canPush } })
     if (r.method === "POST" && p === `/repos/${UP}/forks`) {
-      const full = opts.existingForkAs ?? `${opts.login}/blanktab`
+      const full = opts.existingForkAs ?? `${opts.login}/learner`
       if (!repos.has(full)) { repos.set(full, mk(true, UP)); forkPollsBeforeReady = 2 }
       return json(202, { full_name: full })
     }

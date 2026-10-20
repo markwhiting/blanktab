@@ -6,7 +6,7 @@ import { buildSummary } from "../tools/gate/summary.ts"
 import { computeKnowledgeSha } from "../tools/gate/manifest.ts"
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
-const BASE = "/blanktab/"
+const BASE = "/learner/"
 
 /** The commit the page was built from (deploy sets CODE_SHA), or "dev". Anything else is a build error. */
 function codeSha(): string {
@@ -16,7 +16,7 @@ function codeSha(): string {
 }
 
 /**
- * Dev server only: serves /blanktab/knowledge/*.json the way the deploy workflow assembles it
+ * Dev server only: serves /learner/knowledge/*.json the way the deploy workflow assembles it
  * (summary from data/runs, manifest with codeSha "dev", the rest from knowledge/). Never part of a build.
  */
 function devKnowledge(): Plugin {

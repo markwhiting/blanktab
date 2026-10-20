@@ -14,7 +14,7 @@ export default defineConfig({
   // The e2e build honours ?testLifetime; the production (deploy) build does not.
   webServer: {
     command: `npm run build:e2e -w app && npm run preview:e2e -w app -- --port ${PORT} --strictPort`,
-    url: `http://localhost:${PORT}/blanktab/`,
+    url: `http://localhost:${PORT}/learner/`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

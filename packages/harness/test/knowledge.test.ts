@@ -27,8 +27,8 @@ function fakeFetch(files: Record<string, unknown>, opts: { status?: number; thro
 describe("loadKnowledge", () => {
   it("fetches the three files under <base>knowledge/ and returns them", async () => {
     const f = fakeFetch(FILES)
-    const k = await loadKnowledge("/blanktab/", f.fn)
-    expect([...f.urls].sort()).toEqual(["/blanktab/knowledge/manifest.json", "/blanktab/knowledge/settings-space.json", "/blanktab/knowledge/summary.json"])
+    const k = await loadKnowledge("/learner/", f.fn)
+    expect([...f.urls].sort()).toEqual(["/learner/knowledge/manifest.json", "/learner/knowledge/settings-space.json", "/learner/knowledge/summary.json"])
     expect(k.offline).toBe(false)
     expect(k.summary.sessions).toHaveLength(2)
     expect(k.manifest.knowledgeSha).toBe("c".repeat(64))
@@ -43,12 +43,12 @@ describe("loadKnowledge", () => {
     expect(k.settingsSpace.settings).toEqual([])
   }
   it("falls back to an empty, offline knowledge when the network fails", async () => {
-    offline(await loadKnowledge("/blanktab/", fakeFetch(FILES, { throws: true }).fn))
+    offline(await loadKnowledge("/learner/", fakeFetch(FILES, { throws: true }).fn))
   })
   it("falls back when a file is missing (404)", async () => {
     const rest = { ...FILES }
     delete rest["manifest.json"]
-    offline(await loadKnowledge("/blanktab/", fakeFetch(rest).fn))
+    offline(await loadKnowledge("/learner/", fakeFetch(rest).fn))
   })
   it("falls back when a file is malformed", async () => {
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 2, sessions: [] } }).fn))

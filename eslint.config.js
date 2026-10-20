@@ -37,7 +37,7 @@ const dynamicWall = (pkg, banned) => ({
 })
 
 export default tseslint.config(
-  { ignores: ["node_modules/**", "dist/**", "**/dist/**", "app/dist-e2e/**", "test-results/**", "playwright-report/**", ".local/**", ".superpowers/**"] },
+  { ignores: ["node_modules/**", "dist/**", "**/dist/**", "app/dist-e2e/**", "test-results/**", "playwright-report/**", ".local/**", ".superpowers/**", ".worktrees/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   ...Object.entries(FORBIDDEN).filter(([, b]) => b.length).flatMap(([p, b]) => [wall(p, b), dynamicWall(p, b)]),

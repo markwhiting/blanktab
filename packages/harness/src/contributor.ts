@@ -132,7 +132,7 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
         head: `${owner}:${branchOf(learnerId)}`,
         base: "main",
         draft: true,
-        body: `Session logs from learner ${learnerId}, submitted by the blanktab page on behalf of @${owner}. Branch: ${dest}@${branchOf(learnerId)}.`,
+        body: `Session logs from learner ${learnerId}, submitted by the learner page on behalf of @${owner}. Branch: ${dest}@${branchOf(learnerId)}.`,
       })
     } catch (e) {
       // Two tabs share one outbox: the other tab may have opened it first.

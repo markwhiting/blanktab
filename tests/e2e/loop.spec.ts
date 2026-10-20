@@ -2,9 +2,9 @@ import { test, expect, type Page, type Request } from "@playwright/test"
 import { fakeGithub } from "../../packages/harness/test/fakeGithub"
 
 const TOKEN = "test-token"
-const UP = "markwhiting/blanktab"
+const UP = "markwhiting/learner"
 const LIFETIME = 600
-const PAGE = `/blanktab/?testLifetime=${LIFETIME}&testStepsPerSecond=100`
+const PAGE = `/learner/?testLifetime=${LIFETIME}&testStepsPerSecond=100`
 const ID_RE = /lrn_[0-9a-f]{16}/
 
 const row = (id: string) => ({
@@ -76,7 +76,7 @@ test("the loop: knowledge in, a session runs, logs go to GitHub as one PR, a new
   await expect(panel).toBeVisible()
   await expect(page.getByTestId("change-token")).toBeHidden()
   await page.screenshot({ path: test.info().outputPath("page-notoken.png"), fullPage: true })
-  await expect(panel.getByRole("link")).toHaveAttribute("href", "https://github.com/settings/tokens/new?scopes=public_repo&description=blanktab")
+  await expect(panel.getByRole("link")).toHaveAttribute("href", "https://github.com/settings/tokens/new?scopes=public_repo&description=learner")
   await expect(page.getByTestId("contribution")).toContainText(/token/i)
   expect(githubCalls()).toHaveLength(0)
 
@@ -137,7 +137,7 @@ test("knowledge unreachable: the page says offline and the learner runs anyway",
 
 test("cadence: with a token, a whole life goes to GitHub as one commit, sent when the final log is queued", async ({ page }) => {
   const { gh, githubCalls, commits } = await setup(page, { knowledge: "ok", token: TOKEN })
-  await page.goto(`/blanktab/?testLifetime=1500&testStepsPerSecond=150`) // logs at 500, 1000 (not final) and 1500 (final)
+  await page.goto(`/learner/?testLifetime=1500&testStepsPerSecond=150`) // logs at 500, 1000 (not final) and 1500 (final)
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
   await expect.poll(() => stepsLived(page), { timeout: 20_000 }).toBeGreaterThan(1100) // two non-final logs are queued by now
@@ -241,7 +241,7 @@ test("a reload keeps the learner; a duplicated tab (same sessionStorage) gets a 
 
 test("without the test knob the learner lives at 2 steps a second", async ({ page }) => {
   await setup(page, { knowledge: "ok" })
-  await page.goto(`/blanktab/?testLifetime=${LIFETIME}`)
+  await page.goto(`/learner/?testLifetime=${LIFETIME}`)
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
   const t0 = Date.now(), s0 = await stepsLived(page)
   await page.waitForTimeout(5_000)

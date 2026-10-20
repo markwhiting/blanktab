@@ -12,7 +12,7 @@ Full background: `docs/research/2026-10-16-research-synthesis-v0.1.md`. Read it 
 
 ## Status
 
-Pre-implementation. The project is **blanktab**: a browser-tab learner hosted at `markwhiting.github.io/blanktab`. The v1 design is `docs/specs/2026-10-19-blanktab-v1-design.md`, approved 2026-10-19. Settled choices are in `docs/decisions/`; don't contradict them without a new decision.
+Pre-implementation. The project is **blanktab** (working name; public name **learner**, decision 0012): a browser-tab learner hosted at `markwhiting.github.io/learner` from the repo `markwhiting/learner`. The v1 design is `docs/specs/2026-10-19-blanktab-v1-design.md`, approved 2026-10-19. Settled choices are in `docs/decisions/`; don't contradict them without a new decision.
 
 ## Repository layout
 

@@ -18,7 +18,7 @@ describe("token storage", () => {
     setToken(ls, "   ")
     expect(getToken(ls)).toBeNull()
   })
-  it("names the repo", () => expect(REPO).toEqual({ owner: "markwhiting", name: "blanktab" }))
+  it("names the repo", () => expect(REPO).toEqual({ owner: "markwhiting", name: "learner" }))
 })
 
 describe("checkToken", () => {
