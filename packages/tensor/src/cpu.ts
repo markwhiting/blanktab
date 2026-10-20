@@ -41,8 +41,6 @@ function broadcastStrides(shape: number[], rank: number): number[] {
 
 export function createCpuBackend(): Backend {
   const stats = { flops: 0, liveBuffers: 0 }
-  let backend: Backend
-
   const make = (data: Float32Array): CpuStorage => {
     stats.liveBuffers++
     return { length: data.length, backend, data, disposed: false }
@@ -57,7 +55,7 @@ export function createCpuBackend(): Backend {
     if (s.length !== want) throw new ShapeError(`${what}: expected length ${want}, got ${s.length}`)
   }
 
-  backend = {
+  const backend: Backend = {
     name: "cpu",
     stats,
     upload: (data) => make(Float32Array.from(data)),
