@@ -149,10 +149,10 @@ export const toysRoom: RoomFactory = (seed, words) => {
           g.rect(x + (down ? 1 : 0), y + (down ? 1 : 0), w.w - 1, w.h - 1, down ? INK : WHITE)
           g.rect(x + 1, y + 1, w.w - 2, w.h - 2, rgb(face))
           const o = down ? 1 : 0
-          g.text(w.label!, x + 4 + o, y + 5 + o, INK)
+          g.text(w.label!, x + 4 + o, y + 4 + o, INK)
           const n = Math.min(99, counts.get(w.id) ?? 0)
           g.rect(x + w.w - 16 + o, y + 3 + o, 13, 12, WHITE)
-          g.text(String(n), x + w.w - 14 + o, y + 5 + o, INK)
+          g.text(String(n), x + w.w - 14 + o, y + 4 + o, INK)
         } else if (w.kind === "toggle") {
           const isOn = on.has(w.id)
           const track = isOn ? [60, 170, 90] : [140, 140, 150]

@@ -26,7 +26,7 @@ export interface Gfx {
   clip(x: number, y: number, w: number, h: number, draw: () => void): void
 }
 
-const BOX = [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111]
+const BOX = [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111, 0, 0]
 
 export function createGfx(ctx: Context2DLike): Gfx {
   const rect = (x: number, y: number, w: number, h: number, color: string) => {

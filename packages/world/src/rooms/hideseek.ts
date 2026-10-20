@@ -279,7 +279,7 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
           g.rect(t.x, ty, t.w, HS_TAB_H + (on ? 1 : 0), INK)
           const face = on ? [252, 252, 250] : [200, 200, 205]
           g.rect(t.x + 1, ty + 1, t.w - 2, HS_TAB_H - 1 + (on ? 1 : 0), hovered === t.id ? rgb(lighten(face)) : on ? PANEL : TAB_OFF)
-          g.text(t.label, t.x + 5, ty + 4, INK)
+          g.text(t.label, t.x + 5, ty + 3, INK)
         }
       }
       for (const s of h.sections) {
@@ -289,7 +289,7 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
         g.rect(LEFT, y, RIGHT - LEFT, HS_HEADER_H, rgb(darken(s.color)))
         g.rect(LEFT + 1, y + 1, RIGHT - LEFT - 2, HS_HEADER_H - 2, rgb(hovered === s.id ? lighten(s.color) : s.color))
         drawPlus(g, LEFT + 5, y + 4, !collapsed.has(s.id))
-        g.text(s.title, LEFT + 18, y + 4, INK)
+        g.text(s.title, LEFT + 18, y + 3, INK)
       }
       for (const [id, iy] of flow.items) {
         const it = byId.get(id)!
@@ -305,7 +305,7 @@ export const hideseekRoom: RoomFactory = (seed, words) => {
         g.rect(popup.x, popup.y, popup.w, popup.h, INK)
         g.rect(popup.x + 1, popup.y + 1, popup.w - 2, popup.h - 2, rgb(popup.color))
         g.rect(popup.x + 1, popup.y + 1, popup.w - 2, 14, rgb(darken(popup.color)))
-        g.text(popup.title, popup.x + 5, popup.y + 5, INK)
+        g.text(popup.title, popup.x + 5, popup.y + 4, INK)
         popup.lines.forEach((l, i) => g.text(l, popup.x + 8, popup.y + 22 + i * (LINE_H + 5), INK))
         g.rect(close.x, close.y, close.w, close.h, INK)
         g.rect(close.x + 1, close.y + 1, close.w - 2, close.h - 2, hovered === "popup-close" ? "rgb(255,190,190)" : PANEL)

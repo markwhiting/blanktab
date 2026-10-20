@@ -1,18 +1,29 @@
 import { describe, it, expect } from "vitest"
 import { createCanvas } from "@napi-rs/canvas"
-import { glyph, textWidth, GLYPH_W, GLYPH_H } from "../src/font"
+import { glyph, textWidth, GLYPH_W, GLYPH_H, GLYPH_BASELINE } from "../src/font"
 import { createGfx, type Context2DLike } from "../src/gfx"
 import { WORDS, validateWords } from "../src/words"
 import { hashSeed } from "../src/rng"
 
 describe("font", () => {
-  it("has 7-row 5-bit glyphs for the supported charset", () => {
+  it("has GLYPH_H-row 5-bit glyphs for the supported charset", () => {
     const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-:<>x "
     for (const ch of chars) {
       const g = glyph(ch)
       expect(g, ch).not.toBeNull()
-      expect(g!.length).toBe(7)
+      expect(g!.length).toBe(GLYPH_H)
       for (const row of g!) expect(row).toBeLessThan(32)
+    }
+  })
+  it("p, y, g, q, j have tails below the baseline; no other glyph uses the descender rows", () => {
+    expect(GLYPH_H).toBeGreaterThan(GLYPH_BASELINE)
+    const below = (ch: string) => glyph(ch)!.slice(GLYPH_BASELINE).some(r => r !== 0)
+    for (const ch of "pygqj") expect(below(ch), ch).toBe(true)
+    for (const ch of "abcdefhiklmnorstuvwxzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-:<>") expect(below(ch), ch).toBe(false)
+  })
+  it("g differs from 9, y from Y, p from P, q from 9 (masks)", () => {
+    for (const [a, b] of [["g", "9"], ["y", "Y"], ["p", "P"], ["q", "9"], ["j", "J"]] as const) {
+      expect(glyph(a), `${a}/${b}`).not.toEqual(glyph(b))
     }
   })
   it("returns null for unsupported chars", () => expect(glyph("é")).toBeNull())
@@ -26,6 +37,7 @@ describe("font", () => {
     ctx.fillStyle = "rgb(255,255,255)"
     ctx.fillRect(0, 0, 10, 10)
     createGfx(ctx).text("A", 0, 0, "rgb(0,0,0)")
+    expect(glyph("A")!.slice(0, 7)).toEqual([0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001])
     const d = ctx.getImageData(0, 0, 10, 10).data
     const mask = glyph("A")!
     for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) {
@@ -41,7 +53,7 @@ describe("font", () => {
     createGfx(ctx).text("é", 0, 0, "rgb(0,0,0)")
     const d = ctx.getImageData(0, 0, 10, 10).data
     const px = (x: number, y: number) => d[(y * 10 + x) * 4]
-    expect(px(0, 0)).toBe(0); expect(px(4, 6)).toBe(0); expect(px(2, 3)).toBe(255)
+    expect(px(0, 0)).toBe(0); expect(px(4, 6)).toBe(0); expect(px(2, 3)).toBe(255); expect(px(0, 8)).toBe(255)
   })
   it("text sets fillStyle once per call, not once per pixel", () => {
     const c = createCanvas(40, 10)
