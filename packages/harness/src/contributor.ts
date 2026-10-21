@@ -102,9 +102,10 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
    * Takes stock of the learner's PRs the gate has decided since `c.lastPr` (oldest first, up to an open one): a merge
    * resets the count of closed-unmerged PRs in a row; a PR closed unmerged has its files dropped from the outbox (they
    * are never proposed again: the gate allows seq gaps, so the learner's next PR goes on without them). The
-   * MAX_CLOSED_IN_A_ROW-th in a row makes the learner local-only. Saved in the outbox's database.
+   * MAX_CLOSED_IN_A_ROW-th in a row makes the learner local-only. Saved in the outbox's database. `open`: a PR this
+   * list shows still open (the open-PR list lagged): it is the learner's open PR, and its branch is built on, not reset.
    */
-  async function settle(api: Api, owner: string, c: Contribution): Promise<Contribution> {
+  async function settle(api: Api, owner: string, c: Contribution): Promise<{ contribution: Contribution; open: number | null }> {
     const head = `${owner}:${branchOf(c.learnerId)}`
     const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=all&per_page=100`)
     if (!Array.isArray(found.body)) throw new GitHubError(502, "unexpected pulls response", null)
@@ -112,8 +113,10 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       .filter(p => Number.isInteger(p.number) && (p.number as number) > c.lastPr)
       .sort((a, b) => (a.number as number) - (b.number as number))
     let next = { ...c }
+    let open: number | null = null
     for (const p of prs) {
-      if (p.state !== "closed") break // still open: not decided yet
+      if (p.state === "open") { open = p.number as number; break } // not decided yet: still the learner's open PR
+      if (p.state !== "closed") break
       const n = p.number as number
       if (typeof p.merged_at === "string" && p.merged_at !== "") next = { ...next, lastPr: n, closedInARow: 0 }
       else {
@@ -124,7 +127,7 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       await queue.setContribution(next) // after each: a dropped PR is never counted twice
       if (next.localOnly) break
     }
-    return next
+    return { contribution: next, open }
   }
 
   /** Whether PR `n` is open with its head at `commit`: then the files just pushed are on it. */
@@ -227,14 +230,15 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const owner = dest.split("/")[0]!
     for (const [id, files] of byLearner) {
       files.sort((a, b) => a.seq - b.seq)
-      const open = await openPr(api, owner, id)
+      let open = await openPr(api, owner, id)
       if (open === null) {
         // No open PR: the last one was decided. Closed unmerged, its files are dropped; too many in a row, local-only.
-        const c = await settle(api, owner, await queue.contribution(id))
-        if (c.localOnly) {
+        const s = await settle(api, owner, await queue.contribution(id))
+        if (s.contribution.localOnly) {
           deps.onLocalOnly?.(id)
           continue
         }
+        open = s.open
       }
       const prOpen = open !== null
       // Never let an open PR pass the gate's file cap: send the oldest files that fit, the rest wait for the merge.
@@ -263,9 +267,9 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const token = getToken(ls)
     if (token === null) return status("no-token", "Add a GitHub token to share your session logs.", await count())
     const before = await count()
-    if (before === 0) return await idle(0)
-    status("sending", `Sending ${before} session log${before === 1 ? "" : "s"} to GitHub…`, before)
     try {
+      if (before === 0) return await idle(0)
+      status("sending", `Sending ${before} session log${before === 1 ? "" : "s"} to GitHub…`, before)
       await sendAll(token)
       backoff = BACKOFF_START_MS
       await idle(await count())

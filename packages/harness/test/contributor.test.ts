@@ -805,3 +805,30 @@ describe("contributor: after a push the PR is checked by number (item 5)", () =>
     })
   }
 })
+
+describe("contributor: re-review fixes", () => {
+  it("the open-PR list lags but the full list shows the PR still open: it is used as the open PR (the branch is not reset)", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    await t.queue.put(mkFile(ID, 2))
+    t.gh.interceptors.push(r => {
+      const u = new URL(r.url)
+      return r.method === "GET" && u.pathname === `/repos/${UP}/pulls` && u.searchParams.get("state") === "open" ? new Response("[]", { status: 200 }) : undefined
+    })
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(t.gh.requests.some(r => r.method === "PATCH" && JSON.parse(r.body!).force === true)).toBe(false)
+    expect(t.gh.requests.some(r => r.method === "POST" && new URL(r.url).pathname === `/repos/${UP}/pulls`)).toBe(false)
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2]))
+    expect(await t.queue.pending()).toEqual([])
+    expect(await t.queue.contribution(ID)).toMatchObject({ closedInARow: 0, localOnly: false })
+  })
+
+  it("a failure while reporting idle with nothing pending is a status, not a rejected flush", async () => {
+    const t = await setup({ files: 0 })
+    t.queue.localOnly = async () => { throw new Error("disk") }
+    await expect(t.c.flush()).resolves.toBeUndefined()
+    expect(t.last().state).toBe("error")
+  })
+})

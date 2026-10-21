@@ -36,7 +36,8 @@ describe("computeKnowledgeSha", () => {
   })
 })
 
-describe("codeShaOf: the last commit that changed a build input (BUILD_INPUTS)", () => {
+// Each case runs git several times in a temporary repository: slow on a busy machine, so a generous timeout.
+describe("codeShaOf: the last commit that changed a build input (BUILD_INPUTS)", { timeout: 60_000 }, () => {
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim()
   const commit = (path: string, text: string) => {
     mkdirSync(join(dir, path, ".."), { recursive: true })
