@@ -11,6 +11,9 @@ import { createModel } from "./model"
 import type { Widths } from "./model"
 import { ReplayBuffer } from "./replay"
 import type { Transition } from "./replay"
+import { LEARNER_STATE_VERSION } from "./version"
+/** The checkpoint format version (in ./version, a leaf module, so plain-Node build tools can read it). */
+export { LEARNER_STATE_VERSION }
 
 export interface LearnerSettings {
   lr: number
@@ -35,9 +38,6 @@ export interface LearnerStats {
   consecutiveSkips: number
   sleeps: number
 }
-
-import { LEARNER_STATE_VERSION } from "./version"
-export { LEARNER_STATE_VERSION }
 
 /**
  * Everything a learner carries between steps, as plain typed arrays and JSON (structured-clone friendly, for

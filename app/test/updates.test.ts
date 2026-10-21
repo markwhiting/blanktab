@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import type { Knowledge, Manifest } from "@blanktab/harness"
 import {
-  CHECKPOINT_RETRY_MS, INCOMPATIBLE_MESSAGE, KNOWLEDGE_POLL, MANIFEST_POLL, RELOAD_JITTER_MS, RELOAD_TARGET_KEY, createPoller, jittered,
+  CHECKPOINT_RETRY_MS, INCOMPATIBLE_MESSAGE, STALE_MESSAGE, KNOWLEDGE_POLL, MANIFEST_POLL, RELOAD_JITTER_MS, RELOAD_TARGET_KEY, createPoller, jittered,
   startUpdates, type UpdatesDeps,
 } from "../src/updates"
 import { stubStorage } from "../../packages/harness/test/helpers"
@@ -206,7 +206,7 @@ describe("startUpdates", () => {
     expect(s.log).toEqual([])
     await s.clock.advance(2.5 * MIN)
     expect(s.log).toEqual([`checkpoint@${22.5 * MIN}`, `reload@${22.5 * MIN}`])
-    expect(storage.getItem(RELOAD_TARGET_KEY)).toBe(NEW)
+    expect(JSON.parse(storage.getItem(RELOAD_TARGET_KEY)!)).toEqual({ codeSha: NEW, tries: 1 })
     const calls = s.manifestCalls()
     await s.clock.advance(60 * MIN)
     expect(s.manifestCalls()).toBe(calls)
@@ -231,16 +231,25 @@ describe("startUpdates", () => {
     expect(s.log).toEqual([`checkpoint@${t}`, `checkpoint@${t + CHECKPOINT_RETRY_MS}`, `checkpoint@${t + 2 * CHECKPOINT_RETRY_MS}`, `reload@${t + 2 * CHECKPOINT_RETRY_MS}`])
   })
 
-  it("new incompatible code (another learnerStateVersion, or none): says so verbatim, never reloads, stops polling the manifest", async () => {
-    for (const learnerStateVersion of [2, undefined]) {
-      const s = setup({ manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: NEW, ...(learnerStateVersion !== undefined ? { learnerStateVersion } : {}) }) })
-      await s.clock.advance(10 * MIN)
-      expect(s.log).toEqual([`notice:${INCOMPATIBLE_MESSAGE}`])
-      expect(INCOMPATIBLE_MESSAGE).toBe("A newer version is available; this learner continues on the version it was born with.")
-      await s.clock.advance(120 * MIN)
-      expect(s.manifestCalls()).toBe(1)
-      expect(s.log).toHaveLength(1)
-    }
+  it("new incompatible code (an explicit other learnerStateVersion): says so verbatim, never reloads, stops polling the manifest", async () => {
+    const s = setup({ manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: NEW, learnerStateVersion: 2 }) })
+    await s.clock.advance(10 * MIN)
+    expect(s.log).toEqual([`notice:${INCOMPATIBLE_MESSAGE}`])
+    expect(INCOMPATIBLE_MESSAGE).toBe("A newer version is available; this learner continues on the version it was born with.")
+    await s.clock.advance(120 * MIN)
+    expect(s.manifestCalls()).toBe(1)
+    expect(s.log).toHaveLength(1)
+  })
+
+  it("a manifest without learnerStateVersion is skipped (not incompatible): polling goes on, and a later complete one is acted on", async () => {
+    let m: Manifest = { knowledgeSha: "c".repeat(64), codeSha: NEW }
+    const s = setup({ manifest: () => m, random: () => 0.5 })
+    await s.clock.advance(30 * MIN)
+    expect(s.manifestCalls()).toBe(3)
+    expect(s.log).toEqual([])
+    m = { ...m, learnerStateVersion: 1 }
+    await s.clock.advance(10 * MIN + 2.5 * MIN)
+    expect(s.log).toEqual([`checkpoint@${42.5 * MIN}`, `reload@${42.5 * MIN}`])
   })
 
   it("knowledge keeps refreshing after new code is found, incompatible or not", async () => {
@@ -252,11 +261,32 @@ describe("startUpdates", () => {
     expect(s.given).toEqual(["e"])
   })
 
-  it("a reload that brought no new code (a stale cache) is not repeated for the same codeSha", async () => {
-    const storage = stubStorage({ [RELOAD_TARGET_KEY]: NEW })
-    const s = setup({ storage, manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: NEW, learnerStateVersion: 1 }) })
-    await s.clock.advance(60 * MIN)
-    expect(s.log).toEqual([])
+  it("a reload that brought the old code again (a stale cache) is retried once, after 2 manifest polls, then given up with a message", async () => {
+    const storage = stubStorage()
+    const load = () => setup({ storage, random: () => 0.5, manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: NEW, learnerStateVersion: 1 }) })
+    const first = load() // still on SHA after each "reload": the browser keeps serving it
+    await first.clock.advance(12.5 * MIN)
+    expect(first.log).toEqual([`checkpoint@${12.5 * MIN}`, `reload@${12.5 * MIN}`])
+    first.u.stop()
+    const second = load()
+    await second.clock.advance(20 * MIN) // polls at 10 and 20 min: the backoff
+    expect(second.log).toEqual([])
+    await second.clock.advance(12.5 * MIN) // the third sighting, at 30 min: one retry
+    expect(second.log).toEqual([`checkpoint@${32.5 * MIN}`, `reload@${32.5 * MIN}`])
+    expect(JSON.parse(storage.getItem(RELOAD_TARGET_KEY)!)).toEqual({ codeSha: NEW, tries: 2 })
+    second.u.stop()
+    const third = load()
+    await third.clock.advance(60 * MIN)
+    expect(third.log).toEqual([`notice:${STALE_MESSAGE}`])
+    expect(STALE_MESSAGE).toBe("A newer version is published but this browser keeps loading the old one; reload later.")
+    expect(third.manifestCalls()).toBe(1)
+  })
+
+  it("the stale-cache guard is per codeSha: a still newer one is reloaded for at once", async () => {
+    const storage = stubStorage({ [RELOAD_TARGET_KEY]: JSON.stringify({ codeSha: NEW, tries: 2 }) })
+    const s = setup({ storage, random: () => 0.5, manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: "d".repeat(40), learnerStateVersion: 1 }) })
+    await s.clock.advance(12.5 * MIN)
+    expect(s.log).toEqual([`checkpoint@${12.5 * MIN}`, `reload@${12.5 * MIN}`])
   })
 
   it("an unreachable manifest is skipped; hidden, nothing polls; shown, both check at once", async () => {

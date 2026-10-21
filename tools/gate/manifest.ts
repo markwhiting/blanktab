@@ -1,6 +1,8 @@
 // Computes knowledgeSha / codeSha and writes <out> as { knowledgeSha, codeSha, learnerStateVersion }.
 // A running tab reads learnerStateVersion to tell whether newly deployed code can resume its learner (decision 0014).
 // Usage: tsx tools/gate/manifest.ts <knowledgeDir> <outFile>
+//        tsx tools/gate/manifest.ts --code-sha      (prints codeShaOf the current directory: the deploy's CODE_SHA)
+import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -19,8 +21,29 @@ export function computeKnowledgeSha(dir: string): string {
   return h.digest("hex")
 }
 
-export function resolveCodeSha(githubSha: string | undefined): string {
-  return githubSha !== undefined && /^[0-9a-f]{40}$/.test(githubSha) ? githubSha : "dev"
+/** Paths whose changes are not code: session logs merged by the gate, and notes. */
+export const NOT_CODE = ["data/runs", "docs"] as const
+
+/**
+ * The code a build is made of: the last commit under `repoDir` that changed anything but NOT_CODE, or "dev" without
+ * one (no git, no commits). The page bakes it in, the manifest carries it and every log file records it, so a merged
+ * batch of session logs (or a docs edit) is not new code: tabs do not reload for it, and Plan 05's constant-code
+ * segments stay whole. Needs the history back to that commit (deploy.yml checks out with fetch-depth 0).
+ */
+export function codeShaOf(repoDir: string): string {
+  try {
+    const sha = execFileSync("git", ["log", "-1", "--format=%H", "--", ".", ...NOT_CODE.map(p => `:(exclude)${p}`)], {
+      cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : "dev"
+  } catch {
+    return "dev"
+  }
+}
+
+/** CODE_SHA as the deploy passes it (computed by codeShaOf), else codeShaOf(repoDir). */
+export function resolveCodeSha(codeSha: string | undefined, repoDir: string): string {
+  return codeSha !== undefined && /^[0-9a-f]{40}$/.test(codeSha) ? codeSha : codeShaOf(repoDir)
 }
 
 export interface Manifest { knowledgeSha: string; codeSha: string; learnerStateVersion: number }
@@ -31,9 +54,13 @@ export function buildManifest(knowledgeDir: string, codeSha: string): Manifest {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  if (process.argv[2] === "--code-sha") {
+    console.log(codeShaOf(process.cwd()))
+    process.exit(0)
+  }
   const [dir, out] = process.argv.slice(2)
   if (!dir || !out) { console.error("usage: manifest.ts <knowledgeDir> <outFile>"); process.exit(2) }
   mkdirSync(dirname(out), { recursive: true })
-  writeFileSync(out, JSON.stringify(buildManifest(dir, resolveCodeSha(process.env.CODE_SHA ?? process.env.GITHUB_SHA))) + "\n")
+  writeFileSync(out, JSON.stringify(buildManifest(dir, resolveCodeSha(process.env.CODE_SHA, process.cwd()))) + "\n")
   console.log(`wrote ${out}`)
 }

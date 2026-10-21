@@ -15,8 +15,15 @@ export const RELOAD_JITTER_MS = 5 * 60_000
 export const CHECKPOINT_RETRY_MS = 30_000
 /** Shown when new code cannot resume this learner's checkpoint (another learnerStateVersion): the life goes on here. */
 export const INCOMPATIBLE_MESSAGE = "A newer version is available; this learner continues on the version it was born with."
-/** sessionStorage: the codeSha this tab last reloaded for. A reload that still brought the old code is not repeated for it. */
+/** Shown when reloads for new code keep bringing back the old code (a stale cache): the tab stops trying. */
+export const STALE_MESSAGE = "A newer version is published but this browser keeps loading the old one; reload later."
+/**
+ * sessionStorage: `{ codeSha, tries }`, the code this tab last reloaded for and how many reloads it took. A reload
+ * that still brought the old code is retried once, after STALE_BACKOFF_POLLS manifest polls, then given up.
+ */
 export const RELOAD_TARGET_KEY = "blanktab:reloadTarget"
+export const STALE_BACKOFF_POLLS = 2
+const MAX_RELOADS_PER_CODE = 2
 
 export interface Timers { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void }
 export interface Visibility { hidden(): boolean; onChange(fn: () => void): () => void }
@@ -114,30 +121,52 @@ export function startUpdates(d: UpdatesDeps): { stop(): void } {
     d.onKnowledge(k)
   }, d.knowledgePoll ?? KNOWLEDGE_POLL, d.env)
 
-  /** Saves the learner, then reloads; if the save was refused, asks again later rather than reload onto a stale one. */
-  const reloadFor = async (codeSha: string): Promise<void> => {
+  /**
+   * Saves the learner, then reloads; if the save was refused, asks again later rather than reload onto a stale one.
+   * A reload already scheduled goes ahead while the tab is hidden (only the polls pause).
+   */
+  const reloadFor = async (codeSha: string, tries: number): Promise<void> => {
     pendingReload = null
     if (stopped) return
     const saved = await d.checkpoint().catch(() => false)
     if (stopped) return
     if (!saved) {
-      pendingReload = timers.setTimeout(() => void reloadFor(codeSha), d.retryMs ?? CHECKPOINT_RETRY_MS)
+      pendingReload = timers.setTimeout(() => void reloadFor(codeSha, tries), d.retryMs ?? CHECKPOINT_RETRY_MS)
       return
     }
-    d.storage.setItem(RELOAD_TARGET_KEY, codeSha)
+    d.storage.setItem(RELOAD_TARGET_KEY, JSON.stringify({ codeSha, tries }))
     d.reload()
   }
+  /** The reloads this tab already made for `codeSha` and still came back on the old code. */
+  const reloadsFor = (codeSha: string): number => {
+    try {
+      const t = JSON.parse(d.storage.getItem(RELOAD_TARGET_KEY) ?? "null") as { codeSha?: unknown; tries?: unknown } | null
+      return t?.codeSha === codeSha && Number.isInteger(t.tries) ? (t.tries as number) : 0
+    } catch {
+      return 0
+    }
+  }
+  let staleSightings = 0
 
   const manifest = createPoller(async () => {
     const m = await d.loadManifest()
     if (!m || m.codeSha === d.codeSha) return
-    if (d.storage.getItem(RELOAD_TARGET_KEY) === m.codeSha) return // reloaded for it already and still on this code
-    manifest.stop() // decided once: a reload is coming, or this learner stays on this code
+    // A manifest without learnerStateVersion says nothing about compatibility: skip it (the next poll may).
+    if (m.learnerStateVersion === undefined) return
     if (m.learnerStateVersion !== d.learnerStateVersion) {
+      manifest.stop() // decided: this learner stays on this code
       d.notice(INCOMPATIBLE_MESSAGE)
       return
     }
-    pendingReload = timers.setTimeout(() => void reloadFor(m.codeSha), random() * (d.reloadJitterMs ?? RELOAD_JITTER_MS))
+    const tries = reloadsFor(m.codeSha)
+    if (tries >= MAX_RELOADS_PER_CODE) {
+      manifest.stop()
+      d.notice(STALE_MESSAGE)
+      return
+    }
+    if (tries > 0 && ++staleSightings <= STALE_BACKOFF_POLLS) return // reloaded for it already: back off first
+    manifest.stop() // decided: a reload is coming
+    pendingReload = timers.setTimeout(() => void reloadFor(m.codeSha, tries + 1), random() * (d.reloadJitterMs ?? RELOAD_JITTER_MS))
   }, d.manifestPoll ?? MANIFEST_POLL, d.env)
 
   return {

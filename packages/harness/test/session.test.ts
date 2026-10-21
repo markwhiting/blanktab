@@ -8,7 +8,7 @@ import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/che
 import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
-import { offlineKnowledge, type Knowledge } from "../src/knowledge"
+import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
 import { DEFAULT_CHECKPOINT_EVERY_MS, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
@@ -62,7 +62,7 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][] }) {
+function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void }) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
     const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 } }
@@ -82,17 +82,16 @@ function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number
         return NOOP_ACTION
       },
       sleep: async () => { st.stats.sleeps++; st.stats.cu += o.sleepCu ?? 0 },
-      save: async () => { o.saves?.push(st.stats.consecutiveSkips); o.savedSteps?.push(st.stats.steps); return structuredClone(st) as unknown as LearnerState },
+      save: async () => { o.onSave?.(st.stats.steps); o.saves?.push(st.stats.consecutiveSkips); o.savedSteps?.push(st.stats.steps); return structuredClone(st) as unknown as LearnerState },
       stats: () => ({ ...st.stats }),
       dispose: () => {},
-      ...(o.knowledge ? { onKnowledge: (k: Knowledge) => void o.knowledge!.push([st.stats.steps, k.manifest.knowledgeSha]) } : {}),
+      ...(o.knowledge ? { onKnowledge: (m: Manifest) => void o.knowledge!.push([st.stats.steps, m.knowledgeSha]) } : {}),
     }
   }
 }
 
-const knowledgeWith = (knowledgeSha: string): Knowledge => ({
-  offline: false, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha, codeSha: "dev" }, settingsSpace: { settings: [] },
-})
+/** What the page posts on a knowledge refresh: the manifest only (its knowledgeSha is what the logs record). */
+const knowledgeWith = (knowledgeSha: string): Manifest => ({ knowledgeSha, codeSha: "dev", learnerStateVersion: 1 })
 
 const depsFor = (idb: IDBFactory, over: Partial<SessionDeps> & Pick<SessionDeps, "createLearner">): SessionDeps => ({
   world: stubWorld(), idb, now: () => new Date(1_700_000_000_000), clock: fakeClock(), ...over,
@@ -383,7 +382,7 @@ describe("session v2", { timeout: 60_000 }, () => {
 
   describe("knowledge refreshed during a life (inbox.setKnowledge)", () => {
     // 1/2 CU a step: logs at steps 16 (8 CU), 32 (16 CU), 64 (32 CU) and the final one at 128 (64 CU).
-    const live = (idb: IDBFactory, inbox: SessionInbox, o: { at?: Record<number, Knowledge>; stopAt?: number; knowledge?: [number, string][] } = {}) =>
+    const live = (idb: IDBFactory, inbox: SessionInbox, o: { at?: Record<number, Manifest>; stopAt?: number; knowledge?: [number, string][] } = {}) =>
       runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 5 }), depsFor(idb, {
         inbox, createLearner: stubFactory({ cuPerStep: 1 / 2, ...(o.knowledge ? { knowledge: o.knowledge } : {}) }),
         onTick: ({ steps }) => {
@@ -406,7 +405,7 @@ describe("session v2", { timeout: 60_000 }, () => {
 
     it("offline knowledge (a failed refresh) never replaces the knowledge in force", async () => {
       const idb = new IDBFactory()
-      await live(idb, new SessionInbox(), { at: { 20: knowledgeWith("e".repeat(64)), 40: offlineKnowledge() } })
+      await live(idb, new SessionInbox(), { at: { 20: knowledgeWith("e".repeat(64)), 40: knowledgeWith(OFFLINE_KNOWLEDGE_SHA) } })
       expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["f", "e", "e", "e"])
     })
 
@@ -570,6 +569,57 @@ describe("session v2", { timeout: 60_000 }, () => {
       }))
       expect(await Promise.all(answers)).toEqual([false, true])
       expect(savedSteps).toEqual([0, 120]) // nothing saved during the skips
+    })
+
+    it("requests are taken before the save: one made during the save waits for (and is answered by) the next step's", async () => {
+      const inbox = new SessionInbox()
+      const savedSteps: number[] = []
+      let first: Promise<boolean> | undefined, during: Promise<boolean> | undefined
+      const settled: string[] = []
+      await runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(new IDBFactory(), {
+        inbox,
+        createLearner: stubFactory({ cuPerStep: 8 / 1024, savedSteps, onSave: steps => {
+          if (steps === 333) { during = inbox.checkpointNow(); void during.then(() => settled.push("during")) }
+        } }),
+        onTick: ({ steps }) => { if (steps === 333) { first = inbox.checkpointNow(); void first.then(() => settled.push("first")) } },
+      }))
+      expect([await first, await during]).toEqual([true, true])
+      expect(savedSteps).toEqual([0, 333, 334]) // the request made during the save at 333 got a save of its own
+      expect(settled).toEqual(["first", "during"])
+    })
+
+    it("halt: the life stops right after a forced save, at that step, with no final log; the next run resumes there", async () => {
+      const idb = new IDBFactory()
+      const inbox = new SessionInbox()
+      const ticks: number[] = []
+      let answer: Promise<boolean> | undefined
+      const r = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(idb, {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024 }),
+        onTick: ({ steps }) => { ticks.push(steps); if (steps === 1500) answer = inbox.checkpointNow({ halt: true }) },
+      }))
+      expect(await answer).toBe(true)
+      expect(r).toMatchObject({ steps: 1500, seq: 1, halted: true, alreadyFinal: false })
+      expect(ticks.at(-1)).toBe(1500) // not one step more
+      expect((await logsOf(idb)).map(f => [f.stepsTotal, f.final])).toEqual([[1024, false]])
+      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 1500, seq: 1 })
+      const events: SessionEvent[] = []
+      const again = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(idb, {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024 }), onEvent: e => events.push(e),
+      }))
+      expect(events[0]).toMatchObject({ type: "resumed", steps: 1500 })
+      expect(again.halted).toBe(false)
+      expectContinuous(await logsOf(idb))
+    })
+
+    it("halt with skips outstanding: not saved (false) and the life goes on; a later halt request stops it", async () => {
+      const inbox = new SessionInbox()
+      const answers: Promise<boolean>[] = []
+      const r = await runSession(cfgFor({ lifetimeCU: 4, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(new IDBFactory(), {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024, skip: n => n >= 95 && n <= 105 }),
+        onTick: ({ steps }) => { if (steps === 100 || steps === 120) answers.push(inbox.checkpointNow({ halt: true })) },
+      }))
+      expect(await Promise.all(answers)).toEqual([false, true])
+      expect(r).toMatchObject({ steps: 120, halted: true })
     })
 
     it("a request still waiting when the life ends is answered false", async () => {

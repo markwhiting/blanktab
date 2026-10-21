@@ -19,16 +19,23 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       # Explicit main: when called from the gate, github.sha predates the merges just made.
+      # Full history: codeSha is the last commit that changed code, which may be far behind main's head.
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The code, not the commit: the last commit that changed anything but data/runs and docs
+      # (tools/gate/manifest.ts codeShaOf). The page bakes it in, the manifest carries it, every log records it.
       - id: sha
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          sha=$(npx tsx tools/gate/manifest.ts --code-sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "no code commit found: $sha"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Build app
         run: npm run build -w app
         env:

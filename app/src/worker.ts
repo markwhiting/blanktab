@@ -5,7 +5,7 @@ import { WORLD } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
 import { createLearner } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
-import type { Knowledge } from "@blanktab/harness/knowledge"
+import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
 import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, runSession, type SessionLearner } from "@blanktab/harness/session"
@@ -64,7 +64,7 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
         post({ type: "learner", settings: { ...birth.settings, maxStepsPerSec: c.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC, seed: birth.seed }, widths: { ...birth.widths } })
         if (!("state" in init)) post({ type: "curve", points: [], reset: true })
         // Refreshed knowledge goes to the learner if it takes it (the 04a learner does not; its logs still record the sha in force).
-        const takesKnowledge = l as { onKnowledge?(k: Knowledge): void }
+        const takesKnowledge = l as { onKnowledge?(m: Manifest): void }
         return {
           step: o => l.step(o), stats: () => l.stats(), save: () => l.save(), dispose: () => l.dispose(),
           onKnowledge: k => takesKnowledge.onKnowledge?.(k),
@@ -107,15 +107,16 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
     onBackend: c => post({ type: "backend", kind: c.kind, label: c.label }),
     onStatus: message => post({ type: "status", message }),
   })
-  post({ type: "final", steps: r.steps, cu: r.cu })
+  // Halted after a forced save (the page is reloading onto it): the life is not over.
+  if (!r.halted) post({ type: "final", steps: r.steps, cu: r.cu })
 }
 
 let started = false
 scope.onmessage = e => {
   const m = e.data
   if (m.type === "visibility") { frames.setHidden(m.hidden); return }
-  if (m.type === "knowledge") { inbox.setKnowledge(m.knowledge); return }
-  if (m.type === "checkpointNow") { void inbox.checkpointNow().then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
+  if (m.type === "knowledge") { inbox.setKnowledge(m.manifest); return }
+  if (m.type === "checkpointNow") { void inbox.checkpointNow({ halt: m.halt }).then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
   if (m.type !== "start" || started) return
   started = true
   start(m).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))

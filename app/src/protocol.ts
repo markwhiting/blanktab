@@ -1,5 +1,5 @@
 // Messages between the page (main thread) and the learner's worker. The token never crosses this boundary.
-import type { Knowledge } from "@blanktab/harness/knowledge"
+import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
 import type { Widths } from "@blanktab/learner"
 import type { BackendKind } from "./backend"
@@ -17,10 +17,13 @@ export interface StartMessage {
   checkpointRecord?: unknown
 }
 export interface VisibilityMessage { type: "visibility"; hidden: boolean }
-/** Refreshed knowledge (never offline): in force for the learner's later log files, and handed to the learner. */
-export interface KnowledgeMessage { type: "knowledge"; knowledge: Knowledge }
-/** A forced checkpoint before a code reload: answered by a CheckpointedMessage with the same id. */
-export interface CheckpointNowMessage { type: "checkpointNow"; id: number }
+/** Refreshed knowledge (never offline), as its manifest: its knowledgeSha is in force for later log files; handed to the learner. */
+export interface KnowledgeMessage { type: "knowledge"; manifest: Manifest }
+/**
+ * A forced checkpoint (before a code reload): answered by a `checkpointed` message with the same id. With `halt` the
+ * learner stops right after the save, so the reload loses no step.
+ */
+export interface CheckpointNowMessage { type: "checkpointNow"; id: number; halt: boolean }
 export type ToWorker = StartMessage | VisibilityMessage | KnowledgeMessage | CheckpointNowMessage
 
 export type FromWorker =

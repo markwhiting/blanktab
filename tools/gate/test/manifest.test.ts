@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
-import { buildManifest, computeKnowledgeSha, resolveCodeSha } from "../manifest.ts"
+import { buildManifest, codeShaOf, computeKnowledgeSha, resolveCodeSha } from "../manifest.ts"
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "manifest-")) })
@@ -35,11 +36,46 @@ describe("computeKnowledgeSha", () => {
   })
 })
 
+describe("codeShaOf: the last commit that changed code (anything but data/runs and docs)", () => {
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim()
+  const commit = (path: string, text: string) => {
+    mkdirSync(join(dir, path, ".."), { recursive: true })
+    writeFileSync(join(dir, path), text)
+    git("add", "-A")
+    git("commit", "-q", "-m", path)
+    return git("rev-parse", "HEAD")
+  }
+  beforeEach(() => { git("init", "-q") })
+
+  it("a commit touching only data/runs, or only docs, leaves it unchanged; one touching app/ changes it", () => {
+    const code = commit("app/src/main.ts", "1")
+    expect(codeShaOf(dir)).toBe(code)
+    commit("data/runs/lrn_0123456789abcdef/0.json", "{}")
+    expect(codeShaOf(dir)).toBe(code)
+    commit("docs/decisions/0099-x.md", "x")
+    expect(codeShaOf(dir)).toBe(code)
+    const next = commit("app/src/main.ts", "2")
+    expect(next).not.toBe(code)
+    expect(codeShaOf(dir)).toBe(next)
+    expect(next).toMatch(/^[0-9a-f]{40}$/)
+  })
+  it("knowledge/ is not excluded (a knowledge-only commit is still a deploy of new inputs)", () => {
+    commit("app/a.ts", "1")
+    const k = commit("knowledge/settings-space.json", "{}")
+    expect(codeShaOf(dir)).toBe(k)
+  })
+  it("is dev outside a git repository or with no commits", () => {
+    expect(codeShaOf(dir)).toBe("dev") // git init, nothing committed
+    const bare = mkdtempSync(join(tmpdir(), "nogit-"))
+    try { expect(codeShaOf(bare)).toBe("dev") } finally { rmSync(bare, { recursive: true, force: true }) }
+  })
+})
+
 describe("resolveCodeSha", () => {
-  it("uses a 40-hex GITHUB_SHA, otherwise dev", () => {
-    expect(resolveCodeSha("b".repeat(40))).toBe("b".repeat(40))
-    expect(resolveCodeSha(undefined)).toBe("dev")
-    expect(resolveCodeSha("nonsense")).toBe("dev")
+  it("uses a 40-hex CODE_SHA (the deploy computes it with codeShaOf), otherwise codeShaOf the repo", () => {
+    expect(resolveCodeSha("b".repeat(40), dir)).toBe("b".repeat(40))
+    expect(resolveCodeSha(undefined, dir)).toBe("dev") // not a repo
+    expect(resolveCodeSha("nonsense", dir)).toBe("dev")
   })
 })
 

@@ -8,7 +8,7 @@ import { buildManifest } from "../tools/gate/manifest.ts"
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
 const BASE = "/learner/"
 
-/** The commit the page was built from (deploy sets CODE_SHA), or "dev". Anything else is a build error. */
+/** The code the page is built from (deploy sets CODE_SHA: tools/gate/manifest.ts codeShaOf), or "dev". Anything else is a build error. */
 function codeSha(): string {
   const sha = process.env.CODE_SHA ?? "dev"
   if (!/^([0-9a-f]{40}|dev)$/.test(sha)) throw new Error(`CODE_SHA must be 40 lowercase hex chars or "dev", got ${JSON.stringify(sha)}`)

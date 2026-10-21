@@ -56,12 +56,12 @@ function onlyOwnOrigin(all: Request[], baseURL: string) {
   return all.map(r => r.url()).filter(u => !u.startsWith("data:") && !u.startsWith("blob:") && new URL(u).origin !== origin)
 }
 
-test("new compatible code: the tab saves its learner, reloads once, and the same learner resumes with steps, CU and seq continuing", async ({ page, baseURL }) => {
+test("new compatible code: the tab saves its learner, reloads, and the same learner resumes with steps, CU and seq continuing", async ({ page, baseURL }) => {
   test.setTimeout(180_000)
   const { all, deploy, loads } = await setup(page)
-  // At the CPU half widths 8 CU (the first log file) takes seconds; the life ends at 12 CU. The checkpoint throttle is
+  // At the CPU half widths 8 CU (the first log file) takes seconds; the life ends at 16 CU. The checkpoint throttle is
   // the default 5 min, so after the 8 CU crossing only a forced checkpoint can save the learner before the reload.
-  await page.goto(`/learner/?testBackend=cpu&testSleepInterval=50&testLifetimeCU=12&testStepsPerSecond=300&${FAST}`)
+  await page.goto(`/learner/?testBackend=cpu&testSleepInterval=50&testLifetimeCU=16&testStepsPerSecond=300&${FAST}`)
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = await learnerId(page)
   await expect.poll(() => cuLived(page), { timeout: 90_000 }).toBeGreaterThan(9) // the 8 CU log (seq 0) and its checkpoint are written
@@ -82,13 +82,17 @@ test("new compatible code: the tab saves its learner, reloads once, and the same
     await page.waitForTimeout(25)
   }
   await page.waitForLoadState("load")
+  // This e2e build is code "dev" whatever the manifest says, as a browser stuck on a stale cache would be: the tab
+  // retries once (after 2 manifest polls), then gives up and says so. The learner lives on through both reloads.
+  await expect.poll(() => loads(), { timeout: 20_000 }).toBe(3)
+  await expect(page.getByTestId("update")).toHaveText("A newer version is published but this browser keeps loading the old one; reload later.", { timeout: 20_000 })
 
   // The same learner, resumed from the forced checkpoint (not the 8 CU one): steps and CU go on from where they were.
   await expect(page.getByTestId("learner-id")).toHaveText(id)
   await expect(page.getByTestId("status")).toContainText("resumed from its checkpoint at step")
   const resumedAt = Number((await page.getByTestId("status").textContent())!.match(/at step (\d+)/)![1])
   expect(resumedAt).toBeGreaterThan(first!.stepsTotal)
-  expect(resumedAt).toBeGreaterThanOrEqual(lastSteps - 30) // at most the few steps lived between the save and the reload
+  expect(resumedAt).toBeGreaterThanOrEqual(lastSteps) // halted at the save: no step lived after it is lost
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(resumedAt)
   expect(await cuLived(page)).toBeGreaterThanOrEqual(lastCU - 0.5)
 
@@ -97,11 +101,10 @@ test("new compatible code: the tab saves its learner, reloads once, and the same
   const files = await outbox(page, id)
   expect(files.map(f => [f.seq, f.final])).toEqual([[0, false], [1, true]])
   expect(files[1]!.stepsTotal).toBeGreaterThan(resumedAt)
-  expect(files[1]!.cu).toBeGreaterThanOrEqual(12)
-  // One reload only: the new page (still code "dev" here) does not reload again for the same codeSha.
-  expect(loads()).toBe(2)
+  expect(files[1]!.cu).toBeGreaterThanOrEqual(16)
+  // No reload after giving up.
   await page.waitForTimeout(2_000)
-  expect(loads()).toBe(2)
+  expect(loads()).toBe(3)
   expect(onlyOwnOrigin(all, baseURL!)).toEqual([])
 })
 

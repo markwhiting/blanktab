@@ -91,10 +91,13 @@ function lockOwn(id: string): Promise<(() => void) | null> {
 
 /** The life running in this tab, as the updates see it. */
 interface Life {
-  /** Hands refreshed knowledge to the learner. */
+  /** Hands refreshed knowledge to the learner (its manifest only: the sha is what its logs record). */
   knowledge(k: Knowledge): void
-  /** A forced checkpoint: true once saved; false if not (skips outstanding, no answer in CHECKPOINT_WAIT_MS, the life ended). */
-  checkpoint(): Promise<boolean>
+  /**
+   * A forced checkpoint: true once saved; false if not (skips outstanding, no answer in CHECKPOINT_WAIT_MS, the life
+   * ended). With `halt` the learner stops right after the save.
+   */
+  checkpoint(halt: boolean): Promise<boolean>
   /** Stops the learner where it is (before a reload onto the checkpoint just saved). */
   halt(): void
 }
@@ -138,13 +141,13 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   let nextCheckpoint = 0
   const waiting = new Map<number, (saved: boolean) => void>()
   const life: Life = {
-    knowledge: k => worker.postMessage({ type: "knowledge", knowledge: k } satisfies ToWorker),
-    checkpoint: () => new Promise<boolean>(resolve => {
+    knowledge: k => worker.postMessage({ type: "knowledge", manifest: k.manifest } satisfies ToWorker),
+    checkpoint: halt => new Promise<boolean>(resolve => {
       if (over) return resolve(false)
       const id = nextCheckpoint++
       const timer = setTimeout(() => { waiting.delete(id); resolve(false) }, CHECKPOINT_WAIT_MS)
       waiting.set(id, saved => { clearTimeout(timer); waiting.delete(id); resolve(saved) })
-      worker.postMessage({ type: "checkpointNow", id } satisfies ToWorker)
+      worker.postMessage({ type: "checkpointNow", id, halt } satisfies ToWorker)
     }),
     halt: () => worker.terminate(),
   }
@@ -271,7 +274,8 @@ function watchForUpdates(ctx: Ctx): void {
       ctx.ui.knowledge(k)
       ctx.life?.knowledge(k)
     },
-    checkpoint: () => ctx.life?.checkpoint() ?? Promise.resolve(true), // no learner running: nothing to save
+    // Halted at the save, so the reload loses no step. No learner running: nothing to save.
+    checkpoint: () => ctx.life?.checkpoint(true) ?? Promise.resolve(true),
     reload: () => {
       ctx.life?.halt()
       location.reload()
