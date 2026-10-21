@@ -5,8 +5,14 @@ export interface Repo { readonly owner: string; readonly name: string }
 
 const gh = (repo: Repo) => `https://github.com/${repo.owner}/${repo.name}`
 
-/** A setting value as shown on the page: numbers to at most 3 decimals. */
-export const fmt = (v: number | string) => (typeof v === "number" ? String(Math.round(v * 1000) / 1000) : v)
+/**
+ * A setting value as shown on the page: numbers to at most 3 decimals, except that a nonzero value below 1 keeps 3
+ * significant digits (lr 5e-4 is "0.0005", not "0.001"; rounding to decimals would misstate small settings).
+ */
+export const fmt = (v: number | string) => {
+  if (typeof v !== "number") return v
+  return v !== 0 && Math.abs(v) < 1 ? String(Number(v.toPrecision(3))) : String(Math.round(v * 1000) / 1000)
+}
 
 export const fmtSettings = (settings: Record<string, number | string>) => {
   const entries = Object.entries(settings)
