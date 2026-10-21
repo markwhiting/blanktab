@@ -47,7 +47,8 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   }
   if (logs.length > 0 && previous.some(p => p.final)) errors.push("session already has a final file; no further log files are allowed")
 
-  // seq: unique and continuing from previous
+  // seq: unique within the PR and strictly above the highest seq already on main. Gaps are allowed (decision 0014): a
+  // PR the gate closed takes its files with it, and the learner's next PR goes on from where the learner is.
   const seen = new Set<number>()
   for (const { path, log } of logs) {
     if (seen.has(log.seq)) errors.push(`${path}: duplicate seq ${log.seq}`)
@@ -56,7 +57,7 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   const sorted = [...logs].sort((a, b) => a.log.seq - b.log.seq)
   const prevSorted = [...previous].sort((a, b) => a.seq - b.seq)
   const prevLast = prevSorted[prevSorted.length - 1]
-  let expected = prevLast ? prevLast.seq + 1 : 0
+  const mainMax = prevLast ? prevLast.seq : -1
   let lastSteps = prevLast ? prevLast.stepsTotal : -Infinity
   // From schema v2 on, these never decrease across seq (v1 files carry none and are skipped). restores, lostCU and
   // skippedUpdates keep restores on the record: a restore cannot hide the learning it threw away.
@@ -67,11 +68,9 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   for (const { path, log } of sorted) {
     if (reported.has(log.seq)) continue // duplicate already reported
     reported.add(log.seq)
-    if (log.seq !== expected) {
-      errors.push(`${path}: expected seq ${expected} but got ${log.seq}`)
-      expected = log.seq
-    }
-    expected++
+    if (log.seq <= mainMax) errors.push(`${path}: seq ${log.seq} is not above seq ${mainMax}, the highest on main`)
+    // A gap may be any size, but seq stays an exact integer (beyond 2^53 two seqs could name one file).
+    if (!Number.isSafeInteger(log.seq)) errors.push(`${path}: seq ${log.seq} is beyond the largest exact integer`)
     if (log.stepsTotal < lastSteps) errors.push(`${path}: stepsTotal decreased (${log.stepsTotal} < ${lastSteps})`)
     lastSteps = Math.max(lastSteps, log.stepsTotal)
     if (log.schemaVersion === 2) {

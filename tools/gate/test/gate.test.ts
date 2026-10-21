@@ -32,9 +32,14 @@ describe("decide", () => {
     expect(decide([pr({ files: [file(log(0, written(-400 * 24)))] })])[0]!.action).toBe("merge")
   })
   it("invalid -> close with the validator error in the reason", () => {
-    const [d] = decide([pr({ files: [file(log(1))] })])
+    const [d] = decide([pr({ files: [file(log(1))], previous: [log(0), log(1)] })])
     expect(d!.action).toBe("close")
-    expect(d!.reason).toContain("expected seq 0 but got 1")
+    expect(d!.reason).toContain("seq 1 is not above seq 1, the highest on main")
+  })
+  it("after a closed PR, the learner's next PR (a seq gap on main) is merged", () => {
+    // seq 0-1 merged; seq 2-3 went in a PR the gate closed; the learner goes on from seq 4.
+    const [d] = decide([pr({ files: [file(log(4)), file(log(5))], previous: [log(0), log(1)] })])
+    expect(d).toMatchObject({ pr: 1, action: "merge" })
   })
   it("code path -> label-needs-human", () => {
     const [d] = decide([pr({ files: [file(log(0)), { path: "app/src/main.ts", content: "x" }] })])
