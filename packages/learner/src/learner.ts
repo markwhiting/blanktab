@@ -34,6 +34,9 @@ export interface LearnerSettings {
    * Decoupled weight decay toward zero (AdamW-style, on the parameter) on Model.residualParams only — the shift gate
    * and the residual output layers, which express "deviation from copy-last" and should return to it without
    * continuing evidence. Per update of those parameters: p ← (1 − residualDecay)·p − Adam step (not scaled by lr).
+   * Ceiling: Adam moves a parameter by at most about its lr per update, so at equilibrium |p| ≲ lr_eff / residualDecay
+   * — for the shift gate lr / λ (0.5 at the defaults), for the output layers lr·headLrScale / λ (0.05 at the
+   * defaults). A residual must keep being re-earned by the gradient to stay near that ceiling.
    * 0 is off and bit-exact to the learner without it. Clamped into RESIDUAL_DECAY_RANGE.
    */
   residualDecay: number

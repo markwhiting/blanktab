@@ -120,7 +120,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       }
     })
 
-    it("ε = 0 reproduces the learner from before exploration existed, bit for bit", async () => {
+    it("ε = 0 and residualDecay = 0 (at the then-default lr 1e-3) reproduce the learner from before either existed, bit for bit", async () => {
       const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: BEFORE })
       expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
       expect(r.updates.length).toBe(39)
@@ -162,13 +162,6 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: 0.5 }).residualDecay).toBe(1e-2)
       expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: -1 }).residualDecay).toBe(0)
       for (const v of [Number.NaN, undefined as unknown as number]) expect(() => clampSettings({ ...DEFAULT_SETTINGS, residualDecay: v })).toThrow(RangeError)
-    })
-
-    it("residualDecay = 0 (with ε = 0, lr 1e-3) reproduces the learner from before either existed, bit for bit", async () => {
-      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: BEFORE })
-      expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
-      expect(fnv(r.updates.map((u) => u.lossBefore))).toBe(GOLDEN_LOSS_HASH)
-      r.learner.dispose()
     })
 
     it("residualDecay > 0 pulls the residual layers (shift gate, output layers) toward zero, deterministically", async () => {

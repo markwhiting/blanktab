@@ -24,15 +24,23 @@ describe("knowledge/settings-space.json", () => {
   const space = JSON.parse(readFileSync(new URL("../../knowledge/settings-space.json", import.meta.url), "utf8")) as { settings: { name: string; min: number; max: number }[] }
   const range = (name: string) => { const s = space.settings.find(x => x.name === name); return s && [s.min, s.max] }
   it("holds the plan's ranges for the learner settings and the speed cap, and keeps moveProbability", () => {
-    expect(range("lr")).toEqual([3e-4, 1e-3]) // narrowed in Plan 04a.2 Task 1 (controller ruling)
+    // Plan 04a.2 Task 1 (controller ruling): narrowed to the measured neighbourhood of the defaults, so the picker
+    // cannot sample untested corners.
+    expect(range("lr")).toEqual([4e-4, 6e-4])
     expect(range("entropyWeight")).toEqual([0.001, 0.05])
     expect(range("curiosityWeight")).toEqual([0.5, 2])
     expect(range("bufferSize")).toEqual([500, 4000])
     expect(range("replayPerSleep")).toEqual([16, 128])
-    expect(range("headLrScale")).toEqual([0.03, 0.3])
-    expect(range("exploreEpsilon")).toEqual([0.05, 0.2])
-    expect(range("residualDecay")).toEqual([3e-4, 3e-3]) // around the chosen default 1e-3 (Plan 04a.2 Task 1 sweep)
+    expect(range("headLrScale")).toEqual([0.08, 0.12])
+    expect(range("exploreEpsilon")).toEqual([0.08, 0.12])
+    expect(range("residualDecay")).toEqual([7e-4, 1.5e-3])
     expect(range("maxStepsPerSec")).toEqual([30, 30])
     expect(range("moveProbability")).toEqual([0.1, 1])
+  })
+  it("contains the learner's defaults in every range it gives a learner setting (the measured point is pickable)", () => {
+    for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+      const r = range(k)
+      if (r) expect(v >= r[0]! && v <= r[1]!, `${k} = ${v} outside [${r.join(", ")}]`).toBe(true)
+    }
   })
 })
