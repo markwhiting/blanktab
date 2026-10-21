@@ -3,7 +3,7 @@
 import type { Widths } from "@blanktab/learner"
 
 export interface TestParams {
-  /** Overrides the lifetime in compute units (default DEFAULT_LIFETIME_CU). */
+  /** Overrides the lifetime in compute units (default: none, a learner lives as long as its tab). */
   lifetimeCU?: number
   /** Overrides the speed cap (the learner's maxStepsPerSec setting). */
   stepsPerSecond?: number

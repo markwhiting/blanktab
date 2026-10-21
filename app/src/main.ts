@@ -1,7 +1,7 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
+  DB_BLOCKED_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
   createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
@@ -19,7 +19,7 @@ const PRESENCE_WAIT_MS = 250
 
 // Test-only overrides. In the production build MODE is the literal "production" and this is dropped.
 const test: TestParams = import.meta.env.MODE !== "production" ? readTestParams(location.search) : {}
-const lifetimeCU = test.lifetimeCU ?? DEFAULT_LIFETIME_CU
+const lifetimeCU = test.lifetimeCU // undefined: the learner lives as long as its tab
 
 const fetchFn: typeof fetch = (input, init) => fetch(input, init)
 
@@ -107,11 +107,12 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   }
   const b = birth(latest, knowledge)
   const cfg: LifeConfig = {
-    learnerId: id, codeSha: __CODE_SHA__, ...b, hostSig: await hostSig(), seed: seedsOf(id).learner, lifetimeCU,
+    learnerId: id, codeSha: __CODE_SHA__, ...b, hostSig: await hostSig(), seed: seedsOf(id).learner,
+    ...(lifetimeCU !== undefined ? { lifetimeCU } : {}),
     ...(test.stepsPerSecond !== undefined ? { maxStepsPerSec: test.stepsPerSecond } : {}),
     ...(test.sleepInterval !== undefined ? { sleepInterval: test.sleepInterval } : {}),
   }
-  ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, lifetimeCU })
+  ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, ...(lifetimeCU !== undefined ? { lifetimeCU } : {}) })
 
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
   // A hidden page draws nothing: the worker stops posting frames until it is shown again.

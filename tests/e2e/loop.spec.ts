@@ -61,7 +61,7 @@ async function setup(page: Page, opts: { knowledge: "ok" | "unreachable"; token?
 }
 
 const stepsLived = async (page: Page) => Number((await page.getByTestId("steps").textContent())?.match(/^(\d+)/)?.[1] ?? NaN)
-const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) of/)?.[1] ?? NaN)
+const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) (?:of |CU)/)?.[1] ?? NaN)
 const curvePoints = async (page: Page) => Number(await page.getByTestId("curve").getAttribute("data-points"))
 
 /** Writes rows straight into the page's IndexedDB (as an earlier page version or a crashed life would have left them). */

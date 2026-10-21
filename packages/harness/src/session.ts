@@ -6,8 +6,6 @@ import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Chec
 import { MAX_CURVE_POINTS, MAX_RESTORES, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
 
-/** 2^10 CU. */
-export const DEFAULT_LIFETIME_CU = 1024
 export const DEFAULT_SLEEP_INTERVAL = 250
 export const DEFAULT_MAX_STEPS_PER_SEC = 30
 /** This many skipped updates in a row (a learner gone non-finite) restore the last checkpoint. */
@@ -18,6 +16,8 @@ export const MAX_RESTORES_PER_CHECKPOINT = 3
 export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
 /** The first log crossing, 2^3 CU: a young life writes no log files (and their checkpoints) in a burst. */
 export const FIRST_LOG_CU = 8
+/** Doubling stops here; from then on a log is written at every multiple of this many CU, forever. */
+export const LOG_STEP_CU = 512
 
 export interface SessionConfig {
   learnerId: string
@@ -30,7 +30,7 @@ export interface SessionConfig {
   widths: Widths
   /** Clamped (clampSettings) before use; the log records the clamped values. */
   learnerSettings: LearnerSettings
-  /** Default DEFAULT_LIFETIME_CU. */
+  /** Undefined (the default): the life never ends. Test knobs set one; its end is a final log. */
   lifetimeCU?: number
   /** Steps between sleeps. Default DEFAULT_SLEEP_INTERVAL. */
   sleepInterval?: number
@@ -109,8 +109,16 @@ export function createPacer(maxStepsPerSec: number, clock: Clock = realClock): (
   }
 }
 
-/** The smallest power of two above `cu` (the next log crossing), at least FIRST_LOG_CU = 2^3. */
+/** The log schedule, forever: 8, 16, ..., 512, then 1024, 1536, ... (every LOG_STEP_CU). */
+export function* logThresholds(): Iterable<number> {
+  let t = FIRST_LOG_CU
+  for (; t < LOG_STEP_CU; t *= 2) yield t
+  for (; ; t += LOG_STEP_CU) yield t
+}
+
+/** The first threshold of logThresholds() above `cu` (the next log crossing). */
 export function nextCrossing(cu: number): number {
+  if (cu >= LOG_STEP_CU) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
   let t = FIRST_LOG_CU
   while (t <= cu) t *= 2
   return t
@@ -151,13 +159,13 @@ function birthOf(state: unknown, id: string): Birth {
 }
 
 /**
- * Lives one learner's life (or the rest of it) until it has used `lifetimeCU` compute units.
+ * Lives one learner's life (or the rest of it): for as long as it is run, or until it has used `lifetimeCU` compute units if there is one (a test knob).
  *
  * - Every `sleepInterval` steps the learner sleeps and a curve point (predLoss vs the copy-last baseline) is added if
  *   both are finite. A checkpoint is saved then if `checkpointEveryMs` have passed since the last save (on the
  *   injected clock); one that falls due during skips waits for the next clean sleep. A reload or restore therefore
  *   loses up to `checkpointEveryMs` of learning.
- * - A log file (v2) is queued each time CU crosses the next 2^k (k = 3, 4, ...: FIRST_LOG_CU) and at the end of life, carrying the
+ * - A log file (v2) is queued each time CU crosses the next logThresholds() value (8, 16, ..., 512, then every 512) and at the end of a test lifetime, carrying the
  *   curve points since the previous file. Each one is queued in one transaction with the checkpoint of that moment,
  *   so the checkpoint is never behind the latest log file: resuming never reuses a seq or goes back in steps or CU.
  * - No checkpoint is saved (and so no non-final log is written) while the learner has skipped updates outstanding;
@@ -177,10 +185,10 @@ function birthOf(state: unknown, id: string): Birth {
  *   no checkpoint cannot be resumed and throws, as does a checkpoint whose seq does not follow the latest log file.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
-  const lifetimeCU = cfg.lifetimeCU ?? DEFAULT_LIFETIME_CU
+  const lifetimeCU = cfg.lifetimeCU ?? Number.POSITIVE_INFINITY // no lifetime: the life ends only by failure or the caller
   const sleepInterval = cfg.sleepInterval ?? DEFAULT_SLEEP_INTERVAL
   const maxStepsPerSec = cfg.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC
-  if (!(Number.isFinite(lifetimeCU) && lifetimeCU > 0)) throw new RangeError(`lifetimeCU must be finite and > 0, got ${lifetimeCU}`)
+  if (cfg.lifetimeCU !== undefined && !(Number.isFinite(cfg.lifetimeCU) && cfg.lifetimeCU > 0)) throw new RangeError(`lifetimeCU must be finite and > 0, got ${cfg.lifetimeCU}`)
   if (!(Number.isInteger(sleepInterval) && sleepInterval >= 1)) throw new RangeError(`sleepInterval must be an integer >= 1, got ${sleepInterval}`)
   if (!(Number.isFinite(maxStepsPerSec) && maxStepsPerSec > 0)) throw new RangeError(`maxStepsPerSec must be finite and > 0, got ${maxStepsPerSec}`)
   const checkpointEveryMs = cfg.checkpointEveryMs ?? DEFAULT_CHECKPOINT_EVERY_MS

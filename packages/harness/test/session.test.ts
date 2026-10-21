@@ -8,7 +8,7 @@ import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/che
 import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
-import { DEFAULT_CHECKPOINT_EVERY_MS, FIRST_LOG_CU, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
+import { DEFAULT_CHECKPOINT_EVERY_MS, FIRST_LOG_CU, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -112,9 +112,17 @@ function expectContinuous(logs: LogFileV2[]) {
 }
 
 describe("session v2", { timeout: 60_000 }, () => {
-  it("the log crossings are the powers of two from 2^3 = 8 CU", () => {
+  it("the log schedule: 8 ... 512 by doubling, then every 512, forever", () => {
     expect(FIRST_LOG_CU).toBe(8)
-    expect([0, 0.5, 1, 7.99, 8, 15, 16, 1000, 1024].map(nextCrossing)).toEqual([8, 8, 8, 8, 16, 16, 32, 1024, 2048])
+    const first: number[] = []
+    for (const t of logThresholds()) { first.push(t); if (first.length === 12) break }
+    expect(first).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 2560, 3072])
+    expect([0, 0.5, 7.99, 8, 15, 16, 511, 512, 1000, 1024, 1535, 1536, 10_000].map(nextCrossing)).toEqual([8, 8, 8, 16, 16, 32, 512, 1024, 1024, 1536, 1536, 2048, 10_240])
+    // nextCrossing is the schedule's next value above cu.
+    const all = logThresholds()[Symbol.iterator]()
+    const seen: number[] = [0]
+    for (let i = 0; i < 40; i++) seen.push(all.next().value as number)
+    for (let i = 1; i < seen.length; i++) expect(nextCrossing(seen[i - 1]!)).toBe(seen[i])
   })
 
   it("writes log files exactly at the 2^k CU crossings from 8 CU plus the final one, all v2-valid", async () => {
@@ -144,17 +152,40 @@ describe("session v2", { timeout: 60_000 }, () => {
     expect(logs[3]!.curve[0]).toEqual({ cu: 550 / 16, steps: 550, predLoss: 0.5 / 6.5, baselineLoss: 0.4 })
   })
 
-  it("the default life is 1024 CU with a sleep every 250 steps: at most 7 + 1 files", async () => {
+  it("without a lifetime the life never ends: no final log, however long it runs", async () => {
     const idb = new IDBFactory()
-    const created: LearnerInit[] = []
-    const r = await runSession(cfgFor(), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 0.25, created }) }))
+    await expect(runSession(cfgFor(), depsFor(idb, {
+      createLearner: stubFactory({ cuPerStep: 1 }), onTick: ({ cu }) => { if (cu >= 1100) throw new Error("tab closed") },
+    }))).rejects.toThrow("tab closed")
     const logs = await logsOf(idb)
-    expect(logs.length).toBeLessThanOrEqual(8)
     expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64, 128, 256, 512, 1024])
-    expect(logs.at(-1)).toMatchObject({ final: true, cu: 1024 })
-    expect(logs.flatMap(l => l.curve).length).toBe(Math.floor(r.steps / 250) + 1)
+    expect(logs.some(f => f.final)).toBe(false)
+    expect(await loadCheckpoint(idb, ID)).toBeDefined()
+  })
+
+  it("a learner adding 10,240 CU writes 7 + 19 = 26 files (8 ... 512, then 1024 ... 10240 by 512), none final, all under the gate's caps", async () => {
+    const idb = new IDBFactory()
+    await expect(runSession(cfgFor(), depsFor(idb, {
+      createLearner: stubFactory({ cuPerStep: 8 }), onTick: ({ cu }) => { if (cu > 10_240) throw new Error("tab closed") },
+    }))).rejects.toThrow("tab closed")
+    const logs = await logsOf(idb)
+    expect(logs).toHaveLength(26)
+    expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64, 128, 256, 512, ...Array.from({ length: 19 }, (_, i) => 1024 + 512 * i)])
+    expect(logs.some(f => f.final)).toBe(false)
+    expect(logs.map(f => f.seq)).toEqual(logs.map((_, i) => i))
+    for (const f of logs) expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
+    expect(logs.length).toBeLessThanOrEqual(16 + 10) // 26 files over 10,240 CU; the gate's 16-file cap is per hourly merge, see decision 0014
+  })
+
+  it("a test lifetime still ends in a final log", async () => {
+    const idb = new IDBFactory()
+    const r = await runSession(cfgFor({ lifetimeCU: 1100 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 4 }) }))
+    const logs = await logsOf(idb)
+    expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 1100])
+    expect(logs.at(-1)).toMatchObject({ final: true, cu: 1100 })
+    expect(r.cu).toBe(1100)
     expectContinuous(logs)
-    expect(created).toEqual([{ seed: 7, widths: TINY, settings: clampSettings(SETTINGS) }])
+    expect(await loadCheckpoint(idb, ID)).toBeUndefined()
   })
 
   it("CU a sleep adds counts too: a crossing at a sleep is logged with that sleep's curve point", async () => {

@@ -118,7 +118,7 @@ function renderHistory(k: Knowledge): void {
 
 export interface Ui {
   knowledge(k: Knowledge): void
-  learner(o: { id: string; sessionsBefore: number; lifetimeCU: number }): void
+  learner(o: { id: string; sessionsBefore: number; lifetimeCU?: number }): void
   /** The settings the learner runs with (as the worker reports them). */
   settings(settings: Record<string, number | string>): void
   backend(label: string): void
@@ -147,7 +147,7 @@ export function createUi(): Ui {
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   const curveCanvas = byTest("curve") as HTMLCanvasElement
-  let lifetime = 0
+  let lifetime: number | undefined
   let curve: CurvePoint[] = []
   setupTabs()
   renderStatic()
@@ -184,7 +184,7 @@ export function createUi(): Ui {
     },
     progress(steps, cu) {
       byTest("steps").textContent = String(steps)
-      byTest("cu").textContent = `${fmtCU(cu)} of ${fmt(lifetime)} CU`
+      byTest("cu").textContent = lifetime === undefined ? `${fmtCU(cu)} CU` : `${fmtCU(cu)} of ${fmt(lifetime)} CU`
     },
     curve(points, reset) {
       curve = appendPoints(reset ? [] : curve, points)
