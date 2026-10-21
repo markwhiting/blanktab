@@ -1,11 +1,21 @@
 import { ShapeError, im2colGeometry } from "./backend"
-import { add, addScalar, composite, div, im2col, matmul, mean, mul, reshape, scale, sigmoid, square, sqrt, sub, sumLast, tanh } from "./ops"
+import { add, addScalar, composite, div, im2col, matmul, mean, mul, neg, relu, reshape, scale, sigmoid, square, sqrt, sub, sumLast, tanh } from "./ops"
 import { param } from "./tensor"
 import type { Tensor } from "./tensor"
 
 // Composites are built purely from differentiable ops: they have no backward code of their own.
 // Each runs inside `composite(...)`, so internals computed only from non-grad inputs (im2col of an
 // input frame, layerNorm statistics of a constant) are freed by disposeGraph instead of leaking.
+
+/**
+ * Leaky ReLU: x for x > 0, slope·x otherwise (slope in [0, 1], default 0.01). Its gradient is 1 or slope, never 0
+ * away from x = 0, so a unit pushed negative on every input keeps learning instead of dying. Computed as
+ * relu(x) − slope·relu(−x): exact on both sides, and NaN and ±Infinity pass through.
+ */
+export function leakyRelu(x: Tensor, slope = 0.01): Tensor {
+  if (!(slope >= 0 && slope <= 1)) throw new RangeError(`leakyRelu: slope must be in [0, 1], got ${slope}`)
+  return composite(() => sub(relu(x), scale(relu(neg(x)), slope)))
+}
 
 /** x [B,in] · w [in,out] (+ b [out]) -> [B,out]. */
 export function linear(x: Tensor, w: Tensor, b?: Tensor): Tensor {

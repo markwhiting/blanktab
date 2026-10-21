@@ -187,7 +187,8 @@ async function main() {
         const aT = T(actionOneHot(tr.action), [1, 76])
         const hNow = m.core(it, hT)
         const p = m.predict(hNow, aT, bT)
-        // The predictor's hidden layer z = relu(linear(h) + linear(a)): how many units are alive on this transition.
+        // The predictor's hidden layer z = leakyRelu(linear(h) + linear(a)): how many units are alive (pre-activation > 0,
+        // the regime where a unit passes gradient at full strength) on this transition.
         const q = m.params.length
         const zPre = noGrad(() => composite(() => add(linear(hNow, m.params[q - 8]!, m.params[q - 7]!), linear(aT, m.params[q - 6]!, m.params[q - 5]!))))
         const zv = await zPre.read()

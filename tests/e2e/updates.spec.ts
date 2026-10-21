@@ -1,5 +1,6 @@
 // Decision 0014: a learner lives as long as its tab, through new knowledge and new code (Review Focus 1 and 2).
 import { test, expect, type Page, type Request } from "@playwright/test"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 
 const ID_RE = /lrn_[0-9a-f]{16}/
 const SPACE = [
@@ -19,8 +20,8 @@ const NEW_CODE = "b".repeat(40)
 async function setup(page: Page) {
   const files: Record<string, unknown> = {
     "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), row("lrn_bbbbbbbbbbbbbbbb")] },
-    // The e2e build is code "dev" with LEARNER_STATE_VERSION 1: at first, nothing new is deployed.
-    "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 1 },
+    // The e2e build is code "dev" with this checkout's LEARNER_STATE_VERSION: at first, nothing new is deployed.
+    "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
     "settings-space.json": { schemaVersion: 1, settings: SPACE },
   }
   const all: Request[] = []
@@ -118,7 +119,7 @@ test("new incompatible code: the learner keeps running here and the page says so
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const id = await learnerId(page)
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
-  deploy({ codeSha: NEW_CODE, learnerStateVersion: 2 })
+  deploy({ codeSha: NEW_CODE, learnerStateVersion: LEARNER_STATE_VERSION + 1 })
   await expect(page.getByTestId("update")).toHaveText("A newer version is available; this learner continues on the version it was born with.")
   await expect(page.getByTestId("update")).toBeVisible()
   const before = await stepsLived(page)

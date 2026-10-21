@@ -90,6 +90,7 @@ describe("model", () => {
     const live = be.stats.liveBuffers
     expect(() => createModel(be, 5, w, saved.slice(1))).toThrow(RangeError)
     expect(() => createModel(be, 5, w, [new Float32Array(3), ...saved.slice(1)])).toThrow(RangeError)
+    expect(() => createModel(be, 5, w, [...saved, new Float32Array(3)])).toThrow(RangeError) // one too many: built, then rejected
     expect(be.stats.liveBuffers).toBe(live) // nothing leaked by a rejected restore
     a.dispose()
     b.dispose()
@@ -102,6 +103,41 @@ describe("model", () => {
     const p = m.predict(m.zeroState(), oneHot(be), b)
     expect(await p.periphery.read()).toEqual(await b.periphery.read())
     expect(await p.fovea.read()).toEqual(await b.fovea.read())
+  })
+
+  it("a newborn at CPU_WIDTHS predicts exactly copy-last for any state and action: shift gate and output layers start at zero", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 7, CPU_WIDTHS)
+    const n = m.params.length
+    // params: ..., shiftX, shiftY, shiftGate, predH (w, b), predA (w, b), headP (w, b), headF (w, b)
+    for (const t of [m.params[n - 9]!, ...m.outputParams]) expect((await t.read()).every((v) => v === 0)).toBe(true)
+    const b = base(be)
+    const h = m.core(inputs(be), m.zeroState()) // a real, non-zero recurrent state
+    expect((await h.read()).some((v) => v !== 0)).toBe(true)
+    for (const comps of [[0, 25, 28, 40], [12, 26, 30, 75], [24, 27, 32, 41]]) {
+      const a = new Float32Array(ACTION_DIM)
+      for (const i of comps) a[i] = 1
+      const p = m.predict(h, tensor(a, [1, ACTION_DIM], { backend: be }), b)
+      expect(await p.periphery.read()).toEqual(await b.periphery.read())
+      expect(await p.fovea.read()).toEqual(await b.fovea.read())
+    }
+  })
+
+  it("its predictor units cannot die: with every z unit pushed negative, gradient still reaches the predictor's input layers", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 4, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const n = m.params.length
+    const [predHw, predAb] = [m.params[n - 8]!, m.params[n - 5]!]
+    poke(predAb, () => -50) // z's pre-activation is far below 0 on every input: a ReLU here would pass exactly 0
+    const r0 = createRng(3)
+    for (const t of m.outputParams) poke(t, () => r0() - 0.5)
+    const h = tensor(rand(4, 8), [1, 4], { backend: be })
+    const p = m.predict(h, oneHot(be), base(be))
+    const loss = add(mean(p.periphery), mean(p.fovea))
+    backward(loss)
+    const g = await predHw.grad!.read()
+    expect(g.some((v) => v !== 0)).toBe(true)
+    disposeGraph(loss, [])
   })
 
   it("translates the fovea by the action's learned kernel (the fovea-translation term)", async () => {
