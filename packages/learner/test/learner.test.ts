@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest"
-import { emptyObservation, isValidAction } from "@blanktab/interface"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, emptyObservation, isValidAction } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
-import { createCpuBackend } from "@blanktab/tensor"
+import { createCpuBackend, createRng } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
+import { DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
 import type { LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
@@ -93,6 +93,86 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     expect(c.updates).not.toEqual(a.updates)
     for (const r of [a, b, c]) r.learner.dispose()
   }, 30_000) // ~2.7 s unloaded; timed out at the 5 s default under load (controller ruling: >= 2x, min 30 s)
+
+  describe("ε-uniform exploration (exploreEpsilon)", () => {
+    // Recorded from the learner before exploreEpsilon existed (commit 863adae): seed 5, TINY, DEFAULT_SETTINGS, the
+    // synthetic stream, 40 steps with a sleep every 10. Actions as move.button.scroll.key; losses as an FNV-1a hash of
+    // the 39 UpdateInfo.lossBefore values' float64 bytes.
+    const GOLDEN_ACTIONS = "5.2.2.33 4.2.2.41 1.2.2.34 12.1.2.12 10.0.0.38 12.1.0.16 1.2.1.26 7.2.2.33 7.0.1.11 14.0.0.30 20.0.2.10 22.1.2.20 3.2.1.31 3.2.0.29 10.0.0.2 3.1.1.40 3.2.0.15 15.1.2.25 3.2.0.2 9.0.1.8 2.2.0.6 18.2.1.27 22.1.0.44 8.2.2.32 8.2.1.16 17.2.0.22 18.1.2.12 16.1.1.44 16.1.0.43 2.1.2.38 12.0.2.32 13.0.2.7 0.2.2.2 17.0.1.26 15.1.2.0 8.2.2.21 8.2.1.20 11.2.0.7 18.1.1.39 5.1.2.33"
+    const GOLDEN_LOSS_HASH = "e40e135c"
+    const fnv = (xs: number[]) => {
+      let h = 0x811c9dc5
+      for (const b of new Uint8Array(new Float64Array(xs).buffer)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
+      return h.toString(16)
+    }
+    const fmt = (as: Action[]) => as.map((a) => `${a.move}.${a.button}.${a.scroll}.${a.key}`).join(" ")
+
+    it("defaults to 0.1 and is clamped into [0, 0.5]; a non-finite value is rejected", () => {
+      expect(DEFAULT_SETTINGS.exploreEpsilon).toBe(0.1)
+      expect(EXPLORE_EPSILON_RANGE).toEqual([0, 0.5])
+      expect(clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: 0.9 }).exploreEpsilon).toBe(0.5)
+      expect(clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: -1 }).exploreEpsilon).toBe(0)
+      for (const v of [Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number]) {
+        expect(() => clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: v })).toThrow(RangeError)
+      }
+    })
+
+    it("ε = 0 reproduces the learner from before exploration existed, bit for bit", async () => {
+      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: { exploreEpsilon: 0 } })
+      expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
+      expect(r.updates.length).toBe(39)
+      expect(fnv(r.updates.map((u) => u.lossBefore))).toBe(GOLDEN_LOSS_HASH)
+      r.learner.dispose()
+    })
+
+    it("ε > 0 stays deterministic per seed, keeps actions valid, and changes what is done", async () => {
+      const a = await run({ seed: 5, steps: 80, sleepEvery: 10, settings: { exploreEpsilon: 0.3 } })
+      const b = await run({ seed: 5, steps: 80, sleepEvery: 10, settings: { exploreEpsilon: 0.3 } })
+      expect(b.actions).toEqual(a.actions)
+      expect(b.updates).toEqual(a.updates)
+      expect(a.actions.every(isValidAction)).toBe(true)
+      expect(fmt(a.actions.slice(0, 40))).not.toBe(GOLDEN_ACTIONS)
+      for (const r of [a, b]) r.learner.dispose()
+    })
+
+    it("ε > 0 survives save and load: the resumed learner explores exactly as one that never stopped", async () => {
+      const whole = await run({ seed: 6, steps: 60, settings: { exploreEpsilon: 0.2 } })
+      const first = await run({ seed: 6, steps: 30, settings: { exploreEpsilon: 0.2 } })
+      const state = await first.learner.save()
+      first.learner.dispose()
+      expect(state.settings.exploreEpsilon).toBe(0.2)
+      const be = createCpuBackend()
+      const resumed = await createLearner({ backend: be, state })
+      const world = createSyntheticStream()
+      for (const a of first.actions) { world.observe(); world.act(a) }
+      const rest: Action[] = []
+      for (let i = 0; i < 30; i++) { const a = await resumed.step(world.observe()); rest.push(a); world.act(a) }
+      expect(rest).toEqual(whole.actions.slice(30))
+      resumed.dispose()
+      whole.learner.dispose()
+    })
+
+    it("sampleAction: with probability ε a factor is uniform, otherwise it follows the policy", () => {
+      const sizes = [MOVE_OPTIONS, BUTTON_OPTIONS, SCROLL_OPTIONS, KEYS.length]
+      const logits = new Float32Array(sizes.reduce((a, n) => a + n, 0)).fill(-100)
+      let off = 0
+      for (const n of sizes) { logits[off] = 100; off += n } // the policy always picks index 0 of every factor
+      const draws = 20_000
+      for (const eps of [0, 0.2]) {
+        const rng = createRng(11)
+        const off0 = [0, 0, 0, 0]
+        for (let i = 0; i < draws; i++) {
+          const a = sampleAction(logits, eps, rng)
+          expect(isValidAction(a)).toBe(true)
+          ;[a.move, a.button, a.scroll, a.key].forEach((v, f) => { if (v !== 0) off0[f]!++ })
+        }
+        sizes.forEach((n, f) => {
+          const want = eps * (n - 1) / n // explored, and the uniform draw missed index 0
+          expect(Math.abs(off0[f]! / draws - want)).toBeLessThan(eps === 0 ? 1e-12 : 0.012)
+        })
+      }
+    })
+  })
 
   it("returns only valid actions, counts steps and compute", async () => {
     const { learner, actions, updates } = await run({ seed: 4, steps: 200 })

@@ -23,9 +23,16 @@ export interface LearnerSettings {
   replayPerSleep: number
   /** The predictor's residual output layers train at lr × headLrScale (everything else at lr). */
   headLrScale: number
+  /**
+   * ε-uniform exploration: with this probability, each action factor is drawn uniformly (from the learner's RNG)
+   * instead of from the policy. The actor-critic update uses the action actually taken, with its log-probability
+   * under the policy as before and no importance weighting: at ε ≤ 0.5 the behaviour policy stays close to π and
+   * the bias is accepted for v1 (controller ruling, Plan 04a.2 Task 1). Clamped into EXPLORE_EPSILON_RANGE.
+   */
+  exploreEpsilon: number
 }
 export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({
-  lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1,
+  lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, exploreEpsilon: 0.1,
 })
 export interface LearnerStats {
   steps: number
@@ -105,6 +112,8 @@ export interface TrainableLearner extends Learner {
 export const LR_RANGE = [1e-5, 1e-2] as const
 /** headLrScale is clamped into this range. */
 export const HEAD_LR_SCALE_RANGE = [0.01, 1] as const
+/** exploreEpsilon is clamped into this range. */
+export const EXPLORE_EPSILON_RANGE = [0, 0.5] as const
 /** TD discount. */
 export const GAMMA = 0.9
 /** Smoothing of the predLoss / baselineLoss moving averages. */
@@ -123,7 +132,7 @@ const FACTOR_ROWS = FACTORS.map((n, f) => Int32Array.from({ length: n }, (_, k) 
 const isPosInt = (v: number) => Number.isInteger(v) && v >= 1
 const isNonNeg = (v: number) => Number.isFinite(v) && v >= 0
 
-/** Validates settings and clamps lr into LR_RANGE. Throws RangeError for values that cannot be clamped. */
+/** Validates settings and clamps lr, headLrScale and exploreEpsilon into their ranges. Throws RangeError for values that cannot be clamped. */
 export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.lr)) throw new RangeError(`lr must be finite, got ${s.lr}`)
   if (!isNonNeg(s.entropyWeight)) throw new RangeError(`entropyWeight must be finite and >= 0, got ${s.entropyWeight}`)
@@ -131,8 +140,12 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!isPosInt(s.bufferSize)) throw new RangeError(`bufferSize must be an integer >= 1, got ${s.bufferSize}`)
   if (!isPosInt(s.replayPerSleep)) throw new RangeError(`replayPerSleep must be an integer >= 1, got ${s.replayPerSleep}`)
   if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
+  if (!Number.isFinite(s.exploreEpsilon)) throw new RangeError(`exploreEpsilon must be finite, got ${s.exploreEpsilon}`)
   const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
-  return { ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE) }
+  return {
+    ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE),
+    exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE),
+  }
 }
 
 /** Floor of the curiosity scale, so progress on a near-zero loss cannot blow up. */
@@ -169,6 +182,20 @@ function sampleFactor(logits: Float32Array, off: number, n: number, rng: () => n
     if (x < acc) return k
   }
   return n - 1
+}
+
+/**
+ * a_t from the policy logits [76], one factor at a time (move, button, scroll, key). With probability
+ * `exploreEpsilon` a factor is drawn uniformly instead of from softmax(logits). At ε = 0 no extra RNG draw is made,
+ * so the learner is bit-identical to one without exploration.
+ */
+export function sampleAction(logits: Float32Array, exploreEpsilon: number, rng: () => number): Action {
+  const factor = (f: number) => {
+    const n = FACTORS[f]!
+    if (exploreEpsilon > 0 && rng() < exploreEpsilon) return Math.min(n - 1, Math.floor(rng() * n))
+    return sampleFactor(logits, OFFSETS[f]!, n, rng)
+  }
+  return { move: factor(0), button: factor(1), scroll: factor(2), key: factor(3) }
 }
 
 const isUint32 = (v: unknown) => Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 32
@@ -291,7 +318,7 @@ interface Last {
  *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA before this step, 1e-6), −1, 1), L_after
  *     being the same loss with the new weights;
  *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float read (logits, V(h_t)); a_t is sampled
- *     per factor with the learner's seeded RNG;
+ *     per factor with the learner's seeded RNG, uniformly with probability exploreEpsilon (sampleAction);
  *  4. updates the actor-critic on a_{t-1}: A = curiosityWeight·r + γ·V(h_t) − V(h_{t-1}),
  *     loss = −logπ(a_{t-1})·stopgrad(A) + A² − entropyWeight·H(π), one Adam step;
  *  5. stores (obs_{t-1}, h_{t-2}, a_{t-1}, obs_t) in the FIFO replay buffer and carries h ← h_t (detached).
@@ -579,12 +606,7 @@ export async function createLearner(opts: {
     const [headsOut, hNextData] = await Promise.all([headsT.read(), hNext.read()])
     const logits = headsOut.subarray(0, ACTION_DIM)
     const valueNext = headsOut[ACTION_DIM]!
-    const action: Action = {
-      move: sampleFactor(logits, OFFSETS[0]!, FACTORS[0], rng),
-      button: sampleFactor(logits, OFFSETS[1]!, FACTORS[1], rng),
-      scroll: sampleFactor(logits, OFFSETS[2]!, FACTORS[2], rng),
-      key: sampleFactor(logits, OFFSETS[3]!, FACTORS[3], rng),
-    }
+    const action = sampleAction(logits, settings.exploreEpsilon, rng)
 
     // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
     if (last && info && Number.isFinite(info.lossAfter)) {
