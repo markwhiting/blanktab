@@ -18,6 +18,8 @@ export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
 export const FIRST_LOG_CU = 8
 /** Doubling stops here; from then on a log is written at every multiple of this many CU, forever (about 8 an hour at the speed cap). */
 export const LOG_STEP_CU = 1024
+/** The last doubling threshold: 2^9 CU. */
+export const LAST_DOUBLING_CU = 512
 
 export interface SessionConfig {
   learnerId: string
@@ -112,13 +114,13 @@ export function createPacer(maxStepsPerSec: number, clock: Clock = realClock): (
 /** The log schedule, forever: 8, 16, ..., 512, then 1024, 2048, 3072, ... (every LOG_STEP_CU). */
 export function* logThresholds(): Iterable<number> {
   let t = FIRST_LOG_CU
-  for (; t <= 512; t *= 2) yield t
+  for (; t <= LAST_DOUBLING_CU; t *= 2) yield t
   for (; ; t += LOG_STEP_CU) yield t
 }
 
 /** The first threshold of logThresholds() above `cu` (the next log crossing). */
 export function nextCrossing(cu: number): number {
-  if (cu >= 512) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
+  if (cu >= LAST_DOUBLING_CU) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
   let t = FIRST_LOG_CU
   while (t <= cu) t *= 2
   return t

@@ -87,9 +87,11 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
       pulls.push(pr)
       return json(201, { number: pr.number })
     }
-    if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/)) && m[1] === UP) {
-      const pr = pulls.find(x => x.number === Number(m![2]))
-      return pr ? json(200, { number: pr.number, state: pr.state ?? "open", changed_files: diff(pr).size }) : json(404, { message: "Not Found" })
+    if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/compare\/main\.\.\.(.+)$/)) && m[1] === UP) {
+      const head = decodeURIComponent(m[2]!)
+      const [owner, branch] = head.split(":") as [string, string]
+      if (!repos.get(repoOfOwner(owner) ?? "")?.branches.has(branch)) return json(404, { message: "Not Found" })
+      return json(200, { files: [...diff({ head, base: "main", title: "", draft: true, body: "" }).keys()].map(filename => ({ filename })) })
     }
     if (!(m = p.match(/^\/repos\/([^/]+\/[^/]+)(\/.*)?$/))) return json(404, { message: `unhandled ${r.method} ${p}` })
     const full = m[1]!

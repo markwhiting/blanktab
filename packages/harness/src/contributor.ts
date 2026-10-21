@@ -78,20 +78,28 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     return shaOf((await api.call("GET", `/repos/${UPSTREAM}/git/ref/heads/main`)).body, "ref")
   }
 
-  /** The learner's open PR, or null. Only an OPEN PR counts: once the gate merges or closes one, later logs need a fresh PR. */
-  async function openPr(api: Api, owner: string, learnerId: string): Promise<{ number: number } | null> {
+  /** Whether the learner has an OPEN PR. Only an open one counts: once the gate merges or closes one, later logs need a fresh PR. */
+  async function hasOpenPr(api: Api, owner: string, learnerId: string): Promise<boolean> {
     const head = `${owner}:${branchOf(learnerId)}`
     const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=open`)
-    const first = Array.isArray(found.body) ? (found.body[0] as { number?: unknown } | undefined) : undefined
-    return first ? { number: typeof first.number === "number" ? first.number : 0 } : null
+    return Array.isArray(found.body) && found.body.length > 0
   }
-  const hasOpenPr = async (api: Api, owner: string, learnerId: string) => (await openPr(api, owner, learnerId)) !== null
 
-  /** How many more files the open PR may take before it passes the gate's cap (MAX_PR_FILES). */
-  async function room(api: Api, pr: { number: number }): Promise<number> {
-    const body = (await api.call("GET", `/repos/${UPSTREAM}/pulls/${pr.number}`)).body as { changed_files?: unknown } | null
-    const n = typeof body?.changed_files === "number" ? body.changed_files : 0
-    return Math.max(0, MAX_PR_FILES - n)
+  /**
+   * How many more files an open PR may take before it passes the gate's cap (MAX_PR_FILES). The count comes from the
+   * branch head itself (compare with main), so it cannot lag a commit just pushed. Fails closed: if the count cannot
+   * be read, the answer is 0 and the files wait for the next flush.
+   */
+  async function room(api: Api, owner: string, learnerId: string): Promise<number> {
+    try {
+      const r = await api.call("GET", `/repos/${UPSTREAM}/compare/main...${owner}:${branchOf(learnerId)}`, undefined, [404])
+      const files = (r.body as { files?: unknown } | null)?.files
+      if (r.status !== 200 || !Array.isArray(files)) return 0
+      return Math.max(0, MAX_PR_FILES - files.length)
+    } catch (e) {
+      if (e instanceof GitHubError && (e.status === 401 || e.status === 403 || e.rateLimited)) throw e
+      return 0
+    }
   }
 
   /**
@@ -163,10 +171,9 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const owner = dest.split("/")[0]!
     for (const [id, files] of byLearner) {
       files.sort((a, b) => a.seq - b.seq)
-      const pr = await openPr(api, owner, id)
-      const prOpen = pr !== null
+      const prOpen = await hasOpenPr(api, owner, id)
       // Never let an open PR pass the gate's file cap: send the oldest files that fit, the rest wait for the merge.
-      const fit = pr ? await room(api, pr) : MAX_PR_FILES
+      const fit = prOpen ? await room(api, owner, id) : MAX_PR_FILES
       files.splice(fit)
       if (files.length === 0) continue
       status("sending", `Sending ${files.length} session log${files.length === 1 ? "" : "s"} of learner ${id}…`, pending.length)

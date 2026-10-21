@@ -243,6 +243,43 @@ describe("contributor: the PR file cap", () => {
   })
 })
 
+describe("contributor: the PR file cap fails closed", () => {
+  it("the count comes from the branch head: a lagging PR.changed_files cannot push a PR past 16", async () => {
+    const t = await setup({ files: 10 })
+    await t.c.flush()
+    t.gh.interceptors.push(r => {
+      const m = new URL(r.url).pathname.match(/\/pulls\/(\d+)$/)
+      return r.method === "GET" && m ? new Response(JSON.stringify({ number: 1, changed_files: 0 }), { status: 200 }) : undefined
+    })
+    for (let s = 10; s < 20; s++) await t.queue.put(mkFile(ID, s))
+    await t.c.flush()
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+  })
+
+  for (const [name, res] of [
+    ["has no files field", () => new Response(JSON.stringify({}), { status: 200 })],
+    ["files is not a list", () => new Response(JSON.stringify({ files: "many" }), { status: 200 })],
+    ["fails with a 500", () => new Response("{}", { status: 500 })],
+  ] as const) {
+    it(`an unreadable count (compare ${name}) commits nothing that flush, and the next flush recovers`, async () => {
+      const t = await setup({ files: 2 })
+      await t.c.flush()
+      await t.queue.put(mkFile(ID, 2))
+      let broken = true
+      t.gh.interceptors.push(r => (broken && r.method === "GET" && new URL(r.url).pathname.includes("/compare/") ? res() : undefined))
+      t.gh.requests.length = 0
+      await t.c.flush()
+      expect(writes(t.gh.requests)).toEqual([])
+      expect((await t.queue.pending()).map(f => f.seq)).toEqual([2])
+      broken = false
+      await t.c.flush()
+      expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(3)
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+})
+
 describe("contributor: no push access", () => {
   it("creates a fork first, polls until ready, writes to the fork, PR goes to upstream", async () => {
     const t = await setup({ canPush: false, files: 2 })

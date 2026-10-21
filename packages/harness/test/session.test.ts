@@ -8,7 +8,7 @@ import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/che
 import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
-import { DEFAULT_CHECKPOINT_EVERY_MS, FIRST_LOG_CU, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
+import { DEFAULT_CHECKPOINT_EVERY_MS, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -179,10 +179,12 @@ describe("session v2", { timeout: 60_000 }, () => {
     }
   })
 
-  it("at the speed cap (2.4 CU/s) no hour holds more than 10 logs past the first 7 early ones", () => {
-    const CU_PER_SEC = 2.4
+  it("at the speed cap (30 steps/s) no hour holds more than 10 logs past the first 7 early ones", () => {
+    // The speed cap in CU/s: DEFAULT_MAX_STEPS_PER_SEC steps/s at the most CU a step costs at the widest widths (0.08, which gives the 2.4 CU/s the schedule was sized for).
+    const MAX_CU_PER_STEP = 0.08
+    const CU_PER_SEC = DEFAULT_MAX_STEPS_PER_SEC * MAX_CU_PER_STEP
     const times: number[] = []
-    for (const t of logThresholds()) { if (t > 200_000) break; if (t > 512) times.push(t / CU_PER_SEC) }
+    for (const t of logThresholds()) { if (t > 200_000) break; if (t > LAST_DOUBLING_CU) times.push(t / CU_PER_SEC) }
     let most = 0
     for (let i = 0; i < times.length; i++) most = Math.max(most, times.filter(x => x >= times[i]! && x < times[i]! + 3600).length)
     expect(most).toBeLessThanOrEqual(10)
