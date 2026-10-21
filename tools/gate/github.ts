@@ -79,7 +79,7 @@ export function labelNeedsHuman(repo: string, n: number): void {
   gh(["pr", "edit", String(n), "--repo", repo, "--add-label", "needs-human"])
 }
 /** Drafts cannot be merged, so mark ready first. --match-head-commit refuses to merge if the head moved since validation. */
-export function mergePr(repo: string, n: number, headSha: string): void {
-  gh(["pr", "ready", String(n), "--repo", repo])
-  gh(["pr", "merge", String(n), "--repo", repo, "--squash", "--delete-branch", "--match-head-commit", headSha])
+export function mergePr(repo: string, n: number, headSha: string, ghFn: (args: string[]) => Buffer = gh): void {
+  ghFn(["pr", "ready", String(n), "--repo", repo])
+  ghFn(["pr", "merge", String(n), "--repo", repo, "--squash", "--delete-branch", "--match-head-commit", headSha])
 }

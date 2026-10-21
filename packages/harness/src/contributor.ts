@@ -181,6 +181,9 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       const changed = await commitFiles(api, dest, id, parent, files)
       // Unchanged with no open PR: a fresh branch from main already holds these files, i.e. they were merged.
       if (!prOpen && changed) await createPr(api, dest, owner, id)
+      // The gate merges every hour and may have merged the PR between the check above and our push. Then the commit
+      // sits on a branch with no open PR: keep the files queued; the next send starts a fresh branch from main.
+      if (prOpen && changed && !(await hasOpenPr(api, owner, id))) throw new Wait(BACKOFF_START_MS, "The pull request was merged while sending")
       // Only now, with the commit and an open PR both in place (or the files already on main), are they sent.
       for (const f of files) await queue.markSent(f.learnerId, f.seq)
     }

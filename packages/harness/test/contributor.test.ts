@@ -212,6 +212,84 @@ describe("contributor: fresh branch after merge (brief item 13)", () => {
   })
 })
 
+describe("contributor: the gate merges on a schedule (Review Focus 3)", () => {
+  type T = Awaited<ReturnType<typeof setup>>
+  const feed = async (t: T, seqs: number[]) => { for (const s of seqs) await t.queue.put(mkFile(ID, s)) }
+  /** What the gate does: validate the head, then `gh pr merge --match-head-commit <that head>`. Returns the files that PR carried. */
+  const gateMerge = (t: T, i: number, deleteBranch = true): string[] => {
+    const pr = t.gh.pulls[i]!
+    const carried = t.gh.prFiles(pr)
+    t.gh.merge(pr, { deleteBranch, matchHeadCommit: t.gh.headOf(pr)! })
+    return carried
+  }
+
+  for (const canPush of [true, false]) {
+    it(`${canPush ? "push" : "fork"}: merge (branch deleted), more logs, flush: a new PR; every file on exactly one PR, three cycles`, async () => {
+      const t = await setup({ canPush, files: 0 })
+      const carried: string[] = []
+      let next = 0
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await feed(t, [next, next + 1])
+        next += 2
+        await t.c.flush()
+        expect(t.gh.pulls).toHaveLength(cycle + 1)
+        expect(t.gh.pulls[cycle]).toMatchObject({ state: "open", draft: true })
+        carried.push(...gateMerge(t, cycle))
+        expect(t.gh.repos.get(canPush ? UP : "ann/learner")!.branches.has(BR)).toBe(false)
+      }
+      expect(carried.sort()).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]))
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]))
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+
+  it("race: a tab commits after the gate validated; the pinned merge fails, the PR keeps every file, next run merges it", async () => {
+    const t = await setup({ files: 0 })
+    await feed(t, [0, 1])
+    await t.c.flush()
+    const validated = t.gh.headOf(t.gh.pulls[0]!)!
+    await feed(t, [2])
+    await t.c.flush() // the tab pushes while the gate is between validating and merging
+    expect(() => t.gh.merge(t.gh.pulls[0]!, { deleteBranch: true, matchHeadCommit: validated })).toThrow(/Head branch was modified/)
+    expect(t.gh.pulls[0]!.state).toBe("open")
+    expect(t.gh.paths(UP, "main")).toEqual([])
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2]))
+    const first = gateMerge(t, 0) // next run validates the new head and merges
+    expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2]))
+    await feed(t, [3])
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(2)
+    expect([...first, ...t.gh.prFiles(t.gh.pulls[1]!)].sort()).toEqual(logPaths(ID, [0, 1, 2, 3]))
+  })
+
+  for (const deleteBranch of [true, false]) {
+    it(`race: the gate merges (branch ${deleteBranch ? "deleted" : "kept"}) while the tab is committing; no file is lost or duplicated`, async () => {
+      const t = await setup({ files: 0 })
+      await feed(t, [0, 1])
+      await t.c.flush()
+      await feed(t, [2, 3])
+      // The tab has seen an open PR and is about to commit; the gate merges at exactly that moment.
+      const carried: string[] = []
+      let fired = false
+      t.gh.interceptors.push(r => {
+        if (!fired && r.method === "POST" && new URL(r.url).pathname.endsWith("/git/blobs")) {
+          fired = true
+          carried.push(...gateMerge(t, 0, deleteBranch))
+        }
+        return undefined
+      })
+      await t.c.flush()
+      // Whatever the tab did, the files it still owes reach a PR on later flushes (retry timers included).
+      for (let i = 0; i < 3; i++) { for (const fn of t.timers.splice(0)) fn(); await t.c.flush() }
+      expect(await t.queue.pending()).toEqual([])
+      for (let i = 1; i < t.gh.pulls.length; i++) if (t.gh.pulls[i]!.state === "open") carried.push(...gateMerge(t, i, deleteBranch))
+      expect(fired).toBe(true)
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2, 3]))
+      expect(carried.sort()).toEqual(logPaths(ID, [0, 1, 2, 3]))
+    })
+  }
+})
+
 describe("contributor: the PR file cap", () => {
   it("20 pending files: the first PR gets 16, the other 4 wait for the merge and then go in a fresh PR", async () => {
     const t = await setup({ files: 20 })

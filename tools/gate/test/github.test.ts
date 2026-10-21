@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { bytesToContent, statusErrors, loadFile, loadPr, MAX_PR_FILES } from "../github.ts"
+import { bytesToContent, statusErrors, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -61,5 +61,23 @@ describe("loadPr budget", () => {
     })
     expect(r.loadErrors).toEqual([])
     expect(r.files).toHaveLength(16)
+  })
+})
+
+describe("mergePr", () => {
+  it("marks ready, then squash-merges pinned to the validated head commit", () => {
+    const calls: string[][] = []
+    mergePr("o/r", 7, "abc123", args => { calls.push(args); return Buffer.from("") })
+    expect(calls).toEqual([
+      ["pr", "ready", "7", "--repo", "o/r"],
+      ["pr", "merge", "7", "--repo", "o/r", "--squash", "--delete-branch", "--match-head-commit", "abc123"],
+    ])
+  })
+  it("a head that moved since validation: the merge error propagates (the caller logs it and retries next run)", () => {
+    const ghFn = (args: string[]): Buffer => {
+      if (args[1] === "merge") throw new Error("Head branch was modified")
+      return Buffer.from("")
+    }
+    expect(() => mergePr("o/r", 7, "abc123", ghFn)).toThrow("Head branch was modified")
   })
 })

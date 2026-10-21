@@ -185,8 +185,22 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     paths: (repo: string, branch: string): string[] => [...(branchTree(repo, branch)?.keys() ?? [])].sort(),
     /** Sorted paths a PR proposes (head vs. merge base with main). */
     prFiles: (pr: Pull): string[] => [...diff(pr).keys()].sort(),
-    /** Squash-merges a PR into upstream main, like the gate does; optionally deletes the head branch. */
-    merge(pr: Pull, o: { deleteBranch: boolean }): void {
+    /** Head commit of a PR's branch (what `gh pr merge --match-head-commit` compares against). */
+    headOf: (pr: Pull): string | undefined => {
+      const [owner, branch] = pr.head.split(":") as [string, string]
+      return repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+    },
+    /**
+     * Squash-merges a PR into upstream main, like the gate does; optionally deletes the head branch.
+     * With matchHeadCommit it refuses (throws, merging nothing) when the branch head is no longer that commit.
+     */
+    merge(pr: Pull, o: { deleteBranch: boolean; matchHeadCommit?: string }): void {
+      if (pr.state === "closed") throw new Error("PR is not open")
+      if (o.matchHeadCommit !== undefined) {
+        const [owner, branch] = pr.head.split(":") as [string, string]
+        const head = repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+        if (head !== o.matchHeadCommit) throw new Error("Head branch was modified. Review and try the merge again.")
+      }
       const main = upstream.branches.get("main")!
       const t = new Map(treeOf(main))
       for (const [path, sha] of diff(pr)) t.set(path, sha)

@@ -12,10 +12,6 @@ export interface OpenPr {
   headRef: string
   /** branch the PR targets; only main is acceptable */
   baseRef: string
-  /** PR updatedAt, the fallback activity time when no log in the PR has a usable writtenAt */
-  updatedAt: Date | null
-  /** PR createdAt: a session PR is decided once it has been open longer than MAX_AGE_MS */
-  createdAt: Date | null
   files: PrFile[]
   previous: LogFile[]
   /** problems found while loading the PR (e.g. removed/renamed files); any entry closes the PR */
@@ -23,10 +19,8 @@ export interface OpenPr {
   /** head commit that was validated; merging is pinned to it */
   headSha?: string
 }
-export type GateDecision = { pr: number; action: "merge" | "wait" | "close" | "label-needs-human"; reason: string }
+export type GateDecision = { pr: number; action: "merge" | "close" | "label-needs-human"; reason: string }
 
-const STALE_MS = 48 * 3_600_000
-const MAX_AGE_MS = 7 * 24 * 3_600_000
 export const DEV_BUILD_REASON = "Development builds don't contribute."
 
 const LOG_PATH_RE = /^data\/runs\/[^/]+\/\d+\.json$/
@@ -37,17 +31,12 @@ function logsIn(files: PrFile[]): LogFile[] {
   })
 }
 
-/** Newest writtenAt among the PR's logs, ignoring future-dated ones; null when there is none (caller falls back to updatedAt). */
-export function activityFromFiles(files: PrFile[], now: Date): Date | null {
-  let newest: Date | null = null
-  for (const l of logsIn(files)) {
-    const t = new Date(l.writtenAt)
-    if (t <= now && (newest === null || t > newest)) newest = t
-  }
-  return newest
-}
-
-export function decide(prs: OpenPr[], now: Date): GateDecision[] {
+/**
+ * Learners live as long as their tab (decision 0014), so there is no "final" or "gone quiet" signal to wait for:
+ * every valid session PR is merged each run. A tab that pushes after validation makes the head-pinned merge fail;
+ * the PR stays open and is validated again next run.
+ */
+export function decide(prs: OpenPr[]): GateDecision[] {
   return prs.map((pr): GateDecision => {
     if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
     if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
@@ -59,11 +48,7 @@ export function decide(prs: OpenPr[], now: Date): GateDecision[] {
     }
     const logs = logsIn(pr.files)
     if (logs.some(l => l.codeSha === "dev")) return { pr: pr.number, action: "close", reason: DEV_BUILD_REASON }
-    if (logs.some(l => l.final)) return { pr: pr.number, action: "merge", reason: "valid, session is final" }
-    if (pr.createdAt && now.getTime() - pr.createdAt.getTime() > MAX_AGE_MS) return { pr: pr.number, action: "merge", reason: "valid, open longer than 7 days" }
-    const active = activityFromFiles(pr.files, now) ?? pr.updatedAt
-    if (active && now.getTime() - active.getTime() > STALE_MS) return { pr: pr.number, action: "merge", reason: "valid, newest log older than 48 h" }
-    return { pr: pr.number, action: "wait", reason: active ? "valid, session still active" : "valid, no activity time and not final" }
+    return { pr: pr.number, action: "merge", reason: "valid" }
   })
 }
 
@@ -78,12 +63,12 @@ function main(): void {
       const loaded = loadPr(repo, listed.number)
       const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })
-      prs.push({ number: listed.number, headRef: loaded.headRef, baseRef: loaded.baseRef, updatedAt: new Date(listed.updatedAt), createdAt: new Date(listed.createdAt), files: loaded.files, previous, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
+      prs.push({ number: listed.number, headRef: loaded.headRef, baseRef: loaded.baseRef, files: loaded.files, previous, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
     } catch (e) {
       console.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
     }
   }
-  const decisions = decide(prs, new Date())
+  const decisions = decide(prs)
   let merged = 0
   const mergedLearners = new Set<string>()
   for (const d of decisions) {
