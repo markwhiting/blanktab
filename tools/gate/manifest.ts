@@ -21,13 +21,16 @@ export function computeKnowledgeSha(dir: string): string {
   return h.digest("hex")
 }
 
-/** Paths whose changes are not code: session logs merged by the gate, and notes. */
-export const NOT_CODE = ["data/runs", "docs"] as const
+/**
+ * Paths whose changes are not code: session logs merged by the gate, notes, and the shared knowledge (it reaches
+ * running learners by refresh, not reload, and its changes are tracked by knowledgeSha).
+ */
+export const NOT_CODE = ["data/runs", "docs", "knowledge"] as const
 
 /**
  * The code a build is made of: the last commit under `repoDir` that changed anything but NOT_CODE, or "dev" without
  * one (no git, no commits). The page bakes it in, the manifest carries it and every log file records it, so a merged
- * batch of session logs (or a docs edit) is not new code: tabs do not reload for it, and Plan 05's constant-code
+ * batch of session logs (or a docs or knowledge edit) is not new code: tabs do not reload for it, and Plan 05's constant-code
  * segments stay whole. Needs the history back to that commit (deploy.yml checks out with fetch-depth 0).
  */
 export function codeShaOf(repoDir: string): string {

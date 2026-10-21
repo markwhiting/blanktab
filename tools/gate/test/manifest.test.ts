@@ -36,7 +36,7 @@ describe("computeKnowledgeSha", () => {
   })
 })
 
-describe("codeShaOf: the last commit that changed code (anything but data/runs and docs)", () => {
+describe("codeShaOf: the last commit that changed code (anything but data/runs, docs and knowledge)", () => {
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim()
   const commit = (path: string, text: string) => {
     mkdirSync(join(dir, path, ".."), { recursive: true })
@@ -59,10 +59,10 @@ describe("codeShaOf: the last commit that changed code (anything but data/runs a
     expect(codeShaOf(dir)).toBe(next)
     expect(next).toMatch(/^[0-9a-f]{40}$/)
   })
-  it("knowledge/ is not excluded (a knowledge-only commit is still a deploy of new inputs)", () => {
-    commit("app/a.ts", "1")
-    const k = commit("knowledge/settings-space.json", "{}")
-    expect(codeShaOf(dir)).toBe(k)
+  it("a knowledge/-only commit leaves it unchanged (knowledge reaches learners by refresh, tracked by knowledgeSha)", () => {
+    const code = commit("app/a.ts", "1")
+    commit("knowledge/settings-space.json", "{}")
+    expect(codeShaOf(dir)).toBe(code)
   })
   it("is dev outside a git repository or with no commits", () => {
     expect(codeShaOf(dir)).toBe("dev") // git init, nothing committed
