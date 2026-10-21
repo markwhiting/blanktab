@@ -23,8 +23,12 @@ export interface LogFileV1 {
 export interface CurvePoint { cu: number; steps: number; predLoss: number; baselineLoss: number; heldOut?: HeldOutScore }
 export interface HeldOutScore { loss: number; baseline: number }
 
-/** Bound on a held-out loss in a log file (a mean squared error of pixel values in [0, 1] predicted near [0, 1]). */
-export const MAX_HELD_OUT_LOSS = 100
+/**
+ * What a curve point's losses must be (predLoss, baselineLoss, heldOut.loss, heldOut.baseline): a finite number >= 0.
+ * The one rule, shared by the writer (session curvePoint) and the parser, so a file the tab writes always parses. No
+ * upper bound: a diverged learner's result is kept on the record (AGENTS.md invariant 7).
+ */
+export const isCurveLoss = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0
 
 /** At most this many curve points per log file (the points since the previous file, thinned if need be). */
 export const MAX_CURVE_POINTS = 64
@@ -201,7 +205,7 @@ export function parseLogFile(json: unknown): ParseResult {
     if (!isObj(p)) return fail(`curve[${i}] must be an object`)
     const pk = unknownKey(p, CURVE_KEYS, `curve[${i}]`)
     if (pk) return fail(pk)
-    if (!isNonNeg(p.cu) || !isNonNegInt(p.steps) || !isNonNeg(p.predLoss) || !isNonNeg(p.baselineLoss)) {
+    if (!isNonNeg(p.cu) || !isNonNegInt(p.steps) || !isCurveLoss(p.predLoss) || !isCurveLoss(p.baselineLoss)) {
       return fail(`curve[${i}]: cu, predLoss and baselineLoss must be finite numbers >= 0 and steps a non-negative integer`)
     }
     const prev = curve[i - 1]
@@ -213,9 +217,7 @@ export function parseLogFile(json: unknown): ParseResult {
       if (!isObj(h)) return fail(`curve[${i}].heldOut must be an object`)
       const hk = unknownKey(h, HELD_OUT_KEYS, `curve[${i}].heldOut`)
       if (hk) return fail(hk)
-      if (!(isNonNeg(h.loss) && h.loss <= MAX_HELD_OUT_LOSS && isNonNeg(h.baseline) && h.baseline <= 1)) {
-        return fail(`curve[${i}].heldOut: loss must be a finite number in [0, ${MAX_HELD_OUT_LOSS}] and baseline one in [0, 1]`)
-      }
+      if (!(isCurveLoss(h.loss) && isCurveLoss(h.baseline))) return fail(`curve[${i}].heldOut: loss and baseline must be finite numbers >= 0`)
       heldOut = { loss: h.loss, baseline: h.baseline }
     }
     curve.push({ cu: p.cu, steps: p.steps, predLoss: p.predLoss, baselineLoss: p.baselineLoss, ...(heldOut ? { heldOut } : {}) })

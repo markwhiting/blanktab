@@ -4,7 +4,7 @@ import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CURVE_POINTS, MAX_RESTORES, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MAX_RESTORES, isCurveLoss, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
 
 export const DEFAULT_SLEEP_INTERVAL = 250
@@ -195,15 +195,19 @@ class Interrupted {
 }
 
 /**
- * The curve point of a sleep at `steps`, from the learner's stats: its own-stream losses and, when the learner scored
- * a held-out set (both finite), that score (decision 0015 §3). Null while either own-stream loss is not finite: never
- * NaN in a log. The one place a point is made (the session's log and the page's live curve).
+ * The curve point at `steps`, from the learner's stats: its own-stream losses and, at a sleep (`atSleep`, the default),
+ * the held-out score that sleep just made, if the learner has one (decision 0015 §3). A point between sleeps (the end
+ * of a life) carries no score: it would only repeat the last one. Null unless both own-stream losses pass isCurveLoss,
+ * and the score is left out unless both of its values do: the same rule the parser applies, so every point written
+ * parses. The one place a point is made (the session's log and the page's live curve).
  */
-export function curvePoint(st: Pick<LearnerStats, "cu" | "predLoss" | "baselineLoss" | "heldOutLoss" | "heldOutBaseline">, steps: number): CurvePoint | null {
+export function curvePoint(
+  st: Pick<LearnerStats, "cu" | "predLoss" | "baselineLoss" | "heldOutLoss" | "heldOutBaseline">, steps: number, atSleep = true,
+): CurvePoint | null {
   const { cu, predLoss, baselineLoss, heldOutLoss, heldOutBaseline } = st
-  if (!Number.isFinite(predLoss) || !Number.isFinite(baselineLoss)) return null
-  const heldOut = Number.isFinite(heldOutLoss) && Number.isFinite(heldOutBaseline) ? { heldOut: { loss: heldOutLoss, baseline: heldOutBaseline } } : {}
-  return { cu, steps, predLoss, baselineLoss, ...heldOut }
+  if (!isCurveLoss(predLoss) || !isCurveLoss(baselineLoss)) return null
+  const scored = atSleep && isCurveLoss(heldOutLoss) && isCurveLoss(heldOutBaseline)
+  return { cu, steps, predLoss, baselineLoss, ...(scored ? { heldOut: { loss: heldOutLoss, baseline: heldOutBaseline } } : {}) }
 }
 
 /** Keeps every other point, always the newest, until at most MAX_CURVE_POINTS remain. */
@@ -327,7 +331,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const atLeast = (f: LogFileV2): LogFileV2 => !prior ? f : {
       ...f, stepsTotal: Math.max(f.stepsTotal, prior.stepsTotal), cu: Math.max(f.cu, prior.cu), restores: Math.max(f.restores, prior.restores),
       lostCU: Math.max(f.lostCU, prior.lostCU), skippedUpdates: Math.max(f.skippedUpdates, prior.skippedUpdates),
-      ...(f.evalCU !== undefined ? { evalCU: Math.max(f.evalCU, prior.evalCU ?? 0) } : {}),
+      // Never from a number back to absent: a checkpoint without evalCU (an older or stub state) keeps the last file's.
+      ...(f.evalCU !== undefined || prior.evalCU !== undefined ? { evalCU: Math.max(f.evalCU ?? 0, prior.evalCU ?? 0) } : {}),
     }
     /** evalCU, when the stats have it (a learner state from before the held-out check, or a stub, may not). */
     const evalOf = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? { evalCU: v } : {})
@@ -433,8 +438,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU, evalCU: st.evalCU,
         }
       }
-      const addPoint = () => {
-        const p = curvePoint(learner.stats(), steps)
+      const addPoint = (atSleep: boolean) => {
+        const p = curvePoint(learner.stats(), steps, atSleep)
         if (!p || curve.at(-1)?.steps === steps) return
         curve = thin([...curve, p])
       }
@@ -469,7 +474,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         let checkpointDue = false
         if (steps % sleepInterval === 0) {
           await learner.sleep()
-          addPoint()
+          addPoint(true)
           checkpointDue = true
         }
         const st = learner.stats()
@@ -542,7 +547,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: true }
       }
 
-      addPoint()
+      addPoint(false) // the end of the life: no sleep here, so no held-out score of its own
       const end = logFile(true)
       await queue.put(end, { remove: id })
       cp = undefined // the life is over: nothing left to fail

@@ -782,6 +782,34 @@ describe("the held-out check (decision 0015 §3)", { timeout: 60_000 }, () => {
     expect(be.stats.liveBuffers).toBe(0)
   })
 
+  it("a sleep that fails part-way (the device refuses an allocation) leaks nothing: replay and scoring free what they made", async () => {
+    const make = async (failAt: number) => {
+      const be = createCpuBackend()
+      const { upload, zeros } = be
+      let k = 0, armed = false
+      const take = () => { if (armed && ++k === failAt) throw new Error("device lost") }
+      Object.assign(be, { upload: (d: Float32Array) => { take(); return upload(d) }, zeros: (m: number) => { take(); return zeros(m) } })
+      const l = await createLearner({ backend: be, seed: 25, widths: TINY, settings: { ...DEFAULT_SETTINGS, replayPerSleep: 2 }, heldOut: syntheticHeldOut(3, 3) })
+      const w = createSyntheticStream()
+      for (let i = 0; i < 4; i++) w.act(await l.step(w.observe()))
+      const before = be.stats.liveBuffers
+      armed = true
+      return { be, l, before, count: () => k }
+    }
+    const probe = await make(0)
+    await probe.l.sleep()
+    const n = probe.count()
+    expect(n).toBeGreaterThan(20)
+    probe.l.dispose()
+    for (let failAt = 1; failAt <= n; failAt++) {
+      const { be, l, before } = await make(failAt)
+      await expect(l.sleep(), `failing at allocation ${failAt}`).rejects.toThrow("device lost")
+      expect(be.stats.liveBuffers, `failing at allocation ${failAt}`).toBe(before)
+      l.dispose()
+      expect(be.stats.liveBuffers).toBe(0)
+    }
+  })
+
   it("keeps liveBuffers flat across sleeps that score it", async () => {
     const be = createCpuBackend()
     const learner = await createLearner({ backend: be, seed: 24, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET })

@@ -532,10 +532,12 @@ export async function createLearner(opts: {
    * Size-weighted MSE of predict(core(inputs, hIn), action, base) against y. `base` is the targets of the frame
    * `inputs` came from (residual predictor). Builds a graph unless under noGrad.
    */
-  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) => {
-    const p = model.predict(model.core(inputs, hIn), action, base)
-    return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
-  }
+  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) =>
+    // A composite: if building it fails part-way, everything it made is freed (nothing unreachable is left).
+    composite(() => {
+      const p = model.predict(model.core(inputs, hIn), action, base)
+      return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
+    })
 
   /** −logπ(a)·A + (target − V)² − β·H(π) on the heads at the detached h. `adv` is stopgrad(target − V). */
   const actorCriticLoss = (hPrev: Tensor, action: Action, target: number) => {
@@ -560,13 +562,26 @@ export async function createLearner(opts: {
 
   /** Builds the replay of one transition: its prediction loss (a graph unless under noGrad) and the constants it used. */
   const replayed = (tr: Transition) => {
-    const inputs = upload(obsToInputs(tr.obs))
-    const base = targetTensors(targetsFromObs(tr.obs))
-    const y = targetTensors(targetsFromObs(tr.next))
-    const hT = hTensor(tr.hIn)
-    const aT = t(actionOneHot(tr.action), [1, ACTION_DIM])
-    const free = () => { for (const x of [inputs.periphery, inputs.fovea, inputs.proprio, base.periphery, base.fovea, y.periphery, y.fovea, hT, aT]) x.dispose() }
-    return { loss: () => predictionLoss(inputs, hT, aT, base, y), free }
+    // Every constant is freed by `free`, and all of them if an upload fails part-way (nothing is left half-made).
+    const made: Tensor[] = []
+    const free = () => { for (const x of made.splice(0)) x.dispose() }
+    const T = (d: Float32Array, shape: number[]) => { const x = t(d, shape); made.push(x); return x }
+    try {
+      const ins = obsToInputs(tr.obs), b = targetsFromObs(tr.obs), n = targetsFromObs(tr.next)
+      const inputs: InputTensors = {
+        periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
+        fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
+        proprio: T(ins.proprio, [1, 3]),
+      }
+      const base = { periphery: T(b.periphery, [1, PRED_P]), fovea: T(b.fovea, [1, PRED_F]) }
+      const y = { periphery: T(n.periphery, [1, PRED_P]), fovea: T(n.fovea, [1, PRED_F]) }
+      const hT = T(tr.hIn, [1, widths.hidden])
+      const aT = T(actionOneHot(tr.action), [1, ACTION_DIM])
+      return { loss: () => predictionLoss(inputs, hT, aT, base, y), free }
+    } catch (e) {
+      free()
+      throw e
+    }
   }
 
   async function sleepNow(): Promise<void> {
@@ -574,17 +589,21 @@ export async function createLearner(opts: {
     for (let k = 0; k < settings.replayPerSleep && replay.size > 0; k++) {
       const tr = replay.at(Math.min(replay.size - 1, Math.floor(rng() * replay.size)))
       const r = replayed(tr)
-      const loss = r.loss()
-      const l = await scalar(loss)
-      const ok = Number.isFinite(l)
-      if (ok) {
-        backward(loss)
-        opt.step()
-        opt.zeroGrad()
+      let loss: Tensor | null = null
+      try {
+        loss = r.loss()
+        const l = await scalar(loss)
+        const ok = Number.isFinite(l)
+        if (ok) {
+          backward(loss)
+          opt.step()
+        }
+        countUpdate(ok)
+      } finally {
+        opt.zeroGrad() // also after a failure part-way through backward: no parameter keeps a stray gradient
+        if (loss) disposeGraph(loss, [])
+        r.free()
       }
-      disposeGraph(loss, [])
-      r.free()
-      countUpdate(ok)
     }
     stats.sleeps++
     stats.cu += (backend.stats.flops - flops0) / 1e9
@@ -599,43 +618,49 @@ export async function createLearner(opts: {
     if (!heldOut) return
     const flops0 = backend.stats.flops
     const n = heldOut.actions.length
-    let hh = model.zeroState()
-    let total: Tensor | null = null
-    const made: Tensor[] = []
+    /** Every tensor this scoring holds right now (freed at the end, or on any failure: nothing leaks). */
+    const held = new Set<Tensor>()
+    const keep = <T extends Tensor>(x: T): T => { held.add(x); return x }
+    const drop = (...xs: Tensor[]) => { for (const x of xs) { held.delete(x); x.dispose() } }
+    const T = (d: Float32Array, shape: number[]) => keep(t(d, shape))
+    const targetsOf = (o: Observation): TargetTensors => {
+      const y = targetsFromObs(o)
+      return { periphery: T(y.periphery, [1, PRED_P]), fovea: T(y.fovea, [1, PRED_F]) }
+    }
     try {
-      let base = targetTensors(targetsFromObs(heldOut.obs[0]!))
-      made.push(base.periphery, base.fovea)
+      let hh = keep(model.zeroState())
+      let total: Tensor | null = null
+      let base = targetsOf(heldOut.obs[0]!)
       for (let i = 0; i < n; i++) {
-        const inputs = upload(obsToInputs(heldOut.obs[i]!))
-        const y = targetTensors(targetsFromObs(heldOut.obs[i + 1]!))
-        const aT = t(actionOneHot(heldOut.actions[i]!), [1, ACTION_DIM])
-        made.push(inputs.periphery, inputs.fovea, inputs.proprio, y.periphery, y.fovea, aT)
+        const ins = obsToInputs(heldOut.obs[i]!)
+        const inputs: InputTensors = {
+          periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
+          fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
+          proprio: T(ins.proprio, [1, 3]),
+        }
+        const y = targetsOf(heldOut.obs[i + 1]!)
+        const aT = T(actionOneHot(heldOut.actions[i]!), [1, ACTION_DIM])
         const h0 = hh
-        const hNext = noGrad(() => composite(() => model.core(inputs, h0)))
-        h0.dispose()
+        const hNext = keep(noGrad(() => composite(() => model.core(inputs, h0))))
+        drop(h0)
         hh = hNext
         const b = base
-        const li = noGrad(() => composite(() => {
+        const li = keep(noGrad(() => composite(() => {
           const p = model.predict(hNext, aT, b)
           return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
-        }))
+        })))
         const prev: Tensor | null = total
-        total = prev ? noGrad(() => composite(() => add(prev, li))) : li
-        if (prev) { prev.dispose(); li.dispose() }
+        total = prev ? keep(noGrad(() => composite(() => add(prev, li)))) : li
+        if (prev) drop(prev, li) // li is held until it is merged into the running total
         // This step's constants are done with, except y: it is the next transition's base.
-        for (const x of [b.periphery, b.fovea, inputs.periphery, inputs.fovea, inputs.proprio, aT]) x.dispose()
-        made.length = 0
-        made.push(y.periphery, y.fovea)
+        drop(b.periphery, b.fovea, inputs.periphery, inputs.fovea, inputs.proprio, aT)
         base = y
       }
-      const sum = await scalar(total!)
-      const loss = sum / n
+      const loss = (await scalar(total!)) / n
       stats.heldOutLoss = Number.isFinite(loss) ? loss : Number.NaN
       stats.heldOutBaseline = heldOutCopyLast
     } finally {
-      for (const x of made) x.dispose()
-      total?.dispose()
-      hh.dispose()
+      for (const x of held) x.dispose()
       stats.evalCU += (backend.stats.flops - flops0) / 1e9
     }
   }
@@ -644,10 +669,16 @@ export async function createLearner(opts: {
     let total = 0
     for (const tr of replay.toArray()) {
       const r = replayed(tr)
-      const loss = noGrad(() => composite(r.loss))
-      total += await scalar(loss)
-      loss.dispose()
-      r.free()
+      try {
+        const loss = noGrad(() => composite(r.loss))
+        try {
+          total += await scalar(loss)
+        } finally {
+          loss.dispose()
+        }
+      } finally {
+        r.free()
+      }
     }
     return replay.size > 0 ? total / replay.size : Number.NaN
   }

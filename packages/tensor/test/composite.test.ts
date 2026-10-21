@@ -219,3 +219,20 @@ describe("composites leave no unreachable intermediates (non-grad inputs)", () =
     x.dispose()
   })
 })
+
+describe("a composite that throws part-way leaves nothing behind", () => {
+  it("frees what it made (graph nodes and constants alike, never an outside tensor), and so does a nested one", async () => {
+    const w = param(Float32Array.of(1, 2, 3, 4), [2, 2])
+    const x = tensor(Float32Array.of(1, 1, 1, 1), [2, 2])
+    const be = x.backend
+    const live = be.stats.liveBuffers
+    const boom = () => { throw new Error("device lost") }
+    expect(() => composite(() => { const y = relu(matmul(x, w)); reshape(y, [4]); return boom() })).toThrow("device lost")
+    expect(be.stats.liveBuffers).toBe(live)
+    expect(() => noGrad(() => composite(() => { matmul(x, x); return composite(() => { relu(x); return boom() }) }))).toThrow("device lost")
+    expect(be.stats.liveBuffers).toBe(live)
+    expect(() => composite(() => { reshape(x, [4]); return boom() })).toThrow("device lost") // a view of x: x survives
+    expect(be.stats.liveBuffers).toBe(live)
+    expect([...await x.read()]).toEqual([1, 1, 1, 1])
+  })
+})

@@ -135,7 +135,7 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(gh.prFiles(gh.pulls[0]!)).toEqual([`data/runs/${id}/0.json`])
   expect(githubCalls().some(r => r.method === "PUT" || r.url.includes("/contents/") || (r.body ?? "").includes("heartbeat"))).toBe(false)
   await expect(page.getByTestId("change-token")).toBeVisible()
-  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; evalCU: number; curve: { predLoss: number; baselineLoss: number; heldOut?: { loss: number; baseline: number } }[]; settings: Record<string, number> }
+  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; evalCU: number; curve: { steps: number; predLoss: number; baselineLoss: number; heldOut?: { loss: number; baseline: number } }[]; settings: Record<string, number> }
   expect(final).toMatchObject({
     schemaVersion: 2, seq: 0, final: true, sessionsSeenAtBirth: 2, knowledgeSha: "c".repeat(64), codeSha: "dev", condition: "A",
     widths: TINY, hostSig: { webgpu: false }, restores: 0, lostCU: 0,
@@ -143,8 +143,14 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(final.cu).toBeGreaterThanOrEqual(LIFETIME_CU)
   expect(final.curve.length).toBeGreaterThan(0)
   for (const p of final.curve) expect(Number.isFinite(p.predLoss) && Number.isFinite(p.baselineLoss)).toBe(true)
-  // Every point (each at a sleep) carries the held-out score; its compute is billed apart from the life's.
-  for (const p of final.curve) expect(p.heldOut!.baseline > 0 && Number.isFinite(p.heldOut!.loss)).toBe(true)
+  // Every point at a sleep (every 5 steps) carries the held-out score, the end-of-life point none; its compute is
+  // billed apart from the life's.
+  const final_ = final.curve
+  expect(final_.some(p => p.heldOut)).toBe(true)
+  for (const p of final_) {
+    if (p.steps % 5 === 0) expect(p.heldOut!.baseline > 0 && Number.isFinite(p.heldOut!.loss)).toBe(true)
+    else expect(p.heldOut).toBeUndefined()
+  }
   expect(final.evalCU).toBeGreaterThan(0)
   expect(final.settings).toMatchObject({ replayPerSleep: 16, bufferSize: 500, maxStepsPerSec: 10 })
   expect(final.settings).not.toHaveProperty("moveProbability")

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { validateSessionPr, type PrFile } from "../validate.ts"
-import { MAX_HELD_OUT_LOSS, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
+import type { CurvePoint, LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
 const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
@@ -290,13 +290,13 @@ describe("validateSessionPr v2: the held-out check's optional fields (decision 0
     expect(errs([file(logV2(0))]).ok).toBe(true)
     expect(errs([file(logV2(1, { evalCU: 0 }))], [logV2(0)]).ok).toBe(true) // a file before the field existed
   })
-  it("heldOut is strict when present: exactly { loss, baseline }, finite, loss in [0, MAX_HELD_OUT_LOSS], baseline in [0, 1]", () => {
+  it("heldOut is strict when present: exactly { loss, baseline }, each finite and >= 0 (no upper bound: a diverged learner's result is kept)", () => {
     const at = (h: unknown) => raw(o => { o.curve[0].heldOut = h })
-    expect(errs([at({ loss: MAX_HELD_OUT_LOSS, baseline: 1 })]).ok).toBe(true)
+    expect(errs([at({ loss: 1e30, baseline: 3 })]).ok).toBe(true)
     expect(errs([at({ loss: 0, baseline: 0 })]).ok).toBe(true)
     expect(msg([at({ loss: 0.1, baseline: 0.1, extra: 1 })])).toContain('unknown key "extra" in curve[0].heldOut')
-    for (const bad of [{ loss: 0.1 }, { baseline: 0.1 }, { loss: -0.1, baseline: 0.1 }, { loss: 0.1, baseline: -0.1 }, { loss: MAX_HELD_OUT_LOSS * 2, baseline: 0.1 },
-      { loss: 0.1, baseline: 1.5 }, { loss: "0.1", baseline: 0.1 }, { loss: null, baseline: 0.1 }, null, [], 0.1]) {
+    for (const bad of [{ loss: 0.1 }, { baseline: 0.1 }, { loss: -0.1, baseline: 0.1 }, { loss: 0.1, baseline: -0.1 },
+      { loss: "0.1", baseline: 0.1 }, { loss: null, baseline: 0.1 }, null, [], 0.1]) {
       expect(msg([at(bad)]), JSON.stringify(bad)).toContain("curve[0].heldOut")
     }
     const f = file(logV2(0, { curve: [{ ...pt(1, 400), ...ho(0.123456, 0.2) }] }))
