@@ -137,6 +137,7 @@ async function main() {
   const rows: Record<string, number>[] = []
   const moveHist = new Map<string, number>()
   let maxCheckErr = 0
+  const movedLog: number[] = [] // per transition: did the cursor move
   let prevObs: Observation | null = null
   let prevAction: Action | null = null
   let prevTargets: Targets | null = null
@@ -159,6 +160,7 @@ async function main() {
       const realDx = Math.round((obs.cursor.x - prevObs.cursor.x) * 320), realDy = Math.round((obs.cursor.y - prevObs.cursor.y) * 200)
       const shF = sq(shiftedFovea(prevObs.fovea, realDx, realDy), y.fovea)
       win.n++; all.n++
+      movedLog.push(realDx !== 0 || realDy !== 0 ? 1 : 0)
       for (const a of [win, all]) {
         a.add("clP", clP); a.add("clF", clF); a.add("cl", W_P * clP + W_F * clF)
         a.add("shF", shF); a.add("shiftOracle", W_P * clP + W_F * shF)
@@ -199,7 +201,11 @@ async function main() {
         const loss = add(scale(lP, W_P), scale(lF, W_F))
         const [vP, vF, vL] = await Promise.all([lP.read(), lF.read(), loss.read()])
         backward(loss)
-        const [gPw, , gFw] = await Promise.all(m.outputParams.map((q) => (q.grad ? q.grad.read() : Promise.resolve(new Float32Array(1)))))
+        const gOut = await Promise.all(m.outputParams.map((q) => (q.grad ? q.grad.read() : Promise.resolve(new Float32Array(q.size)))))
+        const [gPw, , gFw] = gOut
+        // The gradient bar (Task 1, controller ruling): mean |∂L/∂θ| over every element of the residual output layers.
+        let gAbs = 0, gN = 0
+        for (const g of gOut) { for (let k = 0; k < g.length; k++) gAbs += Math.abs(g[k]!); gN += g.length }
         const predHw = m.params[m.params.length - 8]!
         const gH = predHw.grad ? await predHw.grad.read() : new Float32Array(1)
         const lb = lastInfo()?.lossBefore ?? NaN
@@ -210,7 +216,7 @@ async function main() {
           a.add("lP", vP[0]!); a.add("lF", vF[0]!); a.add("l", vL[0]!)
           a.add("clPs", clP); a.add("clFs", clF)
           a.add("zAlive", alive / zv.length)
-          a.add("gHeadP", norm(gPw!)); a.add("gHeadF", norm(gFw!)); a.add("gPredH", norm(gH))
+          a.add("gHeadP", norm(gPw!)); a.add("gHeadF", norm(gFw!)); a.add("gPredH", norm(gH)); a.add("gOutMeanAbs", gAbs / gN)
         }
         win.s.wHeadP = norm(pre[nP - 4]!); win.s.wHeadF = norm(pre[nP - 2]!)
         win.s.bHeadP = norm(pre[nP - 3]!); win.s.bHeadF = norm(pre[nP - 1]!)
@@ -235,7 +241,7 @@ async function main() {
         lF: r("lF"), clF: r("clFs"), ratioF: r("lF") / r("clFs"),
         shiftOracleRatio: win.mean("shiftOracle") / win.mean("cl"),
         chP: win.mean("chP"), chF: win.mean("chF"), moved: win.mean("moved"), move0: win.mean("move0"), btn: win.mean("btn"), key: win.mean("key"),
-        zAlive: r("zAlive"), gHeadP: r("gHeadP"), gHeadF: r("gHeadF"), gPredH: r("gPredH"),
+        zAlive: r("zAlive"), gOutMeanAbs: r("gOutMeanAbs"), gHeadP: r("gHeadP"), gHeadF: r("gHeadF"), gPredH: r("gPredH"),
         wHeadP: win.s.wHeadP ?? NaN, wHeadF: win.s.wHeadF ?? NaN, bHeadP: win.s.bHeadP ?? NaN, bHeadF: win.s.bHeadF ?? NaN,
         sps: step / ((Date.now() - t0) / 1000),
       }
@@ -245,7 +251,7 @@ async function main() {
         `step ${step} cu ${f(row.cu, 1)} | heldout ${f(row.evalRatio, 5)} (P ${f(row.evalRatioP, 4)} F ${f(row.evalRatioF, 4)}) | ema ${f(row.emaRatio, 5)} win ${f(row.winRatio, 5)} | P ${f(row.lP, 6)}/${f(row.clP, 6)}=${f(row.ratioP, 5)}`
         + ` F ${f(row.lF, 6)}/${f(row.clF, 6)}=${f(row.ratioF, 5)} | shiftOracle ${f(row.shiftOracleRatio, 4)}`
         + ` | chP ${f(row.chP, 2)} chF ${f(row.chF, 2)} moved ${f(row.moved, 2)} m0 ${f(row.move0, 2)} btn ${f(row.btn, 2)} key ${f(row.key, 2)}`
-        + ` | zAlive ${f(row.zAlive, 3)} | |g| P ${f(row.gHeadP)} F ${f(row.gHeadF)} predH ${f(row.gPredH)} | |W| P ${f(row.wHeadP)} F ${f(row.wHeadF)} b ${f(row.bHeadP)}/${f(row.bHeadF)} | ${f(row.sps, 1)} st/s`,
+        + ` | zAlive ${f(row.zAlive, 3)} gOut ${f(row.gOutMeanAbs)} | |g| P ${f(row.gHeadP)} F ${f(row.gHeadF)} predH ${f(row.gPredH)} | |W| P ${f(row.wHeadP)} F ${f(row.wHeadF)} b ${f(row.bHeadP)}/${f(row.bHeadF)} | ${f(row.sps, 1)} st/s`,
       )
       win = new Acc()
     }
@@ -260,6 +266,8 @@ async function main() {
     shareOfCopyLastFromFovea: (W_F * all.mean("clF")) / all.mean("cl"),
     shiftOracleRatio: all.mean("shiftOracle") / all.mean("cl"),
     chP: all.mean("chP"), chF: all.mean("chF"), moved: all.mean("moved"),
+    movedLast1k: movedLog.slice(-1000).reduce((a, v) => a + v, 0) / Math.max(1, Math.min(1000, movedLog.length)),
+    gOutMeanAbsFinal: rows.at(-1)?.gOutMeanAbs ?? NaN,
     moveMagnitudes: Object.fromEntries(moveHist), maxShadowCheckRelErr: maxCheckErr, shadowSamples: sn,
     heldOut: rows.map((r) => [r.step, r.evalRatio]),
   }
