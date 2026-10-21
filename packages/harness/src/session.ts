@@ -16,8 +16,8 @@ export const MAX_RESTORES_PER_CHECKPOINT = 3
 export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
 /** The first log crossing, 2^3 CU: a young life writes no log files (and their checkpoints) in a burst. */
 export const FIRST_LOG_CU = 8
-/** Doubling stops here; from then on a log is written at every multiple of this many CU, forever. */
-export const LOG_STEP_CU = 512
+/** Doubling stops here; from then on a log is written at every multiple of this many CU, forever (about 8 an hour at the speed cap). */
+export const LOG_STEP_CU = 1024
 
 export interface SessionConfig {
   learnerId: string
@@ -109,16 +109,16 @@ export function createPacer(maxStepsPerSec: number, clock: Clock = realClock): (
   }
 }
 
-/** The log schedule, forever: 8, 16, ..., 512, then 1024, 1536, ... (every LOG_STEP_CU). */
+/** The log schedule, forever: 8, 16, ..., 512, then 1024, 2048, 3072, ... (every LOG_STEP_CU). */
 export function* logThresholds(): Iterable<number> {
   let t = FIRST_LOG_CU
-  for (; t < LOG_STEP_CU; t *= 2) yield t
+  for (; t <= 512; t *= 2) yield t
   for (; ; t += LOG_STEP_CU) yield t
 }
 
 /** The first threshold of logThresholds() above `cu` (the next log crossing). */
 export function nextCrossing(cu: number): number {
-  if (cu >= LOG_STEP_CU) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
+  if (cu >= 512) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
   let t = FIRST_LOG_CU
   while (t <= cu) t *= 2
   return t
@@ -165,7 +165,7 @@ function birthOf(state: unknown, id: string): Birth {
  *   both are finite. A checkpoint is saved then if `checkpointEveryMs` have passed since the last save (on the
  *   injected clock); one that falls due during skips waits for the next clean sleep. A reload or restore therefore
  *   loses up to `checkpointEveryMs` of learning.
- * - A log file (v2) is queued each time CU crosses the next logThresholds() value (8, 16, ..., 512, then every 512) and at the end of a test lifetime, carrying the
+ * - A log file (v2) is queued each time CU crosses the next logThresholds() value (8, 16, ..., 512, then every 1024) and at the end of a test lifetime, carrying the
  *   curve points since the previous file. Each one is queued in one transaction with the checkpoint of that moment,
  *   so the checkpoint is never behind the latest log file: resuming never reuses a seq or goes back in steps or CU.
  * - No checkpoint is saved (and so no non-final log is written) while the learner has skipped updates outstanding;

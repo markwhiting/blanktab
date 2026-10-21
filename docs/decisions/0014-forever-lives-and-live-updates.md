@@ -7,7 +7,7 @@
 
 ## Decision
 - **No fixed life window.** A learner lives as long as its tab is open. It continues in another tab through orphan adoption (under 24 hours, per 0013). A "final" log is written only when a life fails.
-- **Log schedule.** Logs are written at CU 8, 16, 32, …, 512, then every 512 CU, forever. Checkups (Plan 04b) use the same schedule.
+- **Log schedule.** Logs are written at CU 8, 16, 32, …, 512, then every 1024 CU, forever. Checkups (Plan 04b) use the same schedule.
 - **Merges on a schedule.** The hourly gate merges any valid session PR; it no longer waits for a final log or 48 hours of silence. The tab's next flush opens a new PR on a fresh branch.
 - **Knowledge refresh without reload.** Every ~15 minutes (with jitter) the tab re-reads the shared knowledge and passes it to the running learner. Each log's `knowledgeSha` is the knowledge in force *when that file was written*, not at birth.
 - **Code reload with resume.** Every ~10 minutes the tab checks the deployed `manifest.json`.

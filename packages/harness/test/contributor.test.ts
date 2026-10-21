@@ -212,6 +212,37 @@ describe("contributor: fresh branch after merge (brief item 13)", () => {
   })
 })
 
+describe("contributor: the PR file cap", () => {
+  it("20 pending files: the first PR gets 16, the other 4 wait for the merge and then go in a fresh PR", async () => {
+    const t = await setup({ files: 20 })
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, Array.from({ length: 16 }, (_, i) => i)).sort())
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+    // A full PR takes nothing more: no commit, nothing sent.
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(writes(t.gh.requests)).toEqual([])
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect(await t.queue.pending()).toHaveLength(4)
+    t.gh.merge(t.gh.pulls[0]!, { deleteBranch: false })
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(2)
+    expect(t.gh.prFiles(t.gh.pulls[1]!)).toEqual(logPaths(ID, [16, 17, 18, 19]).sort())
+    expect(await t.queue.pending()).toEqual([])
+  })
+
+  it("an open PR holding N files takes only 16 - N more, oldest first", async () => {
+    const t = await setup({ files: 10 })
+    await t.c.flush()
+    for (let s = 10; s < 20; s++) await t.queue.put(mkFile(ID, s))
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+  })
+})
+
 describe("contributor: no push access", () => {
   it("creates a fork first, polls until ready, writes to the fork, PR goes to upstream", async () => {
     const t = await setup({ canPush: false, files: 2 })

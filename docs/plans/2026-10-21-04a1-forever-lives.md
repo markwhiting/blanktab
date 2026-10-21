@@ -11,7 +11,7 @@ A learner now keeps learning for as long as its tab is open (decision 0014). The
 
 ## Global Constraints
 - **Every rule of Plan 04a still applies:** walls, tensor lifecycle, the token rule, logs and checkpoints written in one transaction, restores kept on the record, and no NaN in logs.
-- **Log schedule:** a log is written each time CU crosses 8, 16, 32, 64, 128, 256 or 512, then each further multiple of 512, forever. A PR therefore stays well under the gate's 16-file cap between hourly merges.
+- **Log schedule:** a log is written each time CU crosses 8, 16, 32, 64, 128, 256 or 512, then each further multiple of 1024, forever. A PR therefore stays well under the gate's 16-file cap between hourly merges.
 - **No lifetime limit:** `lifetimeCU` is optional, and when it is absent the life never ends. Test knobs may still set a lifetime. `final: true` is written only on failure, or when a test lifetime ends.
 - **Polling:**
   - knowledge every 15 min ± 3 min of jitter;

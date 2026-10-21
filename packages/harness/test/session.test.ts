@@ -112,12 +112,12 @@ function expectContinuous(logs: LogFileV2[]) {
 }
 
 describe("session v2", { timeout: 60_000 }, () => {
-  it("the log schedule: 8 ... 512 by doubling, then every 512, forever", () => {
+  it("the log schedule: 8 ... 512 by doubling, then every 1024, forever", () => {
     expect(FIRST_LOG_CU).toBe(8)
     const first: number[] = []
     for (const t of logThresholds()) { first.push(t); if (first.length === 12) break }
-    expect(first).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 2560, 3072])
-    expect([0, 0.5, 7.99, 8, 15, 16, 511, 512, 1000, 1024, 1535, 1536, 10_000].map(nextCrossing)).toEqual([8, 8, 8, 16, 16, 32, 512, 1024, 1024, 1536, 1536, 2048, 10_240])
+    expect(first).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120])
+    expect([0, 0.5, 7.99, 8, 15, 16, 511, 512, 1000, 1024, 1535, 2048, 10_000].map(nextCrossing)).toEqual([8, 8, 8, 16, 16, 32, 512, 1024, 1024, 2048, 2048, 3072, 10_240])
     // nextCrossing is the schedule's next value above cu.
     const all = logThresholds()[Symbol.iterator]()
     const seen: number[] = [0]
@@ -163,18 +163,30 @@ describe("session v2", { timeout: 60_000 }, () => {
     expect(await loadCheckpoint(idb, ID)).toBeDefined()
   })
 
-  it("a learner adding 10,240 CU writes 7 + 19 = 26 files (8 ... 512, then 1024 ... 10240 by 512), none final, all under the gate's caps", async () => {
+  it("a learner adding 10,240 CU writes exactly 7 + 10 = 17 files (8 ... 512, then 1024 ... 10240 by 1024), none final, each under 1 MB", async () => {
     const idb = new IDBFactory()
     await expect(runSession(cfgFor(), depsFor(idb, {
       createLearner: stubFactory({ cuPerStep: 8 }), onTick: ({ cu }) => { if (cu > 10_240) throw new Error("tab closed") },
     }))).rejects.toThrow("tab closed")
     const logs = await logsOf(idb)
-    expect(logs).toHaveLength(26)
-    expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64, 128, 256, 512, ...Array.from({ length: 19 }, (_, i) => 1024 + 512 * i)])
+    expect(logs).toHaveLength(17)
+    expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64, 128, 256, 512, ...Array.from({ length: 10 }, (_, i) => 1024 * (i + 1))])
     expect(logs.some(f => f.final)).toBe(false)
     expect(logs.map(f => f.seq)).toEqual(logs.map((_, i) => i))
-    for (const f of logs) expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
-    expect(logs.length).toBeLessThanOrEqual(16 + 10) // 26 files over 10,240 CU; the gate's 16-file cap is per hourly merge, see decision 0014
+    for (const f of logs) {
+      expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
+      expect(new TextEncoder().encode(JSON.stringify(f)).length).toBeLessThanOrEqual(1_000_000)
+    }
+  })
+
+  it("at the speed cap (2.4 CU/s) no hour holds more than 10 logs past the first 7 early ones", () => {
+    const CU_PER_SEC = 2.4
+    const times: number[] = []
+    for (const t of logThresholds()) { if (t > 200_000) break; if (t > 512) times.push(t / CU_PER_SEC) }
+    let most = 0
+    for (let i = 0; i < times.length; i++) most = Math.max(most, times.filter(x => x >= times[i]! && x < times[i]! + 3600).length)
+    expect(most).toBeLessThanOrEqual(10)
+    expect(most).toBe(9) // 8640 CU an hour / 1024
   })
 
   it("a test lifetime still ends in a final log", async () => {
