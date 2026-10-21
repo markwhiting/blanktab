@@ -1,4 +1,5 @@
 export { createWorld } from "./world"
+export { hashSeed } from "./rng"
 export type { World, TraceEvent, PrivilegedState, CanvasLike, Context2DLike } from "./world"
 export { ROOM_VIEW, ROOM_KINDS, TASKBAR_HEIGHT } from "./room"
 export type { Room, RoomKind, RoomEvent, RoomFactory, ElementInfo } from "./room"
