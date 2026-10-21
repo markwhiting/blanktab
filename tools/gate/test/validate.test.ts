@@ -312,4 +312,10 @@ describe("validateSessionPr v2: the held-out check's optional fields (decision 0
     expect(msg([file(logV2(1, { evalCU: 1 }))], [logV2(0, { evalCU: 2 })])).toContain("evalCU decreased")
     expect(errs([file(logV2(0, { evalCU: 1 })), file(logV2(1, { evalCU: 1 }))]).ok).toBe(true)
   })
+  it("within one learner, a file without evalCU after one with it is rejected (never from a number back to absent)", () => {
+    expect(msg([file(logV2(0, { evalCU: 1 })), file(logV2(1))])).toContain("evalCU missing")
+    expect(msg([file(logV2(1))], [logV2(0, { evalCU: 1 })])).toContain("evalCU missing")
+    expect(errs([file(logV2(0)), file(logV2(1, { evalCU: 1 }))]).ok).toBe(true) // absent, then present: a newer page
+    expect(errs([file(logV2(1))], [logV2(0)]).ok).toBe(true)
+  })
 })

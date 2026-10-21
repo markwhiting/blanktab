@@ -17,6 +17,16 @@ const cp = (learnerId: string, steps: number): Checkpoint<{ w: Float32Array }> =
 })
 
 describe("checkpoints", () => {
+  it("codeSha is optional (older checkpoints have none) and, when present, 40 lowercase hex chars or \"dev\"", async () => {
+    const idb = new IDBFactory()
+    for (const ok of ["a".repeat(40), "dev", undefined]) {
+      await saveCheckpoint(idb, { ...cp(A, 1), ...(ok !== undefined ? { codeSha: ok } : {}) })
+      expect((await loadCheckpoint(idb, A))!.codeSha).toBe(ok)
+    }
+    await saveCheckpoint(idb, { ...cp(A, 1), codeSha: "nope" })
+    await expect(loadCheckpoint(idb, A)).rejects.toThrow(/codeSha/)
+  })
+
   it("hasCheckpoint says whether a learner has one, without reading it", async () => {
     const idb = new IDBFactory()
     expect(await hasCheckpoint(idb, A)).toBe(false)

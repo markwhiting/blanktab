@@ -882,6 +882,41 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
     })
 
+    it("every checkpoint records the code that saved it; a life that fails on other code is ended under the checkpoint's codeSha", async () => {
+      const OLD = "a".repeat(40), NEW = "b".repeat(40)
+      const idb = new IDBFactory()
+      await expect(runSession(cfgFor({ codeSha: OLD, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+        createLearner: stubFactory({ cuPerStep: 1 / 2 }), onTick: ({ steps }) => { if (steps === 25) throw new Error("reload") },
+      }))).rejects.toThrow("reload")
+      const cp = (await loadCheckpoint(idb, ID))!
+      expect(cp.codeSha).toBe(OLD)
+      // New code that cannot resume it (e.g. another learner state version): the final log is the old code's life.
+      await expect(runSession(cfgFor({ codeSha: NEW, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+        createLearner: async () => { throw new RangeError("LearnerState: version 1, expected 2") },
+      }))).rejects.toThrow("version 1")
+      const last = (await logsOf(idb)).at(-1)!
+      expect(last).toMatchObject({ final: true, codeSha: OLD, stepsTotal: cp.steps })
+    })
+
+    it("a checkpoint from before codeSha was recorded falls back to the latest file's, then the config's", async () => {
+      const OLD = "a".repeat(40), NEW = "b".repeat(40)
+      for (const withFile of [true, false]) {
+        const idb = new IDBFactory()
+        await expect(runSession(cfgFor({ codeSha: OLD, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+          createLearner: stubFactory({ cuPerStep: withFile ? 1 / 2 : 1 / 16 }), onTick: ({ steps }) => { if (steps === 25) throw new Error("reload") },
+        }))).rejects.toThrow("reload")
+        const cp = (await loadCheckpoint(idb, ID))!
+        const { codeSha: _c, ...old } = cp
+        void _c
+        await saveCheckpoint(idb, old as typeof cp)
+        expect((await logsOf(idb)).length > 0).toBe(withFile)
+        await expect(runSession(cfgFor({ codeSha: NEW, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+          createLearner: async () => { throw new RangeError("no") },
+        }))).rejects.toThrow("no")
+        expect((await logsOf(idb)).at(-1)!.codeSha, `with a file: ${withFile}`).toBe(withFile ? OLD : NEW)
+      }
+    })
+
     it("a reload right after a restore still has the restore on the record", async () => {
       const idb = new IDBFactory()
       let poisoned = true, justRestored = false

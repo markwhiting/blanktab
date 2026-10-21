@@ -81,9 +81,12 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
         lastV2[k] = Math.max(lastV2[k], log[k])
       }
       // Optional (files before the held-out check have none): checked between files that both have it.
+      // Once a learner's file has it, every later one must (a file never goes from a number back to absent).
       if (log.evalCU !== undefined) {
         if (log.evalCU < lastEvalCU) errors.push(`${path}: evalCU decreased (${log.evalCU} < ${lastEvalCU})`)
         lastEvalCU = Math.max(lastEvalCU, log.evalCU)
+      } else if (lastEvalCU > -Infinity) {
+        errors.push(`${path}: evalCU missing after a file that has it`)
       }
     }
   }

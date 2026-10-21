@@ -1,7 +1,7 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
-import { KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
@@ -31,6 +31,11 @@ export interface Checkpoint<S = LearnerState> {
    */
   knowledgeSha?: string
   sessionsSeenAtBirth?: number
+  /**
+   * The code that saved it (SessionConfig.codeSha). A life that cannot go on from it on other code (a learner state
+   * of another version) is ended on the record under this code, the one it was lived on. Absent in older checkpoints.
+   */
+  codeSha?: string
   learnerState: S
 }
 
@@ -50,6 +55,7 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (!Array.isArray(r.curveTail)) fail("curveTail must be an array")
   if (r.knowledgeSha !== undefined && !(typeof r.knowledgeSha === "string" && KNOWLEDGE_SHA_RE.test(r.knowledgeSha))) fail("knowledgeSha must be 64 lowercase hex chars")
   if (r.sessionsSeenAtBirth !== undefined && !isNonNegInt(r.sessionsSeenAtBirth)) fail("sessionsSeenAtBirth must be a non-negative integer")
+  if (r.codeSha !== undefined && !(typeof r.codeSha === "string" && CODE_SHA_RE.test(r.codeSha))) fail("codeSha must be 40 lowercase hex chars or \"dev\"")
   if (!("learnerState" in r)) fail("no learnerState")
 }
 

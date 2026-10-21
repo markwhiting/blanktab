@@ -13,11 +13,13 @@ import { flushPolicy } from "./schedule"
 import { birthSettings } from "./settings"
 import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
-import { startUpdates } from "./updates"
+import { WORKER_LOAD_MESSAGE, onWorkerLoadFailure, startUpdates } from "./updates"
 
 const NEWBORN_DELAY_MS = 2_000
 const PRESENCE_CHANNEL = "blanktab:presence"
 const PRESENCE_WAIT_MS = 250
+/** Shown (as a notice, not an error) when a resumed learner's checkpoint is from an older learner state version. */
+const OLDER_VERSION_MESSAGE = "This learner was born on an older version; a newborn takes its place."
 /** A forced checkpoint not answered in this long counts as not saved (the reload is retried later). */
 const CHECKPOINT_WAIT_MS = 60_000
 
@@ -160,8 +162,11 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   ctx.life = life
   // Its logs were rejected too often (decision 0014): it lives on here, but no longer contributes.
   void queue.contribution(id).then(c => { if (c.localOnly && ctx.life === life) ui.notice(LOCAL_ONLY_MESSAGE) }, () => {})
-  /** The learner always runs: whether its life completed or failed, a newborn takes its place. */
-  const end = (show: () => void) => {
+  /**
+   * The learner always runs: whether its life completed or failed, a newborn takes its place (unless `then` is
+   * "stop": no newborn could run either, e.g. the worker's code itself cannot load).
+   */
+  const end = (show: () => void, then: "newborn" | "stop" = "newborn") => {
     if (over) return
     over = true
     if (ctx.life === life) ctx.life = null
@@ -170,9 +175,13 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     worker.terminate()
     release()
     show()
+    if (then === "stop") return
     setTimeout(() => void newborn(ctx).catch((e: unknown) => ui.error(e instanceof Error ? e.message : String(e))), NEWBORN_DELAY_MS)
   }
+  /** Whether the worker has said anything yet: an error before that is its code failing to load (or to start). */
+  let heard = false
   worker.onmessage = (e: MessageEvent<FromWorker>) => {
+    heard = true
     const m = e.data
     if (m.type === "frame") ui.frame(m)
     else if (m.type === "backend") ui.backend(m.label)
@@ -187,10 +196,21 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     // Stopped at a forced save, perhaps after the page had stopped waiting for its answer: reload onto it now.
     else if (m.type === "halted") ctx.halted()
     else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
-    else if (m.type === "error") end(() => ui.error(`${m.message}. A newborn takes its place.`))
+    else if (m.type === "error") end(() => (m.olderVersion ? ui.notice(OLDER_VERSION_MESSAGE) : ui.error(`${m.message}. A newborn takes its place.`)))
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
-  worker.onerror = e => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
+  worker.onerror = e => {
+    const failed = () => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
+    if (heard || over) return failed()
+    // Its code may be gone (a deploy replaced the hashed assets): reload onto the new code rather than retry forever.
+    void onWorkerLoadFailure({
+      codeSha: __CODE_SHA__, storage: sessionStorage, loadManifest: () => loadManifest(import.meta.env.BASE_URL, fetchFn),
+      reload: () => location.reload(),
+    }).then(r => {
+      if (r === "same-code") failed()
+      else end(() => (r === "gave-up" ? ui.notice(WORKER_LOAD_MESSAGE) : undefined), "stop")
+    })
+  }
   const start: ToWorker = {
     type: "start", cfg, hidden: document.hidden, ...(record !== undefined ? { checkpointRecord: record } : {}),
     ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),

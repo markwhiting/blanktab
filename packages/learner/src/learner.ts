@@ -144,6 +144,19 @@ export interface TrainableLearner extends Learner {
   dispose(): void
 }
 
+/**
+ * A checkpoint's learner state is of another LEARNER_STATE_VERSION than this code's: this code cannot resume it.
+ * `older`: it is from an older version (the learner was born on older code). A RangeError like any bad checkpoint.
+ */
+export class LearnerStateVersionError extends RangeError {
+  readonly older: boolean
+  constructor(readonly found: unknown) {
+    super(`LearnerState: version ${String(found)}, expected ${LEARNER_STATE_VERSION}`)
+    this.name = "LearnerStateVersionError"
+    this.older = typeof found === "number" && found < LEARNER_STATE_VERSION
+  }
+}
+
 /** The learning rate is clamped into this range (Review Focus 5). */
 export const LR_RANGE = [1e-5, 1e-2] as const
 /** headLrScale is clamped into this range. */
@@ -283,6 +296,8 @@ function checkHeldOut(h: unknown, where: string): asserts h is HeldOutSet {
 function checkState(s: LearnerState): void {
   const fail = (what: string) => { throw new RangeError(`LearnerState: ${what}`) }
   if (!isRecord(s)) fail("not an object")
+  // First: a state of another version is told apart from a corrupt one, whatever else it holds.
+  if ("version" in s && s.version !== LEARNER_STATE_VERSION) throw new LearnerStateVersionError(s.version)
   for (const k of STATE_KEYS) if (!(k in s)) fail(`missing ${k}`)
   const isF32 = (v: unknown) => v instanceof Float32Array
   if (!isRecord(s.widths) || !isRecord(s.settings) || !isRecord(s.stats)) fail("widths, settings and stats must be objects")
@@ -295,7 +310,6 @@ function checkState(s: LearnerState): void {
   if (!Array.isArray(s.replay) || !s.replay.every(tr => isRecord(tr) && isRecord(tr.obs) && isRecord(tr.next) && isRecord(tr.action) && isF32(tr.hIn))) {
     fail("replay is malformed")
   }
-  if (s.version !== LEARNER_STATE_VERSION) fail(`version ${String(s.version)}, expected ${LEARNER_STATE_VERSION}`)
   if (!isUint32(s.seed)) fail(`seed must be a uint32, got ${s.seed}`)
   for (const k of ["conv1", "conv2", "enc", "hidden"] as const) if (!isPosInt(s.widths[k])) fail(`widths.${k} must be an integer >= 1`)
   const clamped = clampSettings(s.settings)

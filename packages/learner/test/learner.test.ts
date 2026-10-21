@@ -3,7 +3,7 @@ import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, emptyObservation, i
 import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
+import { DEFAULT_SETTINGS, LearnerStateVersionError, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
 import type { HeldOutSet, LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import { copyLastBaseline, targetsFromObs } from "../src/encode"
 import type { Widths } from "../src/model"
@@ -485,6 +485,24 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
         { ...state, settings: { ...state.settings, bufferSize: 2 } }, // fewer slots than the 4 stored transitions
       ]
       for (const s of bad) await expect(createLearner({ backend: be, state: s })).rejects.toThrow(RangeError)
+      expect(be.stats.liveBuffers).toBe(0)
+    })
+
+    it("a state of another version is a LearnerStateVersionError (a RangeError), whatever else is in it, telling which version it is", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      const be = createCpuBackend()
+      for (const [s, found] of [[{ ...state, version: 1 }, 1], [{ version: 1 }, 1], [{ version: 3, seed: "x" }, 3], [{ version: "2" }, "2"]] as const) {
+        const e = await createLearner({ backend: be, state: s as unknown as LearnerState }).catch((x: unknown) => x)
+        expect(e).toBeInstanceOf(LearnerStateVersionError)
+        expect(e).toBeInstanceOf(RangeError)
+        expect((e as LearnerStateVersionError).found).toBe(found)
+        expect((e as LearnerStateVersionError).older).toBe(found === 1)
+      }
+      const other = await createLearner({ backend: be, state: { ...state, seed: -1 } }).catch((x: unknown) => x)
+      expect(other).toBeInstanceOf(RangeError)
+      expect(other).not.toBeInstanceOf(LearnerStateVersionError)
       expect(be.stats.liveBuffers).toBe(0)
     })
 

@@ -4,7 +4,7 @@
 import { WORLD } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
 import { buildHeldOut } from "@blanktab/harness/heldout"
-import { createLearner } from "@blanktab/learner"
+import { LearnerStateVersionError, createLearner } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
 import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
@@ -124,5 +124,8 @@ scope.onmessage = e => {
   if (m.type === "checkpointNow") { void inbox.checkpointNow({ halt: m.halt }).then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
   if (m.type !== "start" || started) return
   started = true
-  start(m).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))
+  start(m).catch((err: unknown) => post({
+    type: "error", message: err instanceof Error ? err.message : String(err),
+    ...(err instanceof LearnerStateVersionError && err.older ? { olderVersion: true } : {}),
+  }))
 }

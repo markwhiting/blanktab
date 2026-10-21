@@ -322,8 +322,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     // A life that took no step and wrote no log file has nothing to put on the record.
     if (!last && !(Math.max(cp?.steps ?? 0, lived?.steps ?? 0) > 0)) return null
+    // Labelled with the code the life was lived on: its checkpoint's (it may have been saved by other code than this
+    // page's, e.g. before a reload onto code that cannot resume it), else its latest file's, else this page's.
     const base = {
-      schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
+      schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cp?.codeSha ?? prior?.codeSha ?? cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
       final: true, condition: "A" as const,
     }
     const birthFields = (b: Birth) => ({ settings: { ...b.settings, maxStepsPerSec, seed: b.seed }, widths: { ...b.widths }, knowledgeSha, sessionsSeenAtBirth })
@@ -427,7 +429,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
 
       const checkpointNow = async (): Promise<Checkpoint> => ({
         learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
-        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, learnerState: await learner.save(),
+        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha, learnerState: await learner.save(),
       })
       const logFile = (final: boolean): LogFileV2 => {
         const st = learner.stats()
