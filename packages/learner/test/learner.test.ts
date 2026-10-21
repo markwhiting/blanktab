@@ -3,7 +3,7 @@ import { emptyObservation, isValidAction } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
+import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
 import type { LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
@@ -217,7 +217,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     for (const i of [n - 4, n - 3]) expect(maxStep(i)).toBeGreaterThan(0.9e-4)
     // On this first update the zero output layers block every gradient upstream of them (core, predictor h/action
     // layers get exactly 0), so compare with the policy and value heads, which are on the main optimizer.
-    for (const i of [n - 15, n - 14, n - 13, n - 12]) { // policy w/b, value w/b (then shiftX, shiftY, shiftGate, predH, predA)
+    for (const i of [n - 12, n - 11, n - 10, n - 9]) { // policy w/b, value w/b
       expect(maxStep(i)).toBeGreaterThan(0.9e-3)
       expect(maxStep(i)).toBeLessThan(1.01e-3)
     }
@@ -249,8 +249,8 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     const world = createSyntheticStream()
     for (let i = 0; i < 5; i++) world.act(await learner.step(world.observe()))
     const before = await learner.readParams()
-    // Poison the periphery output-layer bias (Model.params index 35: ..., predA w/b, headP w (34), headP b (35), headF w/b).
-    const POISONED = 35
+    // Poison the periphery output-layer bias (Model.params index 32: ..., predA w/b, headP w (31), headP b (32), headF w/b).
+    const POISONED = 32
     expect(allocated[POISONED]!.length).toBe(3000)
     ;(allocated[POISONED] as unknown as { data: Float32Array }).data[7] = Number.NaN
     const skipped = learner.stats().skippedUpdates
@@ -345,7 +345,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       expect(firstDifference(tweaked, state)).toBe("state.adam.1.slots.3.v")
       expect(state.params[0]).toBeInstanceOf(Float32Array)
       expect(state.replay.length).toBe(16)
-      expect(state.version).toBe(LEARNER_STATE_VERSION)
+      expect(state.version).toBe(1)
       expect(state.seed).toBe(13)
       expect(state.widths).toEqual(TINY)
       // A snapshot: stepping on does not change it, and loading from it does not alias it.
@@ -370,7 +370,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       learner.dispose()
       const be = createCpuBackend()
       const bad: LearnerState[] = [
-        { ...state, version: (LEARNER_STATE_VERSION + 1) as typeof LEARNER_STATE_VERSION },
+        { ...state, version: 2 as 1 },
         { ...state, params: state.params.slice(1) },
         { ...state, widths: { ...TINY, hidden: 8 } },
         { ...state, h: new Float32Array(3) },
