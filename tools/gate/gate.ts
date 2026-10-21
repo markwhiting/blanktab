@@ -46,7 +46,8 @@ function logsIn(files: PrFile[]): LogFile[] {
  * the PR stays open and is validated again next run.
  */
 export function decide(prs: OpenPr[]): GateDecision[] {
-  return prs.map((pr): GateDecision => {
+  // Oldest PR first, whatever order they come in: an unbound learner's first merge goes to the earliest PR, never a later copy.
+  return [...prs].sort((a, b) => a.number - b.number).map((pr): GateDecision => {
     if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
     if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
     const ids = learnersIn(pr.files)
@@ -81,12 +82,13 @@ export interface GateOps {
 /**
  * Carries out the decisions; resolves to the number merged. A merge is pinned to the head commit that was validated,
  * so a PR without one (headSha missing) is never merged: it is logged and left for the next run. `previous` is main as
- * of the start of this run, so at most one PR per learner is merged per run.
+ * of the start of this run, so at most one PR per learner is merged per run: the oldest (decisions are carried out by
+ * PR number, ascending).
  */
 export function act(decisions: GateDecision[], prs: (OpenPr & { learnerId: string | null })[], ops: GateOps): number {
   let merged = 0
   const mergedLearners = new Set<string>()
-  for (const d of decisions) {
+  for (const d of [...decisions].sort((a, b) => a.pr - b.pr)) {
     const pr = prs.find(p => p.number === d.pr)!
     ops.log(`PR #${d.pr}: ${d.action} (${d.reason.split("\n")[0]})`)
     try {
@@ -106,12 +108,28 @@ export function act(decisions: GateDecision[], prs: (OpenPr & { learnerId: strin
   return merged
 }
 
+/** `lookup` memoised per learnerId for one gate run, failures included (one owner lookup per learner, not per PR). */
+export function memoBound(lookup: (learnerId: string) => string | null): (learnerId: string) => string | null {
+  const seen = new Map<string, { owner: string | null } | { error: unknown }>()
+  return id => {
+    let r = seen.get(id)
+    if (r === undefined) {
+      try { r = { owner: lookup(id) } } catch (error) { r = { error } }
+      seen.set(id, r)
+    }
+    if ("error" in r) throw r.error
+    return r.owner
+  }
+}
+
 function main(): void {
   const repo = process.env.REPO
   if (!repo) throw new Error("REPO env var is required (owner/name)")
   const runsDir = process.argv[2] ?? "data/runs"
   const prs: (OpenPr & { learnerId: string | null })[] = []
-  for (const listed of listOpenPrs(repo)) {
+  const ownerOf = memoBound(id => boundAuthor(repo, id))
+  // Oldest first (decide and act sort again): the earliest PR for an unbound learner is the one that can claim it.
+  for (const listed of [...listOpenPrs(repo)].sort((a, b) => a.number - b.number)) {
     if (!listed.title.startsWith("run: ")) continue // not a session PR: leave alone
     try {
       const loaded = loadPr(repo, listed.number)
@@ -122,7 +140,7 @@ function main(): void {
       let bound: string | null = null
       if (ids.length === 1) {
         try {
-          bound = boundAuthor(repo, ids[0]!)
+          bound = ownerOf(ids[0]!)
         } catch (e) {
           console.error(`PR #${listed.number}: who learner ${ids[0]} belongs to could not be found (${e instanceof Error ? e.message : e}); leaving it for the next run`)
           continue

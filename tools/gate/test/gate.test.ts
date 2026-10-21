@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { act, decide, type GateOps, type OpenPr } from "../gate.ts"
+import { act, decide, memoBound, type GateOps, type OpenPr } from "../gate.ts"
 import type { PrFile } from "../validate.ts"
 import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
 
@@ -125,5 +125,32 @@ describe("decide: a learner belongs to the author of its first merged PR", () =>
     // Next run: PR 1's merge bound the learner to ann.
     const b2 = { ...b, boundAuthor: "ann", previous: [log(0)] }
     expect(decide([b2])[0]).toEqual({ pr: 2, action: "close", reason: `Learner ${ID} belongs to @ann.` })
+  })
+})
+
+describe("oldest PR first (a later copy never wins an unbound learner's first merge)", () => {
+  it("fed newest first, the older PR merges; next run the newer is closed as the older author's", () => {
+    const calls: string[] = []
+    const o: GateOps = { close: n => void calls.push(`close ${n}`), label: () => {}, merge: n => void calls.push(`merge ${n}`), log: () => {}, error: () => {} }
+    const older = { ...pr({ number: 5, author: "ann" }), headSha: "c".repeat(40), learnerId: ID }
+    const copy = { ...pr({ number: 9, author: "mallory" }), headSha: "d".repeat(40), learnerId: ID }
+    expect(act(decide([copy, older]), [copy, older], o)).toBe(1)
+    expect(calls).toEqual(["merge 5"])
+    const next = { ...copy, boundAuthor: "ann", previous: [log(0)] }
+    expect(decide([next])[0]).toEqual({ pr: 9, action: "close", reason: `Learner ${ID} belongs to @ann.` })
+  })
+})
+
+describe("memoBound: one owner lookup per learner per run", () => {
+  it("looks each learner up once, failures included", () => {
+    const asked: string[] = []
+    const bound = memoBound(id => { asked.push(id); if (id === "lrn_2222222222222222") throw new Error("gh down"); return id === ID ? "ann" : null })
+    expect(bound(ID)).toBe("ann")
+    expect(bound(ID)).toBe("ann")
+    expect(bound("lrn_1111111111111111")).toBeNull()
+    expect(bound("lrn_1111111111111111")).toBeNull()
+    expect(() => bound("lrn_2222222222222222")).toThrow("gh down")
+    expect(() => bound("lrn_2222222222222222")).toThrow("gh down")
+    expect(asked).toEqual([ID, "lrn_1111111111111111", "lrn_2222222222222222"])
   })
 })

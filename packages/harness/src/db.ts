@@ -56,6 +56,8 @@ const open = new WeakMap<IDBFactory, Promise<IDBDatabase>>()
  * a versionchange handler) blocks the upgrade for `blockedTimeoutMs`, rejects with DB_BLOCKED_MESSAGE. A database a
  * newer page has already upgraded past DB_VERSION (a VersionError) is opened at its own version and used as it is if it
  * still has every store this code needs (REQUIRED_STORES), so a tab of older code keeps working after a version bump.
+ * The rule that makes this safe (decision 0014): a future DB_VERSION may add stores or indexes but must never change
+ * the format of an existing store (its key path or its records' shape), nor remove one.
  */
 export function openDb(idb: IDBFactory, blockedTimeoutMs = DB_BLOCKED_TIMEOUT_MS): Promise<IDBDatabase> {
   const cached = open.get(idb)
