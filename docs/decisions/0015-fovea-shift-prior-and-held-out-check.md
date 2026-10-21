@@ -26,3 +26,32 @@ Separately, the learner's own-stream loss ratio misleads, because a curiosity-dr
 ## Alternatives considered
 - **Let the learner discover translation with no built-in prior.** Purer, but this architecture shows no sign of discovering it within a feasible budget. It remains a future research track.
 - **Make the fovea world-fixed.** That would remove the shift, but would also remove the cursor-centred attention the spec chose (§5.2).
+
+## Amendment (2026-10-21, Plan 04a.2 Task 1; controller rulings, agent-measured)
+
+Measurement: `tools/probe/learn-probe.ts`, CPU_WIDTHS, 5,000 steps. Full tables: the Task 1 report (`.superpowers/sdd/2026-10-21-04a2-learns-in-the-real-world/task-1-report.md`).
+
+- **The "alive" bar is replaced.** With leaky units, a negative pre-activation still passes gradient, so "fraction of z > 0" measured the wrong thing (1.6–3.8% at lr 0.002, even though the gradient was not zero).
+  - The new bar is on the mean |∂L/∂W| of the residual output layers' **weight** tensors at 5k steps: it must be > 1e-8 in every run.
+  - The predictor's input layer (predH) is reported beside it.
+- **ε-uniform exploration** (`exploreEpsilon`, default 0.1, clamped [0, 0.5]).
+  - With probability ε, each action factor is drawn uniformly from the learner's RNG.
+  - The actor-critic uses the action actually taken and its log-probability under π, with no importance weighting.
+  - The resulting off-policy bias is **accepted for v1**.
+  - ε = 0 is bit-exact to the learner without exploration.
+- **residualDecay** (default 1e-3, clamped [0, 1e-2]). This is decoupled weight decay toward zero on the parameters that express deviation from copy-last: the shift gate g and the four zero-initialised output layers.
+  - Its semantics are **per update**, not scaled by lr: p ← (1 − λ)·p − Adam step.
+  - This sets an equilibrium ceiling of |p| ≲ lr_eff / λ: lr/λ = 0.5 for the gate, and lr·headLrScale/λ = 0.05 for the output layers, at the defaults.
+  - Rationale: a residual must keep being re-earned, which counters the late drift toward the policy's own data.
+  - λ = 0 is bit-exact to the learner without decay.
+- **Defaults:** lr 5e-4, exploreEpsilon 0.1, residualDecay 1e-3 (headLrScale 0.1 as before).
+  - `knowledge/settings-space.json` is narrowed to the measured neighbourhood: lr [4e-4, 6e-4], headLrScale [0.08, 0.12], exploreEpsilon [0.08, 0.12], residualDecay [7e-4, 1.5e-3].
+- **Held-out set, corrected.** The probe's held-out world was the training world's layout, and is now seeded `hashSeed(seed, "heldout")`, as the live check will be.
+  - Re-measured at the defaults, 6 seeds: the held-out ratio at 5k is 0.924, 0.919, 0.928, 0.915, **1.222**, 0.921. That is ≤ 0.95 on **5/6**. The gradient bars are met in all runs (W 8e-6 to 3.3e-5; predH 3e-6 to 3.4e-5).
+  - Caveats:
+    - this is a 5k snapshot;
+    - seed 1 passes at 5k (0.924) but was at 1.30 at 3k;
+    - seed 5 drifts to 1.22;
+    - the periphery is above copy-last on held-out in every run (1.01–1.07); all of the gain is in the fovea;
+    - the live configuration (GPU_WIDTHS, about 28k steps) is untested.
+  - The remaining drift is what consolidation conditions B and C (Plan 05) are meant to address.
