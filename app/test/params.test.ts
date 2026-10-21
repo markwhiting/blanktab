@@ -15,7 +15,11 @@ describe("readTestParams", () => {
     expect(readTestParams("?testStepsPerSecond=1.5&testSleepInterval=2.5")).toEqual({})
     expect(readTestParams("?testBackend=webgpu&testWidths=huge")).toEqual({})
   })
+  it("reads testPollMs and testReloadJitterMs (whole milliseconds, at most a day)", () => {
+    expect(readTestParams("?testPollMs=500&testReloadJitterMs=200")).toEqual({ pollMs: 500, reloadJitterMs: 200 })
+    for (const v of ["0", "-1", "2.5", "abc", "86400001"]) expect(readTestParams(`?testPollMs=${v}&testReloadJitterMs=${v}`)).toEqual({})
+  })
   it("names every knob it reads (the production build test checks none of them survive)", () => {
-    expect([...TEST_KNOBS].sort()).toEqual(["testBackend", "testLifetimeCU", "testSleepInterval", "testStepsPerSecond", "testWidths"])
+    expect([...TEST_KNOBS].sort()).toEqual(["testBackend", "testLifetimeCU", "testPollMs", "testReloadJitterMs", "testSleepInterval", "testStepsPerSecond", "testWidths"])
   })
 })

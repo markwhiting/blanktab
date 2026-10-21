@@ -1,4 +1,5 @@
 // Messages between the page (main thread) and the learner's worker. The token never crosses this boundary.
+import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
 import type { Widths } from "@blanktab/learner"
 import type { BackendKind } from "./backend"
@@ -16,7 +17,14 @@ export interface StartMessage {
   checkpointRecord?: unknown
 }
 export interface VisibilityMessage { type: "visibility"; hidden: boolean }
-export type ToWorker = StartMessage | VisibilityMessage
+/** Refreshed knowledge (never offline), as its manifest: its knowledgeSha is in force for later log files; handed to the learner. */
+export interface KnowledgeMessage { type: "knowledge"; manifest: Manifest }
+/**
+ * A forced checkpoint (before a code reload): answered by a `checkpointed` message with the same id. With `halt` the
+ * learner stops right after the save, so the reload loses no step.
+ */
+export interface CheckpointNowMessage { type: "checkpointNow"; id: number; halt: boolean }
+export type ToWorker = StartMessage | VisibilityMessage | KnowledgeMessage | CheckpointNowMessage
 
 export type FromWorker =
   | { type: "backend"; kind: BackendKind; label: string }
@@ -28,4 +36,8 @@ export type FromWorker =
   | { type: "status"; message: string }
   | { type: "queued"; seq: number; steps: number; cu: number; final: boolean }
   | { type: "final"; steps: number; cu: number }
+  /** The life stopped at a forced save asked with `halt`: its checkpoint is current; the page reloads onto it. */
+  | { type: "halted" }
+  /** The answer to CheckpointNowMessage `id`: saved, or not (skipped updates outstanding, or the life ended): ask again later. */
+  | { type: "checkpointed"; id: number; saved: boolean }
   | { type: "error"; message: string }

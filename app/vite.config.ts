@@ -3,12 +3,12 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { defineConfig, type Plugin } from "vite"
 import { buildSummary } from "../tools/gate/summary.ts"
-import { computeKnowledgeSha } from "../tools/gate/manifest.ts"
+import { buildManifest } from "../tools/gate/manifest.ts"
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
 const BASE = "/learner/"
 
-/** The commit the page was built from (deploy sets CODE_SHA), or "dev". Anything else is a build error. */
+/** The code the page is built from (deploy sets CODE_SHA: tools/gate/manifest.ts codeShaOf), or "dev". Anything else is a build error. */
 function codeSha(): string {
   const sha = process.env.CODE_SHA ?? "dev"
   if (!/^([0-9a-f]{40}|dev)$/.test(sha)) throw new Error(`CODE_SHA must be 40 lowercase hex chars or "dev", got ${JSON.stringify(sha)}`)
@@ -28,7 +28,7 @@ function devKnowledge(): Plugin {
         const name = (req.url ?? "").split("?")[0]!.replace(/^\//, "")
         let body: unknown
         if (name === "summary.json") body = buildSummary(join(REPO_ROOT, "data/runs"))
-        else if (name === "manifest.json") body = { knowledgeSha: computeKnowledgeSha(join(REPO_ROOT, "knowledge")), codeSha: "dev" }
+        else if (name === "manifest.json") body = buildManifest(join(REPO_ROOT, "knowledge"), "dev")
         else if (/^[a-z0-9-]+\.json$/.test(name) && existsSync(join(REPO_ROOT, "knowledge", name))) body = JSON.parse(readFileSync(join(REPO_ROOT, "knowledge", name), "utf8"))
         else return next()
         res.setHeader("content-type", "application/json")

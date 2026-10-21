@@ -5,13 +5,14 @@ import { createContributor, type ContributorStatus } from "../src/contributor"
 import { setToken } from "../src/token"
 import { parseLogFile } from "../src/log"
 import { stubStorage, mkFile } from "./helpers"
+import { validateSessionPr } from "../../../tools/gate/validate"
 import { fakeGithub } from "./fakeGithub"
 
 const TOKEN = "ghp_SECRET_token_1234567890"
 const ID = "lrn_0123456789abcdef"
 const NOW = new Date(1_700_000_000_000)
 
-async function setup(opts: { canPush?: boolean; withToken?: boolean; files?: number; existingForkAs?: string } = {}) {
+async function setup(opts: { canPush?: boolean; withToken?: boolean; files?: number; existingForkAs?: string; onLocalOnly?: (id: string) => void } = {}) {
   const idb = new IDBFactory()
   const queue: Queue = await openQueue(idb)
   const n = opts.files ?? 6
@@ -24,6 +25,7 @@ async function setup(opts: { canPush?: boolean; withToken?: boolean; files?: num
   const timers: Array<() => void> = []
   const c = createContributor({
     queue, ls, fetchFn: gh.fetchFn, now: () => NOW, onStatus: s => statuses.push(s),
+    ...(opts.onLocalOnly ? { onLocalOnly: opts.onLocalOnly } : {}),
     sleep: async () => {},
     schedule: (fn, ms) => { scheduled.push(ms); timers.push(fn) },
   })
@@ -212,6 +214,181 @@ describe("contributor: fresh branch after merge (brief item 13)", () => {
   })
 })
 
+describe("contributor: the gate merges on a schedule (Review Focus 3)", () => {
+  type T = Awaited<ReturnType<typeof setup>>
+  const feed = async (t: T, seqs: number[]) => { for (const s of seqs) await t.queue.put(mkFile(ID, s)) }
+  /** What the gate does: validate the head, then `gh pr merge --match-head-commit <that head>`. Returns the files that PR carried. */
+  const gateMerge = (t: T, i: number, deleteBranch = true): string[] => {
+    const pr = t.gh.pulls[i]!
+    const carried = t.gh.prFiles(pr)
+    t.gh.merge(pr, { deleteBranch, matchHeadCommit: t.gh.headOf(pr)! })
+    return carried
+  }
+
+  for (const canPush of [true, false]) {
+    it(`${canPush ? "push" : "fork"}: merge (branch deleted), more logs, flush: a new PR; every file on exactly one PR, three cycles`, async () => {
+      const t = await setup({ canPush, files: 0 })
+      const carried: string[] = []
+      let next = 0
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await feed(t, [next, next + 1])
+        next += 2
+        await t.c.flush()
+        expect(t.gh.pulls).toHaveLength(cycle + 1)
+        expect(t.gh.pulls[cycle]).toMatchObject({ state: "open", draft: true })
+        carried.push(...gateMerge(t, cycle))
+        expect(t.gh.repos.get(canPush ? UP : "ann/learner")!.branches.has(BR)).toBe(false)
+      }
+      expect(carried.sort()).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]))
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2, 3, 4, 5]))
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+
+  it("race: a tab commits after the gate validated; the pinned merge fails, the PR keeps every file, next run merges it", async () => {
+    const t = await setup({ files: 0 })
+    await feed(t, [0, 1])
+    await t.c.flush()
+    const validated = t.gh.headOf(t.gh.pulls[0]!)!
+    await feed(t, [2])
+    await t.c.flush() // the tab pushes while the gate is between validating and merging
+    expect(() => t.gh.merge(t.gh.pulls[0]!, { deleteBranch: true, matchHeadCommit: validated })).toThrow(/Head branch was modified/)
+    expect(t.gh.pulls[0]!.state).toBe("open")
+    expect(t.gh.paths(UP, "main")).toEqual([])
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2]))
+    const first = gateMerge(t, 0) // next run validates the new head and merges
+    expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2]))
+    await feed(t, [3])
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(2)
+    expect([...first, ...t.gh.prFiles(t.gh.pulls[1]!)].sort()).toEqual(logPaths(ID, [0, 1, 2, 3]))
+  })
+
+  for (const deleteBranch of [true, false]) {
+    it(`race: the gate merges (branch ${deleteBranch ? "deleted" : "kept"}) while the tab is committing; no file is lost or duplicated`, async () => {
+      const t = await setup({ files: 0 })
+      await feed(t, [0, 1])
+      await t.c.flush()
+      await feed(t, [2, 3])
+      // The tab has seen an open PR and is about to commit; the gate merges at exactly that moment.
+      const carried: string[] = []
+      let fired = false
+      t.gh.interceptors.push(r => {
+        if (!fired && r.method === "POST" && new URL(r.url).pathname.endsWith("/git/blobs")) {
+          fired = true
+          carried.push(...gateMerge(t, 0, deleteBranch))
+        }
+        return undefined
+      })
+      await t.c.flush()
+      // Whatever the tab did, the files it still owes reach a PR on later flushes (retry timers included).
+      for (let i = 0; i < 3; i++) { for (const fn of t.timers.splice(0)) fn(); await t.c.flush() }
+      expect(await t.queue.pending()).toEqual([])
+      for (let i = 1; i < t.gh.pulls.length; i++) if (t.gh.pulls[i]!.state === "open") carried.push(...gateMerge(t, i, deleteBranch))
+      expect(fired).toBe(true)
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2, 3]))
+      expect(carried.sort()).toEqual(logPaths(ID, [0, 1, 2, 3]))
+    })
+  }
+})
+
+describe("contributor: the gate merges right after the push (between the ref move and the check by number)", () => {
+  for (const deleteBranch of [true, false]) {
+    it(`branch ${deleteBranch ? "deleted" : "kept"}: the merged PR carried the files; the next flush finds them on main and sends nothing twice`, async () => {
+      const t = await setup({ files: 0 })
+      for (const s of [0, 1]) await t.queue.put(mkFile(ID, s))
+      await t.c.flush()
+      for (const s of [2, 3]) await t.queue.put(mkFile(ID, s))
+      let fired = false
+      t.gh.interceptors.push(r => {
+        if (!fired && r.method === "GET" && new URL(r.url).pathname === `/repos/${UP}/pulls/1`) {
+          fired = true
+          const pr = t.gh.pulls[0]!
+          t.gh.merge(pr, { deleteBranch, matchHeadCommit: t.gh.headOf(pr)! })
+        }
+        return undefined
+      })
+      await t.c.flush()
+      expect(fired).toBe(true)
+      expect((await t.queue.pending()).map(f => f.seq)).toEqual([2, 3]) // not marked: the check saw the PR closed
+      for (const fn of t.timers.splice(0)) fn()
+      await t.c.flush()
+      expect(await t.queue.pending()).toEqual([])
+      expect(t.gh.pulls).toHaveLength(1) // no second PR: the files were already on main
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [0, 1, 2, 3]))
+    })
+  }
+})
+
+describe("contributor: the PR file cap", () => {
+  it("20 pending files: the first PR gets 16, the other 4 wait for the merge and then go in a fresh PR", async () => {
+    const t = await setup({ files: 20 })
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, Array.from({ length: 16 }, (_, i) => i)).sort())
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+    // A full PR takes nothing more: no commit, nothing sent.
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(writes(t.gh.requests)).toEqual([])
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect(await t.queue.pending()).toHaveLength(4)
+    t.gh.merge(t.gh.pulls[0]!, { deleteBranch: false })
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(2)
+    expect(t.gh.prFiles(t.gh.pulls[1]!)).toEqual(logPaths(ID, [16, 17, 18, 19]).sort())
+    expect(await t.queue.pending()).toEqual([])
+  })
+
+  it("an open PR holding N files takes only 16 - N more, oldest first", async () => {
+    const t = await setup({ files: 10 })
+    await t.c.flush()
+    for (let s = 10; s < 20; s++) await t.queue.put(mkFile(ID, s))
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+  })
+})
+
+describe("contributor: the PR file cap fails closed", () => {
+  it("the count comes from the branch head: a lagging PR.changed_files cannot push a PR past 16", async () => {
+    const t = await setup({ files: 10 })
+    await t.c.flush()
+    t.gh.interceptors.push(r => {
+      const m = new URL(r.url).pathname.match(/\/pulls\/(\d+)$/)
+      const live = { number: 1, state: "open", merged_at: null, head: { sha: t.gh.headOf(t.gh.pulls[0]!) } }
+      return r.method === "GET" && m ? new Response(JSON.stringify({ ...live, changed_files: 0 }), { status: 200 }) : undefined
+    })
+    for (let s = 10; s < 20; s++) await t.queue.put(mkFile(ID, s))
+    await t.c.flush()
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(16)
+    expect((await t.queue.pending()).map(f => f.seq)).toEqual([16, 17, 18, 19])
+  })
+
+  for (const [name, res] of [
+    ["has no files field", () => new Response(JSON.stringify({}), { status: 200 })],
+    ["files is not a list", () => new Response(JSON.stringify({ files: "many" }), { status: 200 })],
+    ["fails with a 500", () => new Response("{}", { status: 500 })],
+  ] as const) {
+    it(`an unreadable count (compare ${name}) commits nothing that flush, and the next flush recovers`, async () => {
+      const t = await setup({ files: 2 })
+      await t.c.flush()
+      await t.queue.put(mkFile(ID, 2))
+      let broken = true
+      t.gh.interceptors.push(r => (broken && r.method === "GET" && new URL(r.url).pathname.includes("/compare/") ? res() : undefined))
+      t.gh.requests.length = 0
+      await t.c.flush()
+      expect(writes(t.gh.requests)).toEqual([])
+      expect((await t.queue.pending()).map(f => f.seq)).toEqual([2])
+      broken = false
+      await t.c.flush()
+      expect(t.gh.prFiles(t.gh.pulls[0]!)).toHaveLength(3)
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+})
+
 describe("contributor: no push access", () => {
   it("creates a fork first, polls until ready, writes to the fork, PR goes to upstream", async () => {
     const t = await setup({ canPush: false, files: 2 })
@@ -375,7 +552,9 @@ describe("contributor: token never leaks (Review Focus 1)", () => {
       const rows = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("outbox").objectStore("outbox").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
       expect(rows).toHaveLength(1) // the life went final and was sent: only its final file is kept (prune)
       expect(JSON.stringify(rows)).not.toContain(TOKEN)
-      expect(Array.from(db.objectStoreNames)).toEqual(["checkpointMeta", "checkpoints", "outbox"])
+      expect(Array.from(db.objectStoreNames)).toEqual(["checkpointMeta", "checkpoints", "contribution", "outbox"])
+      const contrib = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("contribution").objectStore("contribution").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
+      expect(JSON.stringify(contrib)).not.toContain(TOKEN)
       const metas = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("checkpointMeta").objectStore("checkpointMeta").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
       expect(JSON.stringify(metas)).not.toContain(TOKEN)
       const cps = await new Promise<unknown[]>((res, rej) => { const q = db.transaction("checkpoints").objectStore("checkpoints").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error) })
@@ -462,7 +641,7 @@ describe("contributor: review fixes", () => {
     const t = await setup({ files: 1 })
     t.gh.interceptors.push(r => {
       if (r.method !== "POST" || !r.url.endsWith("/pulls")) return undefined
-      t.gh.pulls.push({ ...JSON.parse(r.body!), state: "open" }) // the other tab won the race
+      t.gh.pulls.push({ ...JSON.parse(r.body!), state: "open", number: t.gh.pulls.length + 1 }) // the other tab won the race
       return new Response('{"message":"A pull request already exists"}', { status: 422 })
     })
     await t.c.flush()
@@ -488,5 +667,168 @@ describe("contributor: report() between sends", () => {
     const t = await setup({ withToken: false, files: 1 })
     await t.c.report()
     expect(t.last().state).toBe("no-token")
+  })
+})
+
+describe("contributor: PRs the gate closes (decision 0014: seq gaps, local-only)", () => {
+  type T = Awaited<ReturnType<typeof setup>>
+  const feed = async (t: T, seqs: number[]) => { for (const s of seqs) await t.queue.put(mkFile(ID, s, { codeSha: "a".repeat(40) })) }
+  /** The gate's view of an open PR: its files as data, main's files for the learner as previous. */
+  const gateValidates = (t: T, i: number) => {
+    const pr = t.gh.pulls[i]!
+    const files = t.gh.prFiles(pr).map(path => ({ path, content: JSON.stringify(t.gh.file(t.gh.repos.has("ann/learner") ? "ann/learner" : UP, BR, path)) }))
+    const previous = t.gh.paths(UP, "main").map(path => parseLogFile(t.gh.file(UP, "main", path))).flatMap(p => (p.ok ? [p.value] : []))
+    return validateSessionPr(files, previous)
+  }
+
+  for (const deleteBranch of [false, true]) {
+    it(`one closed PR (branch ${deleteBranch ? "deleted" : "kept"}): its files are dropped, never resent; the next PR (a seq gap) validates and merges`, async () => {
+      const t = await setup({ files: 0 })
+      await feed(t, [0, 1])
+      await t.c.flush()
+      t.gh.close(t.gh.pulls[0]!, { deleteBranch })
+      await feed(t, [2, 3])
+      await t.c.flush()
+      expect(t.gh.pulls).toHaveLength(2)
+      expect(t.gh.prFiles(t.gh.pulls[1]!)).toEqual(logPaths(ID, [2, 3]))
+      expect(gateValidates(t, 1)).toMatchObject({ ok: true })
+      t.gh.merge(t.gh.pulls[1]!, { deleteBranch: true, matchHeadCommit: t.gh.headOf(t.gh.pulls[1]!)! })
+      expect(t.gh.paths(UP, "main")).toEqual(logPaths(ID, [2, 3]))
+      expect((await t.queue.files(ID)).map(f => f.seq)).toEqual([3]) // 0 and 1 dropped (and pruned), 2 sent: only the newest is kept
+      expect(await t.queue.contribution(ID)).toMatchObject({ lastPr: 1, closedInARow: 1, localOnly: false })
+      // The life goes on: the next PR follows main, and the merge resets the count.
+      await feed(t, [4])
+      await t.c.flush()
+      expect(t.gh.prFiles(t.gh.pulls[2]!)).toEqual(logPaths(ID, [4]))
+      expect(gateValidates(t, 2)).toMatchObject({ ok: true })
+      expect(await t.queue.contribution(ID)).toMatchObject({ lastPr: 2, closedInARow: 0, localOnly: false })
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+
+  it("three closed PRs in a row: the learner is local-only (kept in IndexedDB), sends nothing more, and the page is told", async () => {
+    const told: string[] = []
+    const t = await setup({ files: 0, onLocalOnly: id => told.push(id) })
+    for (let i = 0; i < 3; i++) {
+      await feed(t, [2 * i, 2 * i + 1])
+      await t.c.flush()
+      expect(t.gh.pulls).toHaveLength(i + 1)
+      t.gh.close(t.gh.pulls[i]!)
+    }
+    await feed(t, [6, 7])
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(writes(t.gh.requests)).toEqual([]) // no fourth PR
+    expect(t.gh.pulls).toHaveLength(3)
+    expect(told).toEqual([ID])
+    expect(await (await openQueue(t.idb)).contribution(ID)).toEqual({ learnerId: ID, lastPr: 3, closedInARow: 3, localOnly: true })
+    expect(await t.queue.localOnly()).toEqual([ID])
+    expect(await t.queue.pending()).toEqual([]) // never sent, so not waiting either
+    expect(t.last()).toMatchObject({ state: "idle", pending: 0, message: "No session logs waiting; a learner here no longer contributes (its logs were rejected)." })
+    // Later logs are kept locally (for the page) but never sent.
+    await feed(t, [8])
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(t.gh.requests).toEqual([])
+    expect((await t.queue.files(ID)).map(f => f.seq)).toEqual([6, 7, 8])
+  })
+
+  it("a merged PR between closed ones resets the count: closed, merged, closed, closed is not local-only", async () => {
+    const t = await setup({ files: 0 })
+    const outcome = ["close", "merge", "close", "close"]
+    for (let i = 0; i < outcome.length; i++) {
+      await feed(t, [i])
+      await t.c.flush()
+      const pr = t.gh.pulls[i]!
+      if (outcome[i] === "merge") t.gh.merge(pr, { deleteBranch: true, matchHeadCommit: t.gh.headOf(pr)! })
+      else t.gh.close(pr)
+    }
+    await feed(t, [4])
+    await t.c.flush()
+    expect(t.gh.pulls).toHaveLength(5)
+    expect(await t.queue.contribution(ID)).toMatchObject({ lastPr: 4, closedInARow: 2, localOnly: false })
+    expect(gateValidates(t, 4)).toMatchObject({ ok: true })
+  })
+
+  it("another learner in the same browser keeps contributing while one is local-only", async () => {
+    const t = await setup({ files: 0 })
+    await t.queue.setContribution({ learnerId: ID, lastPr: 0, closedInARow: 3, localOnly: true })
+    const OTHER = "lrn_bbbbbbbbbbbbbbbb"
+    await feed(t, [0])
+    await t.queue.put(mkFile(OTHER, 0))
+    await t.c.flush()
+    expect(t.gh.pulls.map(p => p.head)).toEqual([`markwhiting:run/${OTHER}`])
+  })
+})
+
+describe("contributor: after a push the PR is checked by number (item 5)", () => {
+  it("open with its head at the new commit: sent, even when the open-PR list lags behind", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    await t.queue.put(mkFile(ID, 2))
+    let pushed = false
+    t.gh.interceptors.push(r => {
+      const u = new URL(r.url)
+      if (r.method === "PATCH" && u.pathname.endsWith(`/git/refs/heads/${BR}`)) pushed = true
+      // After the push the list says no open PR (GitHub's listing lags); the PR itself is open.
+      return pushed && r.method === "GET" && u.pathname === `/repos/${UP}/pulls` ? new Response("[]", { status: 200 }) : undefined
+    })
+    await t.c.flush()
+    expect(pushed).toBe(true)
+    expect(await t.queue.pending()).toEqual([])
+    expect(t.gh.pulls).toHaveLength(1)
+    const check = t.gh.requests.filter(r => r.method === "GET" && new URL(r.url).pathname === `/repos/${UP}/pulls/1`)
+    expect(check).toHaveLength(1)
+  })
+
+  for (const [name, change] of [
+    ["merged meanwhile", (pr: Record<string, unknown>) => ({ ...pr, state: "closed", merged_at: "2026-10-21T12:00:00Z" })],
+    ["closed meanwhile", (pr: Record<string, unknown>) => ({ ...pr, state: "closed", merged_at: null })],
+    ["its head is another commit", (pr: Record<string, unknown>) => ({ ...pr, head: { sha: "f".repeat(40) } })],
+  ] as const) {
+    it(`${name}: the files are not marked sent; a later flush sends them`, async () => {
+      const t = await setup({ files: 2 })
+      await t.c.flush()
+      await t.queue.put(mkFile(ID, 2))
+      let broken = true
+      t.gh.interceptors.push(r => {
+        if (!broken || r.method !== "GET" || new URL(r.url).pathname !== `/repos/${UP}/pulls/1`) return undefined
+        broken = false
+        const pr = t.gh.pulls[0]!
+        return new Response(JSON.stringify(change({ number: 1, state: "open", merged_at: null, head: { sha: t.gh.headOf(pr) } })), { status: 200 })
+      })
+      await t.c.flush()
+      expect((await t.queue.pending()).map(f => f.seq)).toEqual([2])
+      expect(t.last().state).toBe("error")
+      await t.c.flush()
+      expect(await t.queue.pending()).toEqual([])
+    })
+  }
+})
+
+describe("contributor: re-review fixes", () => {
+  it("the open-PR list lags but the full list shows the PR still open: it is used as the open PR (the branch is not reset)", async () => {
+    const t = await setup({ files: 2 })
+    await t.c.flush()
+    await t.queue.put(mkFile(ID, 2))
+    t.gh.interceptors.push(r => {
+      const u = new URL(r.url)
+      return r.method === "GET" && u.pathname === `/repos/${UP}/pulls` && u.searchParams.get("state") === "open" ? new Response("[]", { status: 200 }) : undefined
+    })
+    t.gh.requests.length = 0
+    await t.c.flush()
+    expect(t.gh.requests.some(r => r.method === "PATCH" && JSON.parse(r.body!).force === true)).toBe(false)
+    expect(t.gh.requests.some(r => r.method === "POST" && new URL(r.url).pathname === `/repos/${UP}/pulls`)).toBe(false)
+    expect(t.gh.pulls).toHaveLength(1)
+    expect(t.gh.prFiles(t.gh.pulls[0]!)).toEqual(logPaths(ID, [0, 1, 2]))
+    expect(await t.queue.pending()).toEqual([])
+    expect(await t.queue.contribution(ID)).toMatchObject({ closedInARow: 0, localOnly: false })
+  })
+
+  it("a failure while reporting idle with nothing pending is a status, not a rejected flush", async () => {
+    const t = await setup({ files: 0 })
+    t.queue.localOnly = async () => { throw new Error("disk") }
+    await expect(t.c.flush()).resolves.toBeUndefined()
+    expect(t.last().state).toBe("error")
   })
 })

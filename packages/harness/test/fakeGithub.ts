@@ -61,6 +61,16 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     return new Map([...treeOf(head)].filter(([path, sha]) => from.get(path) !== sha))
   }
 
+  const headOf = (pr: Pull): string | undefined => {
+    const [owner, branch] = pr.head.split(":") as [string, string]
+    return repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+  }
+  /** A pull as the API returns it: state, merged_at (null unless merged) and the head commit. */
+  const apiPull = (x: Pull) => ({
+    ...x, state: x.state ?? "open", merged_at: x.merged ? "2026-10-21T12:00:00Z" : null,
+    head: { label: x.head, ref: x.head.split(":")[1], sha: headOf(x) ?? null },
+  })
+
   const handle = (r: Recorded): Response => {
     const u = new URL(r.url)
     const p = u.pathname
@@ -78,7 +88,7 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
       if (r.method === "GET") {
         const head = u.searchParams.get("head")
         const want = u.searchParams.get("state") ?? "open"
-        return json(200, pulls.filter(x => x.head === head && (want === "all" || (x.state ?? "open") === want)))
+        return json(200, pulls.filter(x => x.head === head && (want === "all" || (x.state ?? "open") === want)).map(apiPull))
       }
       const b = body() as unknown as Pull
       const headRepo = repoOfOwner(b.head.split(":")[0]!)
@@ -86,6 +96,16 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
       if (diff(pr).size === 0) return json(422, { message: "Validation Failed", errors: [{ message: "No commits between main and head" }] })
       pulls.push(pr)
       return json(201, { number: pr.number })
+    }
+    if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/)) && m[1] === UP) {
+      const pr = pulls.find(x => x.number === Number(m![2]))
+      return pr ? json(200, apiPull(pr)) : json(404, { message: "Not Found" })
+    }
+    if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/compare\/main\.\.\.(.+)$/)) && m[1] === UP) {
+      const head = decodeURIComponent(m[2]!)
+      const [owner, branch] = head.split(":") as [string, string]
+      if (!repos.get(repoOfOwner(owner) ?? "")?.branches.has(branch)) return json(404, { message: "Not Found" })
+      return json(200, { files: [...diff({ head, base: "main", title: "", draft: true, body: "" }).keys()].map(filename => ({ filename })) })
     }
     if (!(m = p.match(/^\/repos\/([^/]+\/[^/]+)(\/.*)?$/))) return json(404, { message: `unhandled ${r.method} ${p}` })
     const full = m[1]!
@@ -179,8 +199,24 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     paths: (repo: string, branch: string): string[] => [...(branchTree(repo, branch)?.keys() ?? [])].sort(),
     /** Sorted paths a PR proposes (head vs. merge base with main). */
     prFiles: (pr: Pull): string[] => [...diff(pr).keys()].sort(),
-    /** Squash-merges a PR into upstream main, like the gate does; optionally deletes the head branch. */
-    merge(pr: Pull, o: { deleteBranch: boolean }): void {
+    /** Head commit of a PR's branch (what `gh pr merge --match-head-commit` compares against). */
+    headOf,
+    /** Closes a PR without merging it, as the gate does with an invalid one; optionally deletes the head branch. */
+    close(pr: Pull, o: { deleteBranch?: boolean } = {}): void {
+      pr.state = "closed"
+      if (o.deleteBranch) repos.get(pr.headRepo!)!.branches.delete(pr.head.split(":")[1]!)
+    },
+    /**
+     * Squash-merges a PR into upstream main, like the gate does; optionally deletes the head branch.
+     * With matchHeadCommit it refuses (throws, merging nothing) when the branch head is no longer that commit.
+     */
+    merge(pr: Pull, o: { deleteBranch: boolean; matchHeadCommit?: string }): void {
+      if (pr.state === "closed") throw new Error("PR is not open")
+      if (o.matchHeadCommit !== undefined) {
+        const [owner, branch] = pr.head.split(":") as [string, string]
+        const head = repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+        if (head !== o.matchHeadCommit) throw new Error("Head branch was modified. Review and try the merge again.")
+      }
       const main = upstream.branches.get("main")!
       const t = new Map(treeOf(main))
       for (const [path, sha] of diff(pr)) t.set(path, sha)

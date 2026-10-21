@@ -5,9 +5,10 @@ import { WORLD } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
 import { createLearner } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
+import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
-import { DEFAULT_MAX_STEPS_PER_SEC, runSession, type SessionLearner } from "@blanktab/harness/session"
+import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
 import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
@@ -23,6 +24,8 @@ const FRAME_MS = 33 // at most ~30 frames a second reach the page
 /** No frames while the page is hidden (the page says when it is). */
 const frames = frameGate(FRAME_MS)
 const RATE_WINDOW_MS = 3000
+/** The page's refreshed knowledge and forced checkpoints, for whichever run of the life is current (it outlives GPU restores). */
+const inbox = new SessionInbox()
 
 /** Steps per second over the last RATE_WINDOW_MS. */
 function rateMeter(): (steps: number) => number {
@@ -54,14 +57,17 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
     record = undefined
     return runSession(c, {
       ...(adopted !== undefined ? { checkpointRecord: adopted } : {}),
-      world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen),
+      world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen), inbox,
       createLearner: async (init): Promise<SessionLearner> => {
         const l = await createLearner({ backend: chosen.backend, ...init })
         const birth = "state" in init ? init.state : init
         post({ type: "learner", settings: { ...birth.settings, maxStepsPerSec: c.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC, seed: birth.seed }, widths: { ...birth.widths } })
         if (!("state" in init)) post({ type: "curve", points: [], reset: true })
+        // Refreshed knowledge goes to the learner if it takes it (the 04a learner does not; its logs still record the sha in force).
+        const takesKnowledge = l as { onKnowledge?(m: Manifest): void }
         return {
           step: o => l.step(o), stats: () => l.stats(), save: () => l.save(), dispose: () => l.dispose(),
+          onKnowledge: k => takesKnowledge.onKnowledge?.(k),
           async sleep() {
             await l.sleep()
             const s = l.stats()
@@ -101,13 +107,18 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
     onBackend: c => post({ type: "backend", kind: c.kind, label: c.label }),
     onStatus: message => post({ type: "status", message }),
   })
-  post({ type: "final", steps: r.steps, cu: r.cu })
+  // Halted after a forced save: the life is not over, and the page reloads onto that save (even if it had stopped
+  // waiting for the answer; any request it makes from now on is answered true at once by the inbox).
+  post(r.halted ? { type: "halted" } : { type: "final", steps: r.steps, cu: r.cu })
 }
 
 let started = false
 scope.onmessage = e => {
-  if (e.data.type === "visibility") { frames.setHidden(e.data.hidden); return }
-  if (e.data.type !== "start" || started) return
+  const m = e.data
+  if (m.type === "visibility") { frames.setHidden(m.hidden); return }
+  if (m.type === "knowledge") { inbox.setKnowledge(m.manifest); return }
+  if (m.type === "checkpointNow") { void inbox.checkpointNow({ halt: m.halt }).then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
+  if (m.type !== "start" || started) return
   started = true
-  start(e.data).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))
+  start(m).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))
 }

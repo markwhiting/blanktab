@@ -17,9 +17,11 @@ jobs:
     outputs:
       merged: ${{ steps.gate.outputs.merged }}
     steps:
+      # Full history: a learner belongs to the author of the PR that first put its logs on main (github.ts boundAuthor).
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22

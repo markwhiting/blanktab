@@ -118,7 +118,7 @@ function renderHistory(k: Knowledge): void {
 
 export interface Ui {
   knowledge(k: Knowledge): void
-  learner(o: { id: string; sessionsBefore: number; lifetimeCU: number }): void
+  learner(o: { id: string; sessionsBefore: number; lifetimeCU?: number }): void
   /** The settings the learner runs with (as the worker reports them). */
   settings(settings: Record<string, number | string>): void
   backend(label: string): void
@@ -130,6 +130,8 @@ export interface Ui {
   status(message: string): void
   /** A note in the life line that is not an error (e.g. a learner that cannot be resumed, a blocked database). */
   notice(message: string): void
+  /** About this page's code (a newer version that cannot resume this learner): kept apart from the life notices, which replace each other. */
+  update(message: string): void
   contribution(s: ContributorStatus): void
   lifeComplete(id: string): void
   error(message: string): void
@@ -147,7 +149,7 @@ export function createUi(): Ui {
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   const curveCanvas = byTest("curve") as HTMLCanvasElement
-  let lifetime = 0
+  let lifetime: number | undefined
   let curve: CurvePoint[] = []
   setupTabs()
   renderStatic()
@@ -184,7 +186,7 @@ export function createUi(): Ui {
     },
     progress(steps, cu) {
       byTest("steps").textContent = String(steps)
-      byTest("cu").textContent = `${fmtCU(cu)} of ${fmt(lifetime)} CU`
+      byTest("cu").textContent = lifetime === undefined ? `${fmtCU(cu)} CU` : `${fmtCU(cu)} of ${fmt(lifetime)} CU`
     },
     curve(points, reset) {
       curve = appendPoints(reset ? [] : curve, points)
@@ -198,6 +200,11 @@ export function createUi(): Ui {
       life.hidden = false
       life.classList.remove("error")
       life.textContent = message
+    },
+    update(message) {
+      const el = byTest("update")
+      el.hidden = false
+      el.textContent = message
     },
     contribution(s) {
       const waiting = s.pending > 0 ? ` (${s.pending} log${s.pending === 1 ? "" : "s"} waiting in this browser)` : ""

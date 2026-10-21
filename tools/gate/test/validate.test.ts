@@ -165,12 +165,30 @@ describe("validateSessionPr", () => {
     const r = errs([file(log(0)), { path: `data/runs/${ID}/0.json`, content: JSON.stringify(log(0)) }])
     expect(r.errors.join("\n")).toContain("duplicate seq 0")
   })
-  it("rejects seq not continuing from previous", () => {
-    expect(errs([file(log(3))], [log(0), log(1)]).errors.join("\n")).toContain("expected seq 2")
-    expect(errs([file(log(1))], [log(0), log(1)]).errors.join("\n")).toContain("expected seq 2")
+  it("seq must be strictly greater than the highest seq already on main (decision 0014: gaps are allowed, never a repeat)", () => {
+    expect(errs([file(log(1))], [log(0), log(1)]).errors.join("\n")).toContain("seq 1 is not above seq 1, the highest on main")
+    expect(errs([file(log(0))], [log(0), log(1)]).errors.join("\n")).toContain("seq 0 is not above seq 1, the highest on main")
+    expect(errs([file(log(1)), file(log(2))], [log(0), log(1)]).errors.join("\n")).toContain("seq 1 is not above")
+    // the order on main counts, not the order of `previous`
+    expect(errs([file(log(2))], [log(3), log(0)]).ok).toBe(false)
   })
-  it("rejects first seq not 0 with no previous", () => {
-    expect(errs([file(log(1))]).errors.join("\n")).toContain("expected seq 0")
+  it("a gap after main's highest seq is allowed: the files of a PR the gate closed are simply missing", () => {
+    expect(errs([file(log(3))], [log(0), log(1)]).ok).toBe(true)
+    expect(errs([file(log(5)), file(log(9))], [log(0), log(1)]).ok).toBe(true)
+    expect(errs([file(log(1))]).ok).toBe(true) // nothing on main yet: the first PR (seq 0) was closed
+    expect(errs([file(log(4)), file(log(7, { final: true }))]).ok).toBe(true)
+  })
+  it("a gap may not reach past the exact integers", () => {
+    expect(errs([file(log(Number.MAX_SAFE_INTEGER))]).ok).toBe(true)
+    const big = Number.MAX_SAFE_INTEGER + 1
+    const f = { path: `data/runs/${ID}/${big}.json`, content: JSON.stringify(log(big)) }
+    expect(errs([f]).errors.join("\n")).toContain("beyond the largest exact integer")
+  })
+  it("the other rules still hold across a gap: stepsTotal and the v2 counters never decrease, final is last", () => {
+    expect(errs([file(log(5, { stepsTotal: 150 }))], [log(0), log(1)]).errors.join("\n")).toContain("stepsTotal decreased")
+    expect(errs([file(logV2(6, { cu: 1, curve: [] }))], [logV2(0), logV2(1), logV2(2)]).errors.join("\n")).toContain("cu decreased")
+    expect(errs([file(log(4, { final: true })), file(log(7))]).errors.join("\n")).toContain("highest seq")
+    expect(errs([file(log(9))], [log(0), log(1, { final: true })]).ok).toBe(false)
   })
   it("rejects decreasing stepsTotal", () => {
     const r = errs([file(log(0)), file(log(1, { stepsTotal: 50 }))])

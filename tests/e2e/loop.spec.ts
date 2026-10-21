@@ -24,7 +24,8 @@ const SPACE = [
 ]
 const KNOWLEDGE: Record<string, unknown> = {
   "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123 }] },
-  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "a".repeat(40) },
+  // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
+  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 1 },
   "settings-space.json": { schemaVersion: 1, settings: SPACE },
 }
 
@@ -61,7 +62,7 @@ async function setup(page: Page, opts: { knowledge: "ok" | "unreachable"; token?
 }
 
 const stepsLived = async (page: Page) => Number((await page.getByTestId("steps").textContent())?.match(/^(\d+)/)?.[1] ?? NaN)
-const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) of/)?.[1] ?? NaN)
+const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) (?:of |CU)/)?.[1] ?? NaN)
 const curvePoints = async (page: Page) => Number(await page.getByTestId("curve").getAttribute("data-points"))
 
 /** Writes rows straight into the page's IndexedDB (as an earlier page version or a crashed life would have left them). */
@@ -297,6 +298,32 @@ test("a reload resumes the learner from its checkpoint; a duplicated tab (same s
   expect(await dup.evaluate(() => sessionStorage.getItem("blanktab:learnerId"))).toBe(dupId)
   await expect(learner).toHaveText(id) // the original keeps its learner
   await expect.poll(() => stepsLived(dup)).toBeGreaterThan(0)
+})
+
+test("a local-only learner (3 PRs closed in a row): resumed, it keeps learning and the page says it no longer contributes", async ({ page }) => {
+  await setup(page, { knowledge: "ok", token: TOKEN })
+  await page.goto(LONG)
+  const learner = page.getByTestId("learner-id")
+  await expect(learner).toHaveText(ID_RE)
+  const id = (await learner.textContent())!.match(ID_RE)![0]
+  await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  // What the contributor records after the gate closed three of its PRs unmerged (packages/harness contributor settle).
+  await page.evaluate(i => new Promise<void>((res, rej) => {
+    const req = indexedDB.open("blanktab")
+    req.onsuccess = () => {
+      const tx = req.result.transaction("contribution", "readwrite")
+      tx.objectStore("contribution").put({ learnerId: i, lastPr: 3, closedInARow: 3, localOnly: true })
+      tx.oncomplete = () => { req.result.close(); res() }
+      tx.onerror = () => rej(tx.error)
+    }
+    req.onerror = () => rej(req.error)
+  }), id)
+  await page.reload()
+  await expect(learner).toHaveText(id)
+  await expect(page.getByTestId("life")).toHaveText("This learner's logs were rejected; it keeps learning here but no longer contributes.")
+  const before = await stepsLived(page)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(before)
+  await page.screenshot({ path: test.info().outputPath("page-local-only.png"), fullPage: true })
 })
 
 test("a closed tab's learner is adopted by the next new tab; surplus and stale orphans are deleted", async ({ page, context }) => {

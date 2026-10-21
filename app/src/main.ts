@@ -1,10 +1,11 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, DEFAULT_LIFETIME_CU, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
-  createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
+  DB_BLOCKED_MESSAGE, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
+  createContributor, getToken, hasCheckpoint, loadKnowledge, loadManifest, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 import { seedsOf, type LifeConfig } from "./life"
 import type { FromWorker, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
@@ -12,14 +13,17 @@ import { flushPolicy } from "./schedule"
 import { birthSettings } from "./settings"
 import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
+import { startUpdates } from "./updates"
 
 const NEWBORN_DELAY_MS = 2_000
 const PRESENCE_CHANNEL = "blanktab:presence"
 const PRESENCE_WAIT_MS = 250
+/** A forced checkpoint not answered in this long counts as not saved (the reload is retried later). */
+const CHECKPOINT_WAIT_MS = 60_000
 
 // Test-only overrides. In the production build MODE is the literal "production" and this is dropped.
 const test: TestParams = import.meta.env.MODE !== "production" ? readTestParams(location.search) : {}
-const lifetimeCU = test.lifetimeCU ?? DEFAULT_LIFETIME_CU
+const lifetimeCU = test.lifetimeCU // undefined: the learner lives as long as its tab
 
 const fetchFn: typeof fetch = (input, init) => fetch(input, init)
 
@@ -85,7 +89,26 @@ function lockOwn(id: string): Promise<(() => void) | null> {
   return waitLock(navigator.locks, id).then(h => h && h.release)
 }
 
-interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void }
+/** The life running in this tab, as the updates see it. */
+interface Life {
+  /** Its learnerId. */
+  id: string
+  /** Hands refreshed knowledge to the learner (its manifest only: the sha is what its logs record). */
+  knowledge(k: Knowledge): void
+  /**
+   * A forced checkpoint: true once saved; false if not (skips outstanding, no answer in CHECKPOINT_WAIT_MS, the life
+   * ended). With `halt` the learner stops right after the save.
+   */
+  checkpoint(halt: boolean): Promise<boolean>
+  /** Stops the learner where it is (before a reload onto the checkpoint just saved). */
+  halt(): void
+}
+
+/**
+ * `knowledge`: the latest the page has (refreshed while it lives); newborns are born from it. `life`: the running one,
+ * if any. `halted`: the running learner stopped at a forced save (startUpdates' halted: the page reloads onto it).
+ */
+interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void; life: Life | null; halted: () => void }
 
 const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
 
@@ -94,7 +117,8 @@ const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
  * the sweep that adopted it (handed to the worker, so it is not read twice).
  */
 async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): Promise<void> {
-  const { ui, queue, knowledge, queued } = ctx
+  const { ui, queue, queued } = ctx
+  const knowledge = ctx.knowledge
   const release = held ?? (await lockLearner(id))
   if (release === null) return newborn(ctx) // another tab is living this learner's life
   const latest = await queue.latest(id)
@@ -107,21 +131,41 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   }
   const b = birth(latest, knowledge)
   const cfg: LifeConfig = {
-    learnerId: id, codeSha: __CODE_SHA__, ...b, hostSig: await hostSig(), seed: seedsOf(id).learner, lifetimeCU,
+    learnerId: id, codeSha: __CODE_SHA__, ...b, hostSig: await hostSig(), seed: seedsOf(id).learner,
+    ...(lifetimeCU !== undefined ? { lifetimeCU } : {}),
     ...(test.stepsPerSecond !== undefined ? { maxStepsPerSec: test.stepsPerSecond } : {}),
     ...(test.sleepInterval !== undefined ? { sleepInterval: test.sleepInterval } : {}),
   }
-  ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, lifetimeCU })
+  ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, ...(lifetimeCU !== undefined ? { lifetimeCU } : {}) })
 
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
   // A hidden page draws nothing: the worker stops posting frames until it is shown again.
   const visibility = () => worker.postMessage({ type: "visibility", hidden: document.hidden } satisfies ToWorker)
   document.addEventListener("visibilitychange", visibility)
   let over = false
+  let nextCheckpoint = 0
+  const waiting = new Map<number, (saved: boolean) => void>()
+  const life: Life = {
+    id,
+    knowledge: k => worker.postMessage({ type: "knowledge", manifest: k.manifest } satisfies ToWorker),
+    checkpoint: halt => new Promise<boolean>(resolve => {
+      if (over) return resolve(false)
+      const id = nextCheckpoint++
+      const timer = setTimeout(() => { waiting.delete(id); resolve(false) }, CHECKPOINT_WAIT_MS)
+      waiting.set(id, saved => { clearTimeout(timer); waiting.delete(id); resolve(saved) })
+      worker.postMessage({ type: "checkpointNow", id, halt } satisfies ToWorker)
+    }),
+    halt: () => worker.terminate(),
+  }
+  ctx.life = life
+  // Its logs were rejected too often (decision 0014): it lives on here, but no longer contributes.
+  void queue.contribution(id).then(c => { if (c.localOnly && ctx.life === life) ui.notice(LOCAL_ONLY_MESSAGE) }, () => {})
   /** The learner always runs: whether its life completed or failed, a newborn takes its place. */
   const end = (show: () => void) => {
     if (over) return
     over = true
+    if (ctx.life === life) ctx.life = null
+    for (const answer of [...waiting.values()]) answer(false)
     document.removeEventListener("visibilitychange", visibility)
     worker.terminate()
     release()
@@ -137,9 +181,12 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "status") ui.status(m.message)
     else if (m.type === "queued") {
       ui.progress(m.steps, m.cu)
-      // Without a token nothing is ever sent: keep the outbox bounded (never this learner's files).
-      void queue.capUnsent(MAX_UNSENT, [id]).catch(() => {}).then(() => queued(m.final))
+      // Without a token (or for a local-only learner) nothing is ever sent: keep each learner's unsent files bounded.
+      void queue.capUnsent(MAX_UNSENT).catch(() => {}).then(() => queued(m.final))
     }
+    // Stopped at a forced save, perhaps after the page had stopped waiting for its answer: reload onto it now.
+    else if (m.type === "halted") ctx.halted()
+    else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
     else if (m.type === "error") end(() => ui.error(`${m.message}. A newborn takes its place.`))
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
@@ -149,6 +196,8 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),
   }
   worker.postMessage(start, buffersOf(record)) // moved, not copied
+  // The knowledge in force from now on, for a resumed learner too (it was saved with what it had then).
+  if (!knowledge.offline) life.knowledge(knowledge)
 }
 
 async function main(ui: Ui): Promise<void> {
@@ -166,8 +215,10 @@ async function main(ui: Ui): Promise<void> {
   const [knowledge, queue] = await Promise.all([loadKnowledge(import.meta.env.BASE_URL, fetchFn), openQueue(indexedDB)])
   ui.knowledge(knowledge)
 
+  let current: Ctx | null = null
   const contributor = createContributor({
     queue, ls: localStorage, fetchFn, now: () => new Date(),
+    onLocalOnly: id => { if (current?.life?.id === id) ui.notice(LOCAL_ONLY_MESSAGE) },
     onStatus: s => {
       ui.contribution(s)
       // Anything the token itself is the cause of: offer to paste another one.
@@ -193,7 +244,9 @@ async function main(ui: Ui): Promise<void> {
   })
   flush() // logs left by earlier tabs or lives
 
-  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued }
+  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued, life: null, halted: () => {} }
+  current = ctx
+  ctx.halted = watchForUpdates(ctx).halted
   const release = await ownLock
   if (own !== null && release !== null) {
     await sweep(false, own)
@@ -208,6 +261,45 @@ async function main(ui: Ui): Promise<void> {
     return live(adopted.learnerId, ctx, adopted.release, adopted.record)
   }
   return newborn(ctx)
+}
+
+/**
+ * Decision 0014: refreshed knowledge goes to the running learner (and to newborns); new code is reloaded onto if it can
+ * resume this learner's checkpoint (the learner is saved first), and otherwise the learner lives on here and the page
+ * says so. Nothing polls while the page is hidden.
+ */
+function watchForUpdates(ctx: Ctx): { halted(): void } {
+  const visibility = {
+    hidden: () => document.hidden,
+    onChange: (fn: () => void) => {
+      document.addEventListener("visibilitychange", fn)
+      return () => document.removeEventListener("visibilitychange", fn)
+    },
+  }
+  const poll = test.pollMs !== undefined ? { everyMs: test.pollMs, jitterMs: 0 } : undefined
+  return startUpdates({
+    env: {
+      timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h as ReturnType<typeof setTimeout>) },
+      visibility, random: Math.random, now: () => performance.now(),
+    },
+    initial: ctx.knowledge, codeSha: __CODE_SHA__, learnerStateVersion: LEARNER_STATE_VERSION, storage: sessionStorage,
+    loadKnowledge: () => loadKnowledge(import.meta.env.BASE_URL, fetchFn),
+    loadManifest: () => loadManifest(import.meta.env.BASE_URL, fetchFn),
+    onKnowledge: k => {
+      ctx.knowledge = k
+      ctx.ui.knowledge(k)
+      ctx.life?.knowledge(k)
+    },
+    // Halted at the save, so the reload loses no step. No learner running: nothing to save.
+    checkpoint: () => ctx.life?.checkpoint(true) ?? Promise.resolve(true),
+    reload: () => {
+      ctx.life?.halt()
+      location.reload()
+    },
+    notice: m => ctx.ui.update(m),
+    ...(poll ? { knowledgePoll: poll, manifestPoll: poll, retryMs: poll.everyMs } : {}),
+    ...(test.reloadJitterMs !== undefined ? { reloadJitterMs: test.reloadJitterMs } : {}),
+  })
 }
 
 /**

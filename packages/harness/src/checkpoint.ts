@@ -25,8 +25,9 @@ export interface Checkpoint<S = LearnerState> {
   /** Skipped updates thrown away by those restores (added to the learner's own count in LogFileV2.skippedUpdates). */
   lostSkips: number
   /**
-   * Birth facts the log files repeat (LogFileV2.knowledgeSha, sessionsSeenAtBirth), so a life resumed before its first
-   * log keeps them. Absent in checkpoints written before they were added.
+   * What the log files repeat (LogFileV2.knowledgeSha, sessionsSeenAtBirth), so a resumed life keeps them: the
+   * knowledge in force at this save (refreshed during a life, decision 0014) and the birth fact. Absent in checkpoints
+   * written before they were added.
    */
   knowledgeSha?: string
   sessionsSeenAtBirth?: number
