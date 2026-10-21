@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { computeKnowledgeSha, resolveCodeSha } from "../manifest.ts"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
+import { buildManifest, computeKnowledgeSha, resolveCodeSha } from "../manifest.ts"
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "manifest-")) })
@@ -39,5 +40,13 @@ describe("resolveCodeSha", () => {
     expect(resolveCodeSha("b".repeat(40))).toBe("b".repeat(40))
     expect(resolveCodeSha(undefined)).toBe("dev")
     expect(resolveCodeSha("nonsense")).toBe("dev")
+  })
+})
+
+describe("buildManifest", () => {
+  it("carries knowledgeSha, codeSha and the learnerStateVersion this code reads and writes", () => {
+    writeFileSync(join(dir, "settings-space.json"), "S")
+    expect(buildManifest(dir, "b".repeat(40))).toEqual({ knowledgeSha: computeKnowledgeSha(dir), codeSha: "b".repeat(40), learnerStateVersion: LEARNER_STATE_VERSION })
+    expect(Number.isInteger(LEARNER_STATE_VERSION) && LEARNER_STATE_VERSION >= 1).toBe(true)
   })
 })

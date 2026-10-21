@@ -36,8 +36,8 @@ export interface LearnerStats {
   sleeps: number
 }
 
-/** The checkpoint format version; bump it whenever LearnerState or Model.params order changes. */
-export const LEARNER_STATE_VERSION = 1
+import { LEARNER_STATE_VERSION } from "./version"
+export { LEARNER_STATE_VERSION }
 
 /**
  * Everything a learner carries between steps, as plain typed arrays and JSON (structured-clone friendly, for

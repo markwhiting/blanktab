@@ -130,6 +130,8 @@ export interface Ui {
   status(message: string): void
   /** A note in the life line that is not an error (e.g. a learner that cannot be resumed, a blocked database). */
   notice(message: string): void
+  /** About this page's code (a newer version that cannot resume this learner): kept apart from the life notices, which replace each other. */
+  update(message: string): void
   contribution(s: ContributorStatus): void
   lifeComplete(id: string): void
   error(message: string): void
@@ -198,6 +200,11 @@ export function createUi(): Ui {
       life.hidden = false
       life.classList.remove("error")
       life.textContent = message
+    },
+    update(message) {
+      const el = byTest("update")
+      el.hidden = false
+      el.textContent = message
     },
     contribution(s) {
       const waiting = s.pending > 0 ? ` (${s.pending} log${s.pending === 1 ? "" : "s"} waiting in this browser)` : ""

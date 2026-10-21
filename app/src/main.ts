@@ -2,9 +2,10 @@
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
   DB_BLOCKED_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
-  createContributor, getToken, hasCheckpoint, loadKnowledge, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
+  createContributor, getToken, hasCheckpoint, loadKnowledge, loadManifest, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 import { seedsOf, type LifeConfig } from "./life"
 import type { FromWorker, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
@@ -12,10 +13,13 @@ import { flushPolicy } from "./schedule"
 import { birthSettings } from "./settings"
 import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
+import { startUpdates } from "./updates"
 
 const NEWBORN_DELAY_MS = 2_000
 const PRESENCE_CHANNEL = "blanktab:presence"
 const PRESENCE_WAIT_MS = 250
+/** A forced checkpoint not answered in this long counts as not saved (the reload is retried later). */
+const CHECKPOINT_WAIT_MS = 60_000
 
 // Test-only overrides. In the production build MODE is the literal "production" and this is dropped.
 const test: TestParams = import.meta.env.MODE !== "production" ? readTestParams(location.search) : {}
@@ -85,7 +89,18 @@ function lockOwn(id: string): Promise<(() => void) | null> {
   return waitLock(navigator.locks, id).then(h => h && h.release)
 }
 
-interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void }
+/** The life running in this tab, as the updates see it. */
+interface Life {
+  /** Hands refreshed knowledge to the learner. */
+  knowledge(k: Knowledge): void
+  /** A forced checkpoint: true once saved; false if not (skips outstanding, no answer in CHECKPOINT_WAIT_MS, the life ended). */
+  checkpoint(): Promise<boolean>
+  /** Stops the learner where it is (before a reload onto the checkpoint just saved). */
+  halt(): void
+}
+
+/** `knowledge`: the latest the page has (refreshed while it lives); newborns are born from it. `life`: the running one, if any. */
+interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void; life: Life | null }
 
 const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
 
@@ -94,7 +109,8 @@ const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
  * the sweep that adopted it (handed to the worker, so it is not read twice).
  */
 async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): Promise<void> {
-  const { ui, queue, knowledge, queued } = ctx
+  const { ui, queue, queued } = ctx
+  const knowledge = ctx.knowledge
   const release = held ?? (await lockLearner(id))
   if (release === null) return newborn(ctx) // another tab is living this learner's life
   const latest = await queue.latest(id)
@@ -119,10 +135,26 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   const visibility = () => worker.postMessage({ type: "visibility", hidden: document.hidden } satisfies ToWorker)
   document.addEventListener("visibilitychange", visibility)
   let over = false
+  let nextCheckpoint = 0
+  const waiting = new Map<number, (saved: boolean) => void>()
+  const life: Life = {
+    knowledge: k => worker.postMessage({ type: "knowledge", knowledge: k } satisfies ToWorker),
+    checkpoint: () => new Promise<boolean>(resolve => {
+      if (over) return resolve(false)
+      const id = nextCheckpoint++
+      const timer = setTimeout(() => { waiting.delete(id); resolve(false) }, CHECKPOINT_WAIT_MS)
+      waiting.set(id, saved => { clearTimeout(timer); waiting.delete(id); resolve(saved) })
+      worker.postMessage({ type: "checkpointNow", id } satisfies ToWorker)
+    }),
+    halt: () => worker.terminate(),
+  }
+  ctx.life = life
   /** The learner always runs: whether its life completed or failed, a newborn takes its place. */
   const end = (show: () => void) => {
     if (over) return
     over = true
+    if (ctx.life === life) ctx.life = null
+    for (const answer of [...waiting.values()]) answer(false)
     document.removeEventListener("visibilitychange", visibility)
     worker.terminate()
     release()
@@ -141,6 +173,7 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
       // Without a token nothing is ever sent: keep the outbox bounded (never this learner's files).
       void queue.capUnsent(MAX_UNSENT, [id]).catch(() => {}).then(() => queued(m.final))
     }
+    else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
     else if (m.type === "error") end(() => ui.error(`${m.message}. A newborn takes its place.`))
     else if (m.type === "final") end(() => ui.lifeComplete(id))
   }
@@ -150,6 +183,8 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),
   }
   worker.postMessage(start, buffersOf(record)) // moved, not copied
+  // The knowledge in force from now on, for a resumed learner too (it was saved with what it had then).
+  if (!knowledge.offline) life.knowledge(knowledge)
 }
 
 async function main(ui: Ui): Promise<void> {
@@ -194,7 +229,8 @@ async function main(ui: Ui): Promise<void> {
   })
   flush() // logs left by earlier tabs or lives
 
-  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued }
+  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued, life: null }
+  watchForUpdates(ctx)
   const release = await ownLock
   if (own !== null && release !== null) {
     await sweep(false, own)
@@ -209,6 +245,41 @@ async function main(ui: Ui): Promise<void> {
     return live(adopted.learnerId, ctx, adopted.release, adopted.record)
   }
   return newborn(ctx)
+}
+
+/**
+ * Decision 0014: refreshed knowledge goes to the running learner (and to newborns); new code is reloaded onto if it can
+ * resume this learner's checkpoint (the learner is saved first), and otherwise the learner lives on here and the page
+ * says so. Nothing polls while the page is hidden.
+ */
+function watchForUpdates(ctx: Ctx): void {
+  const visibility = {
+    hidden: () => document.hidden,
+    onChange: (fn: () => void) => {
+      document.addEventListener("visibilitychange", fn)
+      return () => document.removeEventListener("visibilitychange", fn)
+    },
+  }
+  const poll = test.pollMs !== undefined ? { everyMs: test.pollMs, jitterMs: 0 } : undefined
+  startUpdates({
+    env: { timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h as ReturnType<typeof setTimeout>) }, visibility, random: Math.random },
+    initial: ctx.knowledge, codeSha: __CODE_SHA__, learnerStateVersion: LEARNER_STATE_VERSION, storage: sessionStorage,
+    loadKnowledge: () => loadKnowledge(import.meta.env.BASE_URL, fetchFn),
+    loadManifest: () => loadManifest(import.meta.env.BASE_URL, fetchFn),
+    onKnowledge: k => {
+      ctx.knowledge = k
+      ctx.ui.knowledge(k)
+      ctx.life?.knowledge(k)
+    },
+    checkpoint: () => ctx.life?.checkpoint() ?? Promise.resolve(true), // no learner running: nothing to save
+    reload: () => {
+      ctx.life?.halt()
+      location.reload()
+    },
+    notice: m => ctx.ui.update(m),
+    ...(poll ? { knowledgePoll: poll, manifestPoll: poll, retryMs: poll.everyMs } : {}),
+    ...(test.reloadJitterMs !== undefined ? { reloadJitterMs: test.reloadJitterMs } : {}),
+  })
 }
 
 /**

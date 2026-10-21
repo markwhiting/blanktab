@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { loadKnowledge, chooseSettings, OFFLINE_KNOWLEDGE_SHA, type Knowledge } from "../src/knowledge"
+import { loadKnowledge, loadManifest, chooseSettings, OFFLINE_KNOWLEDGE_SHA, type Knowledge } from "../src/knowledge"
 
 const row = (id: string) => ({
   learnerId: id, settings: { moveProbability: 0.5 }, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
@@ -78,6 +78,33 @@ describe("loadKnowledge", () => {
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "settings-space.json": { settings: [{ name: "x", min: 2, max: 1 }] } }).fn))
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "settings-space.json": { settings: [{ name: "bad key", min: 0, max: 1 }] } }).fn))
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": "<html>" }).fn))
+  })
+})
+
+describe("the manifest's learnerStateVersion", () => {
+  it("is read when present (a positive integer) and left out when absent (a manifest from before it existed)", async () => {
+    const withV = await loadKnowledge("/", fakeFetch({ ...FILES, "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 3 } }).fn)
+    expect(withV.manifest).toEqual({ knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 3 })
+    const without = await loadKnowledge("/", fakeFetch(FILES).fn)
+    expect(without.manifest).toEqual({ knowledgeSha: "c".repeat(64), codeSha: "dev" })
+  })
+  it("a malformed one makes the manifest malformed", async () => {
+    for (const v of [0, -1, 1.5, "1", null]) {
+      expect((await loadKnowledge("/", fakeFetch({ ...FILES, "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: v } }).fn)).offline).toBe(true)
+    }
+  })
+})
+
+describe("loadManifest", () => {
+  it("fetches only <base>knowledge/manifest.json and parses it", async () => {
+    const f = fakeFetch({ "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "a".repeat(40), learnerStateVersion: 1 } })
+    expect(await loadManifest("/learner/", f.fn)).toEqual({ knowledgeSha: "c".repeat(64), codeSha: "a".repeat(40), learnerStateVersion: 1 })
+    expect(f.urls).toEqual(["/learner/knowledge/manifest.json"])
+  })
+  it("is null when unreachable, missing or malformed (never throws)", async () => {
+    expect(await loadManifest("/", fakeFetch(FILES, { throws: true }).fn)).toBeNull()
+    expect(await loadManifest("/", fakeFetch({}).fn)).toBeNull()
+    expect(await loadManifest("/", fakeFetch({ "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "nope" } }).fn)).toBeNull()
   })
 })
 

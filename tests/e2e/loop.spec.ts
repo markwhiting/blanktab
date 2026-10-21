@@ -24,7 +24,8 @@ const SPACE = [
 ]
 const KNOWLEDGE: Record<string, unknown> = {
   "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123 }] },
-  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "a".repeat(40) },
+  // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
+  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 1 },
   "settings-space.json": { schemaVersion: 1, settings: SPACE },
 }
 
