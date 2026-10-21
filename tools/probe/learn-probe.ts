@@ -33,7 +33,7 @@ const NO_SLEEP = args.get("sleep") === "off"
 const SHADOW_EVERY = num("shadowEvery", 1) // shadow split measurement every k steps (1 = every step)
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
 const widths: Widths = { cpu: CPU_WIDTHS, gpu: GPU_WIDTHS, tiny: TINY }[args.get("widths") ?? "cpu"]!
-const LIVE: LearnerSettings = { lr: 0.002, headLrScale: 0.086, entropyWeight: 0.025, curiosityWeight: 1.32, bufferSize: 1491, replayPerSleep: 48, exploreEpsilon: 0 }
+const LIVE: LearnerSettings = { lr: 0.002, headLrScale: 0.086, entropyWeight: 0.025, curiosityWeight: 1.32, bufferSize: 1491, replayPerSleep: 48, exploreEpsilon: 0, residualDecay: 0 }
 const settings: LearnerSettings = { ...(args.get("settings") === "default" ? DEFAULT_SETTINGS : LIVE) }
 for (const k of Object.keys(settings) as (keyof LearnerSettings)[]) if (args.has(k)) settings[k] = Number(args.get(k))
 const JSON_OUT = args.get("json")

@@ -9,9 +9,9 @@ describe("birthSettings", () => {
     expect(birthSettings({})).toEqual({ learnerSettings: { ...DEFAULT_SETTINGS }, maxStepsPerSec: DEFAULT_MAX_STEPS_PER_SEC })
   })
   it("takes each picked learner setting and maxStepsPerSec, rounds the integer ones, and ignores the rest (moveProbability)", () => {
-    const b = birthSettings({ lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1234.6, replayPerSleep: 16.4, headLrScale: 0.05, exploreEpsilon: 0.15, maxStepsPerSec: 30, moveProbability: 0.7 })
+    const b = birthSettings({ lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1234.6, replayPerSleep: 16.4, headLrScale: 0.05, exploreEpsilon: 0.15, residualDecay: 1e-3, maxStepsPerSec: 30, moveProbability: 0.7 })
     expect(b).toEqual({
-      learnerSettings: { lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1235, replayPerSleep: 16, headLrScale: 0.05, exploreEpsilon: 0.15 },
+      learnerSettings: { lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1235, replayPerSleep: 16, headLrScale: 0.05, exploreEpsilon: 0.15, residualDecay: 1e-3 },
       maxStepsPerSec: 30,
     })
   })
@@ -31,6 +31,7 @@ describe("knowledge/settings-space.json", () => {
     expect(range("replayPerSleep")).toEqual([16, 128])
     expect(range("headLrScale")).toEqual([0.03, 0.3])
     expect(range("exploreEpsilon")).toEqual([0.05, 0.2])
+    expect(range("residualDecay")).toEqual([3e-4, 3e-3]) // around the chosen default 1e-3 (Plan 04a.2 Task 1 sweep)
     expect(range("maxStepsPerSec")).toEqual([30, 30])
     expect(range("moveProbability")).toEqual([0.1, 1])
   })

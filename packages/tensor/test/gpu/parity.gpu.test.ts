@@ -248,6 +248,15 @@ describe("webgpu parity with cpu", () => {
       return [p!, m!, v!]
     })
   })
+
+  it("adam with decoupled decay over three steps", async () => {
+    await parity("adam", [rand(n), rand(n), rand(n), rand(n), new Float32Array(n), new Float32Array(n)], (be, [p, g1, g2, g3, m, v]) => {
+      be.adam(p!, g1!, m!, v!, 0.01, 0.9, 0.999, 1e-8, 1, 1e-3)
+      be.adam(p!, g2!, m!, v!, 0.01, 0.9, 0.999, 1e-8, 2, 1e-3)
+      be.adam(p!, g3!, m!, v!, 0.01, 0.9, 0.999, 1e-8, 3, 1e-3)
+      return [p!, m!, v!]
+    })
+  })
 })
 
 /** Runs `fn` with `be` as the default backend (so param()/initGru() allocate there). */

@@ -174,5 +174,14 @@ export function describeBackendContract(label: string, make: () => Promise<Backe
       expect((await be.read(m))[0]).toBeCloseTo(0.05, 6)
       expect((await be.read(v))[0]).toBeCloseTo(0.00025, 7)
     })
+
+    it("adam with decoupled decay shrinks p before the step: p ← (1 − decay)·p − step", async () => {
+      const be = await make()
+      const p = be.upload(f(1, -2))
+      be.adam(p, be.upload(f(0.5, 0.5)), be.zeros(2), be.zeros(2), 0.1, 0.9, 0.999, 1e-8, 1, 0.25)
+      const got = await be.read(p)
+      expect(got[0]).toBeCloseTo(0.75 - 0.1, 5)
+      expect(got[1]).toBeCloseTo(-1.5 - 0.1, 5)
+    })
   })
 }

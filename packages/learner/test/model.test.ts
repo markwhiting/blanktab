@@ -76,6 +76,16 @@ describe("model", () => {
     m.dispose()
   })
 
+  it("residualParams are the shift gate then the four output layers: every parameter that starts at zero and expresses deviation from copy-last", async () => {
+    const m = createModel(createCpuBackend(), 3, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const n = m.params.length
+    expect(m.residualParams.length).toBe(5)
+    expect(m.residualParams[0]).toBe(m.params[n - 9]) // shiftGate
+    m.outputParams.forEach((t, i) => expect(m.residualParams[1 + i]).toBe(t))
+    for (const t of m.residualParams) expect((await t.read()).every((v) => v === 0)).toBe(true)
+    m.dispose()
+  })
+
   it("can be built from saved parameter values (checkpoint restore) and rejects ones that do not fit", async () => {
     const w: Widths = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
     const be = createCpuBackend()

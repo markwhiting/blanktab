@@ -273,7 +273,7 @@ export function createCpuBackend(): Backend {
       return make(out)
     },
 
-    adam(p, g, m, v, lr, b1, b2, eps, t) {
+    adam(p, g, m, v, lr, b1, b2, eps, t, decay = 0) {
       const pd = get(p)
       const gd = get(g)
       const md = get(m)
@@ -284,13 +284,14 @@ export function createCpuBackend(): Backend {
       if (new Set([p, g, m, v]).size !== 4) throw new ShapeError("adam: p, g, m, v must be distinct storages")
       const c1 = 1 - Math.pow(b1, t)
       const c2 = 1 - Math.pow(b2, t)
+      const keep = 1 - decay // exactly 1 at decay 0: bit-identical to plain Adam
       for (let i = 0; i < pd.length; i++) {
         const gi = gd[i]!
         const mi = b1 * md[i]! + (1 - b1) * gi
         const vi = b2 * vd[i]! + (1 - b2) * gi * gi
         md[i] = mi
         vd[i] = vi
-        pd[i] = pd[i]! - (lr * (mi / c1)) / (Math.sqrt(vi / c2) + eps)
+        pd[i] = keep * pd[i]! - (lr * (mi / c1)) / (Math.sqrt(vi / c2) + eps)
       }
       stats.flops += 10 * pd.length
     },

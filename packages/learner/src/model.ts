@@ -25,6 +25,11 @@ export interface Model {
   readonly params: readonly Tensor[]
   /** The predictor's zero-initialised residual output layers (headP w/b, headF w/b): the last four of `params`. */
   readonly outputParams: readonly Tensor[]
+  /**
+   * Every parameter that starts at zero and expresses deviation from copy-last: the shift gate, then outputParams.
+   * The learner's residualDecay pulls these back toward zero.
+   */
+  readonly residualParams: readonly Tensor[]
   readonly paramCount: number
   readonly widths: Widths
   /**
@@ -138,6 +143,7 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
   return {
     params,
     outputParams: [headP.w, headP.b, headF.w, headF.b],
+    residualParams: [shiftGate, headP.w, headP.b, headF.w, headF.b],
     paramCount: params.reduce((a, t) => a + t.size, 0),
     widths,
 

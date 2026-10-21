@@ -3,7 +3,7 @@ import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, emptyObservation, i
 import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
+import { DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
 import type { LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
@@ -70,7 +70,8 @@ const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
 describe("learner", { timeout: 30_000 }, () => { // every test builds a real learner: >= 30 s (controller ruling; ~1-8 s unloaded)
   // Several seeds must pass (task brief + controller rulings): after 3,000 steps the action-conditioned predictor
   // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha). Measured predLoss/baselineLoss at
-  // 3,000 steps (default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
+  // 3,000 steps (the then-default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
+  // Still passing at the Plan 04a.2 defaults (lr 5e-4, exploreEpsilon 0.1, residualDecay 1e-3).
   for (const seed of [1, 2, 3]) {
     it(`learns to predict the next frame better than copy-last after 3000 steps (seed ${seed})`, async () => {
       const { learner } = await run({ seed, steps: 3000 })
@@ -100,6 +101,8 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     // the 39 UpdateInfo.lossBefore values' float64 bytes.
     const GOLDEN_ACTIONS = "5.2.2.33 4.2.2.41 1.2.2.34 12.1.2.12 10.0.0.38 12.1.0.16 1.2.1.26 7.2.2.33 7.0.1.11 14.0.0.30 20.0.2.10 22.1.2.20 3.2.1.31 3.2.0.29 10.0.0.2 3.1.1.40 3.2.0.15 15.1.2.25 3.2.0.2 9.0.1.8 2.2.0.6 18.2.1.27 22.1.0.44 8.2.2.32 8.2.1.16 17.2.0.22 18.1.2.12 16.1.1.44 16.1.0.43 2.1.2.38 12.0.2.32 13.0.2.7 0.2.2.2 17.0.1.26 15.1.2.0 8.2.2.21 8.2.1.20 11.2.0.7 18.1.1.39 5.1.2.33"
     const GOLDEN_LOSS_HASH = "e40e135c"
+    /** The settings of that recording, on top of today's DEFAULT_SETTINGS: no exploration, no residual decay. */
+    const BEFORE = { lr: 1e-3, exploreEpsilon: 0, residualDecay: 0 }
     const fnv = (xs: number[]) => {
       let h = 0x811c9dc5
       for (const b of new Uint8Array(new Float64Array(xs).buffer)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
@@ -118,7 +121,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     })
 
     it("ε = 0 reproduces the learner from before exploration existed, bit for bit", async () => {
-      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: { exploreEpsilon: 0 } })
+      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: BEFORE })
       expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
       expect(r.updates.length).toBe(39)
       expect(fnv(r.updates.map((u) => u.lossBefore))).toBe(GOLDEN_LOSS_HASH)
@@ -150,6 +153,36 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       expect(rest).toEqual(whole.actions.slice(30))
       resumed.dispose()
       whole.learner.dispose()
+    })
+
+    it("residualDecay: defaults to 1e-3 (with lr 5e-4), clamped into [0, 1e-2]; a non-finite value is rejected", () => {
+      expect(DEFAULT_SETTINGS.residualDecay).toBe(1e-3)
+      expect(DEFAULT_SETTINGS.lr).toBe(5e-4)
+      expect(RESIDUAL_DECAY_RANGE).toEqual([0, 1e-2])
+      expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: 0.5 }).residualDecay).toBe(1e-2)
+      expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: -1 }).residualDecay).toBe(0)
+      for (const v of [Number.NaN, undefined as unknown as number]) expect(() => clampSettings({ ...DEFAULT_SETTINGS, residualDecay: v })).toThrow(RangeError)
+    })
+
+    it("residualDecay = 0 (with ε = 0, lr 1e-3) reproduces the learner from before either existed, bit for bit", async () => {
+      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: BEFORE })
+      expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
+      expect(fnv(r.updates.map((u) => u.lossBefore))).toBe(GOLDEN_LOSS_HASH)
+      r.learner.dispose()
+    })
+
+    it("residualDecay > 0 pulls the residual layers (shift gate, output layers) toward zero, deterministically", async () => {
+      const resid = async (l: { readParams(): Promise<Float32Array[]> }) => {
+        const ps = await l.readParams()
+        const n = ps.length
+        return [ps[n - 9]!, ...ps.slice(-4)].reduce((a, p) => a + p.reduce((b, v) => b + v * v, 0), 0)
+      }
+      const off = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 0 } })
+      const on = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 1e-2 } })
+      const on2 = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 1e-2 } })
+      expect(await resid(on.learner)).toBeLessThan(await resid(off.learner))
+      expect(on2.updates).toEqual(on.updates)
+      for (const r of [off, on, on2]) r.learner.dispose()
     })
 
     it("sampleAction: with probability ε a factor is uniform, otherwise it follows the policy", () => {

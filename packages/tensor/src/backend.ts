@@ -35,8 +35,8 @@ export interface Backend {
   gatherRows(a: Storage, rows: number, cols: number, idx: Int32Array): Storage
   /** adjoint of gatherRows */
   scatterAddRows(grad: Storage, rows: number, cols: number, idx: Int32Array): Storage
-  /** in-place, bias-corrected */
-  adam(p: Storage, g: Storage, m: Storage, v: Storage, lr: number, b1: number, b2: number, eps: number, t: number): void
+  /** in-place, bias-corrected; `decay` (default 0) is decoupled weight decay: p ← (1 − decay)·p − step */
+  adam(p: Storage, g: Storage, m: Storage, v: Storage, lr: number, b1: number, b2: number, eps: number, t: number, decay?: number): void
 }
 
 const fmt = (s: number[]) => `[${s.join(",")}]`

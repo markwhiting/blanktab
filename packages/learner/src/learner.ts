@@ -30,9 +30,19 @@ export interface LearnerSettings {
    * the bias is accepted for v1 (controller ruling, Plan 04a.2 Task 1). Clamped into EXPLORE_EPSILON_RANGE.
    */
   exploreEpsilon: number
+  /**
+   * Decoupled weight decay toward zero (AdamW-style, on the parameter) on Model.residualParams only — the shift gate
+   * and the residual output layers, which express "deviation from copy-last" and should return to it without
+   * continuing evidence. Per update of those parameters: p ← (1 − residualDecay)·p − Adam step (not scaled by lr).
+   * 0 is off and bit-exact to the learner without it. Clamped into RESIDUAL_DECAY_RANGE.
+   */
+  residualDecay: number
 }
 export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({
-  lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, exploreEpsilon: 0.1,
+  // lr 5e-4 and residualDecay 1e-3: Plan 04a.2 Task 1 sweep (held-out ≤ 0.95 at 5k steps on 5 of 6 seeds; see the
+  // task-1 report). exploreEpsilon 0.1: controller ruling.
+  lr: 5e-4, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, exploreEpsilon: 0.1,
+  residualDecay: 1e-3,
 })
 export interface LearnerStats {
   steps: number
@@ -114,6 +124,8 @@ export const LR_RANGE = [1e-5, 1e-2] as const
 export const HEAD_LR_SCALE_RANGE = [0.01, 1] as const
 /** exploreEpsilon is clamped into this range. */
 export const EXPLORE_EPSILON_RANGE = [0, 0.5] as const
+/** residualDecay is clamped into this range. */
+export const RESIDUAL_DECAY_RANGE = [0, 1e-2] as const
 /** TD discount. */
 export const GAMMA = 0.9
 /** Smoothing of the predLoss / baselineLoss moving averages. */
@@ -132,7 +144,7 @@ const FACTOR_ROWS = FACTORS.map((n, f) => Int32Array.from({ length: n }, (_, k) 
 const isPosInt = (v: number) => Number.isInteger(v) && v >= 1
 const isNonNeg = (v: number) => Number.isFinite(v) && v >= 0
 
-/** Validates settings and clamps lr, headLrScale and exploreEpsilon into their ranges. Throws RangeError for values that cannot be clamped. */
+/** Validates settings and clamps lr, headLrScale, exploreEpsilon and residualDecay into their ranges. Throws RangeError for values that cannot be clamped. */
 export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.lr)) throw new RangeError(`lr must be finite, got ${s.lr}`)
   if (!isNonNeg(s.entropyWeight)) throw new RangeError(`entropyWeight must be finite and >= 0, got ${s.entropyWeight}`)
@@ -141,10 +153,11 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!isPosInt(s.replayPerSleep)) throw new RangeError(`replayPerSleep must be an integer >= 1, got ${s.replayPerSleep}`)
   if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
   if (!Number.isFinite(s.exploreEpsilon)) throw new RangeError(`exploreEpsilon must be finite, got ${s.exploreEpsilon}`)
+  if (!Number.isFinite(s.residualDecay)) throw new RangeError(`residualDecay must be finite, got ${s.residualDecay}`)
   const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
   return {
     ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE),
-    exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE),
+    exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE), residualDecay: clamp(s.residualDecay, RESIDUAL_DECAY_RANGE),
   }
 }
 
@@ -408,8 +421,11 @@ export async function createLearner(opts: {
   let selL: Tensor
   let selV: Tensor
   try {
-    opts_.push(own(new Adam(model.params.filter((p) => !outputSet.has(p)), { lr: settings.lr })))
-    opts_.push(own(new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale })))
+    // residualDecay acts on Model.residualParams only: the shift gate (main optimizer) and the output layers.
+    const main = model.params.filter((p) => !outputSet.has(p))
+    const decay = { weightDecay: settings.residualDecay }
+    opts_.push(own(new Adam(main, { lr: settings.lr, ...decay, decayed: model.residualParams.filter((p) => !outputSet.has(p)) })))
+    opts_.push(own(new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale, ...decay })))
     const selLogits = new Float32Array(ACTION_DIM * (ACTION_DIM + 1))
     for (let k = 0; k < ACTION_DIM; k++) selLogits[k * (ACTION_DIM + 1) + k] = 1
     const selValue = new Float32Array(ACTION_DIM + 1)
