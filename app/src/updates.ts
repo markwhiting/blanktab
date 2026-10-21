@@ -27,20 +27,23 @@ const MAX_RELOADS_PER_CODE = 2
 
 export interface Timers { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void }
 export interface Visibility { hidden(): boolean; onChange(fn: () => void): () => void }
-export interface PollEnv { timers: Timers; visibility: Visibility; random: () => number }
+/** `now`: milliseconds, on the same clock as `timers`. */
+export interface PollEnv { timers: Timers; visibility: Visibility; random: () => number; now: () => number }
 
 export const jittered = (p: Period, random: () => number): number => p.everyMs + (2 * random() - 1) * p.jitterMs
 
 /**
  * Calls `check` once per jittered period, never at start, and never two at once. While the tab is hidden nothing is
- * scheduled; when it becomes visible `check` runs at once and the period starts again from there. A check that
- * throws is ignored (the next one comes as usual).
+ * scheduled; when it becomes visible `check` runs at once (unless the last check, or the start, was under half a
+ * period ago) and the period starts again from there. A check that throws is ignored (the next one comes as usual).
  */
 export function createPoller(check: () => unknown, period: Period, env: PollEnv): { stop(): void } {
-  const { timers, visibility, random } = env
+  const { timers, visibility, random, now } = env
   let timer: unknown = null
   let running = false
   let stopped = false
+  /** When the last check started; the page's own load (just before the poller starts) counts as one. */
+  let lastAt = now()
   const clear = () => {
     if (timer !== null) timers.clearTimeout(timer)
     timer = null
@@ -54,6 +57,7 @@ export function createPoller(check: () => unknown, period: Period, env: PollEnv)
     if (running || stopped) return
     if (visibility.hidden()) return // paused; checked when shown
     running = true
+    lastAt = now()
     try {
       await check()
     } catch {
@@ -65,6 +69,7 @@ export function createPoller(check: () => unknown, period: Period, env: PollEnv)
   }
   const unsubscribe = visibility.onChange(() => {
     if (visibility.hidden()) clear()
+    else if (now() - lastAt < period.everyMs / 2) { if (!running) schedule() } // checked just now: wait a period
     else { clear(); void run() }
   })
   schedule()
@@ -105,12 +110,27 @@ export interface UpdatesDeps {
 /** What makes knowledge new: its sha and its content (a new summary is new knowledge even with the same priors). */
 const fingerprint = (k: Knowledge) => JSON.stringify([k.manifest.knowledgeSha, k.summary, k.settingsSpace])
 
-/** Starts both pollers (knowledge, manifest); see UpdatesDeps. */
-export function startUpdates(d: UpdatesDeps): { stop(): void } {
+/**
+ * Starts both pollers (knowledge, manifest); see UpdatesDeps. `halted()`: the learner stopped at a forced save (the
+ * worker's `halted` message), possibly after this page had given up waiting for its answer: the page reloads onto that
+ * save now (any retry still pending is dropped).
+ */
+export function startUpdates(d: UpdatesDeps): { stop(): void; halted(): void } {
   const { timers, random } = d.env
   let handed = fingerprint(d.initial)
   let pendingReload: unknown = null
   let stopped = false
+  /** The reload being prepared (the code it is for and the how-many-th try), once one is decided. */
+  let target: { codeSha: string; tries: number } | null = null
+  let reloading = false
+  const reloadNow = () => {
+    if (reloading || stopped) return
+    reloading = true
+    if (pendingReload !== null) timers.clearTimeout(pendingReload)
+    pendingReload = null
+    if (target) d.storage.setItem(RELOAD_TARGET_KEY, JSON.stringify(target))
+    d.reload()
+  }
 
   const knowledge = createPoller(async () => {
     const k = await d.loadKnowledge()
@@ -127,15 +147,15 @@ export function startUpdates(d: UpdatesDeps): { stop(): void } {
    */
   const reloadFor = async (codeSha: string, tries: number): Promise<void> => {
     pendingReload = null
-    if (stopped) return
+    if (stopped || reloading) return
+    target = { codeSha, tries }
     const saved = await d.checkpoint().catch(() => false)
-    if (stopped) return
+    if (stopped || reloading) return
     if (!saved) {
       pendingReload = timers.setTimeout(() => void reloadFor(codeSha, tries), d.retryMs ?? CHECKPOINT_RETRY_MS)
       return
     }
-    d.storage.setItem(RELOAD_TARGET_KEY, JSON.stringify({ codeSha, tries }))
-    d.reload()
+    reloadNow()
   }
   /** The reloads this tab already made for `codeSha` and still came back on the old code. */
   const reloadsFor = (codeSha: string): number => {
@@ -170,6 +190,7 @@ export function startUpdates(d: UpdatesDeps): { stop(): void } {
   }, d.manifestPoll ?? MANIFEST_POLL, d.env)
 
   return {
+    halted: reloadNow,
     stop() {
       stopped = true
       knowledge.stop()

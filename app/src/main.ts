@@ -1,7 +1,7 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
+  DB_BLOCKED_MESSAGE, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
   createContributor, getToken, hasCheckpoint, loadKnowledge, loadManifest, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
@@ -91,6 +91,8 @@ function lockOwn(id: string): Promise<(() => void) | null> {
 
 /** The life running in this tab, as the updates see it. */
 interface Life {
+  /** Its learnerId. */
+  id: string
   /** Hands refreshed knowledge to the learner (its manifest only: the sha is what its logs record). */
   knowledge(k: Knowledge): void
   /**
@@ -102,8 +104,11 @@ interface Life {
   halt(): void
 }
 
-/** `knowledge`: the latest the page has (refreshed while it lives); newborns are born from it. `life`: the running one, if any. */
-interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void; life: Life | null }
+/**
+ * `knowledge`: the latest the page has (refreshed while it lives); newborns are born from it. `life`: the running one,
+ * if any. `halted`: the running learner stopped at a forced save (startUpdates' halted: the page reloads onto it).
+ */
+interface Ctx { ui: Ui; queue: Queue; knowledge: Knowledge; queued: (final: boolean) => void; life: Life | null; halted: () => void }
 
 const newborn = (ctx: Ctx) => live(newLearnerId(sessionStorage), ctx)
 
@@ -141,6 +146,7 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   let nextCheckpoint = 0
   const waiting = new Map<number, (saved: boolean) => void>()
   const life: Life = {
+    id,
     knowledge: k => worker.postMessage({ type: "knowledge", manifest: k.manifest } satisfies ToWorker),
     checkpoint: halt => new Promise<boolean>(resolve => {
       if (over) return resolve(false)
@@ -152,6 +158,8 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     halt: () => worker.terminate(),
   }
   ctx.life = life
+  // Its logs were rejected too often (decision 0014): it lives on here, but no longer contributes.
+  void queue.contribution(id).then(c => { if (c.localOnly && ctx.life === life) ui.notice(LOCAL_ONLY_MESSAGE) }, () => {})
   /** The learner always runs: whether its life completed or failed, a newborn takes its place. */
   const end = (show: () => void) => {
     if (over) return
@@ -173,9 +181,11 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "status") ui.status(m.message)
     else if (m.type === "queued") {
       ui.progress(m.steps, m.cu)
-      // Without a token nothing is ever sent: keep the outbox bounded (never this learner's files).
-      void queue.capUnsent(MAX_UNSENT, [id]).catch(() => {}).then(() => queued(m.final))
+      // Without a token (or for a local-only learner) nothing is ever sent: keep each learner's unsent files bounded.
+      void queue.capUnsent(MAX_UNSENT).catch(() => {}).then(() => queued(m.final))
     }
+    // Stopped at a forced save, perhaps after the page had stopped waiting for its answer: reload onto it now.
+    else if (m.type === "halted") ctx.halted()
     else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
     else if (m.type === "error") end(() => ui.error(`${m.message}. A newborn takes its place.`))
     else if (m.type === "final") end(() => ui.lifeComplete(id))
@@ -205,8 +215,10 @@ async function main(ui: Ui): Promise<void> {
   const [knowledge, queue] = await Promise.all([loadKnowledge(import.meta.env.BASE_URL, fetchFn), openQueue(indexedDB)])
   ui.knowledge(knowledge)
 
+  let current: Ctx | null = null
   const contributor = createContributor({
     queue, ls: localStorage, fetchFn, now: () => new Date(),
+    onLocalOnly: id => { if (current?.life?.id === id) ui.notice(LOCAL_ONLY_MESSAGE) },
     onStatus: s => {
       ui.contribution(s)
       // Anything the token itself is the cause of: offer to paste another one.
@@ -232,8 +244,9 @@ async function main(ui: Ui): Promise<void> {
   })
   flush() // logs left by earlier tabs or lives
 
-  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued, life: null }
-  watchForUpdates(ctx)
+  const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued, life: null, halted: () => {} }
+  current = ctx
+  ctx.halted = watchForUpdates(ctx).halted
   const release = await ownLock
   if (own !== null && release !== null) {
     await sweep(false, own)
@@ -255,7 +268,7 @@ async function main(ui: Ui): Promise<void> {
  * resume this learner's checkpoint (the learner is saved first), and otherwise the learner lives on here and the page
  * says so. Nothing polls while the page is hidden.
  */
-function watchForUpdates(ctx: Ctx): void {
+function watchForUpdates(ctx: Ctx): { halted(): void } {
   const visibility = {
     hidden: () => document.hidden,
     onChange: (fn: () => void) => {
@@ -264,8 +277,11 @@ function watchForUpdates(ctx: Ctx): void {
     },
   }
   const poll = test.pollMs !== undefined ? { everyMs: test.pollMs, jitterMs: 0 } : undefined
-  startUpdates({
-    env: { timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h as ReturnType<typeof setTimeout>) }, visibility, random: Math.random },
+  return startUpdates({
+    env: {
+      timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h as ReturnType<typeof setTimeout>) },
+      visibility, random: Math.random, now: () => performance.now(),
+    },
     initial: ctx.knowledge, codeSha: __CODE_SHA__, learnerStateVersion: LEARNER_STATE_VERSION, storage: sessionStorage,
     loadKnowledge: () => loadKnowledge(import.meta.env.BASE_URL, fetchFn),
     loadManifest: () => loadManifest(import.meta.env.BASE_URL, fetchFn),

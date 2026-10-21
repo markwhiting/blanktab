@@ -61,6 +61,16 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     return new Map([...treeOf(head)].filter(([path, sha]) => from.get(path) !== sha))
   }
 
+  const headOf = (pr: Pull): string | undefined => {
+    const [owner, branch] = pr.head.split(":") as [string, string]
+    return repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+  }
+  /** A pull as the API returns it: state, merged_at (null unless merged) and the head commit. */
+  const apiPull = (x: Pull) => ({
+    ...x, state: x.state ?? "open", merged_at: x.merged ? "2026-10-21T12:00:00Z" : null,
+    head: { label: x.head, ref: x.head.split(":")[1], sha: headOf(x) ?? null },
+  })
+
   const handle = (r: Recorded): Response => {
     const u = new URL(r.url)
     const p = u.pathname
@@ -78,7 +88,7 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
       if (r.method === "GET") {
         const head = u.searchParams.get("head")
         const want = u.searchParams.get("state") ?? "open"
-        return json(200, pulls.filter(x => x.head === head && (want === "all" || (x.state ?? "open") === want)))
+        return json(200, pulls.filter(x => x.head === head && (want === "all" || (x.state ?? "open") === want)).map(apiPull))
       }
       const b = body() as unknown as Pull
       const headRepo = repoOfOwner(b.head.split(":")[0]!)
@@ -86,6 +96,10 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
       if (diff(pr).size === 0) return json(422, { message: "Validation Failed", errors: [{ message: "No commits between main and head" }] })
       pulls.push(pr)
       return json(201, { number: pr.number })
+    }
+    if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/)) && m[1] === UP) {
+      const pr = pulls.find(x => x.number === Number(m![2]))
+      return pr ? json(200, apiPull(pr)) : json(404, { message: "Not Found" })
     }
     if (r.method === "GET" && (m = p.match(/^\/repos\/([^/]+\/[^/]+)\/compare\/main\.\.\.(.+)$/)) && m[1] === UP) {
       const head = decodeURIComponent(m[2]!)
@@ -186,9 +200,11 @@ export function fakeGithub(opts: { token: string; login: string; canPush: boolea
     /** Sorted paths a PR proposes (head vs. merge base with main). */
     prFiles: (pr: Pull): string[] => [...diff(pr).keys()].sort(),
     /** Head commit of a PR's branch (what `gh pr merge --match-head-commit` compares against). */
-    headOf: (pr: Pull): string | undefined => {
-      const [owner, branch] = pr.head.split(":") as [string, string]
-      return repos.get(pr.headRepo ?? repoOfOwner(owner) ?? "")?.branches.get(branch)
+    headOf,
+    /** Closes a PR without merging it, as the gate does with an invalid one; optionally deletes the head branch. */
+    close(pr: Pull, o: { deleteBranch?: boolean } = {}): void {
+      pr.state = "closed"
+      if (o.deleteBranch) repos.get(pr.headRepo!)!.branches.delete(pr.head.split(":")[1]!)
     },
     /**
      * Squash-merges a PR into upstream main, like the gate does; optionally deletes the head branch.

@@ -107,8 +107,9 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
     onBackend: c => post({ type: "backend", kind: c.kind, label: c.label }),
     onStatus: message => post({ type: "status", message }),
   })
-  // Halted after a forced save (the page is reloading onto it): the life is not over.
-  if (!r.halted) post({ type: "final", steps: r.steps, cu: r.cu })
+  // Halted after a forced save: the life is not over, and the page reloads onto that save (even if it had stopped
+  // waiting for the answer; any request it makes from now on is answered true at once by the inbox).
+  post(r.halted ? { type: "halted" } : { type: "final", steps: r.steps, cu: r.cu })
 }
 
 let started = false

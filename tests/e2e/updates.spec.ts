@@ -42,7 +42,7 @@ const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textC
 const learnerId = async (page: Page) => (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
 
 /** The outbox's log files for `id`, in seq order. */
-const outbox = (page: Page, id: string) => page.evaluate(i => new Promise<{ seq: number; stepsTotal: number; cu: number; final: boolean; knowledgeSha: string; sessionsSeenAtBirth: number }[]>((res, rej) => {
+const outbox = (page: Page, id: string) => page.evaluate(i => new Promise<{ seq: number; stepsTotal: number; cu: number; final: boolean; knowledgeSha: string; sessionsSeenAtBirth: number; curve: { steps: number }[] }[]>((res, rej) => {
   const req = indexedDB.open("blanktab")
   req.onerror = () => rej(req.error)
   req.onsuccess = () => {
@@ -96,12 +96,16 @@ test("new compatible code: the tab saves its learner, reloads, and the same lear
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(resumedAt)
   expect(await cuLived(page)).toBeGreaterThanOrEqual(lastCU - 0.5)
 
-  // The life goes on to its end on the new page: seq 1 follows seq 0, nothing reused, counters never go back.
+  // The life goes on to its end on the new page: each halting save before a reload wrote a log file with it (every
+  // point lived before a reload is logged on that code), seq follows seq, nothing reused, counters never go back.
   await expect(page.getByText("This learner's life is complete")).toBeVisible({ timeout: 90_000 })
   const files = await outbox(page, id)
-  expect(files.map(f => [f.seq, f.final])).toEqual([[0, false], [1, true]])
-  expect(files[1]!.stepsTotal).toBeGreaterThan(resumedAt)
-  expect(files[1]!.cu).toBeGreaterThanOrEqual(16)
+  expect(files.map(f => [f.seq, f.final])).toEqual([[0, false], [1, false], [2, false], [3, true]])
+  expect(files[1]!.stepsTotal).toBeGreaterThanOrEqual(lastSteps) // the first reload's halt
+  expect(files[2]!.stepsTotal).toBe(resumedAt) // the second reload's halt: where the last page resumed
+  for (let i = 1; i < files.length; i++) expect(files[i]!.stepsTotal).toBeGreaterThan(files[i - 1]!.stepsTotal)
+  expect(files[3]!.stepsTotal).toBeGreaterThan(resumedAt)
+  expect(files[3]!.cu).toBeGreaterThanOrEqual(16)
   // No reload after giving up.
   await page.waitForTimeout(2_000)
   expect(loads()).toBe(3)
@@ -127,7 +131,7 @@ test("new incompatible code: the learner keeps running here and the page says so
   expect(onlyOwnOrigin(all, baseURL!)).toEqual([])
 })
 
-test("refreshed knowledge: the running learner's next log file records the new knowledgeSha; the page shows it", async ({ page }) => {
+test("refreshed knowledge: the points so far are logged under the old knowledgeSha, the rest under the new; the page shows it", async ({ page }) => {
   const { deploy } = await setup(page)
   await page.goto(`/learner/?testBackend=cpu&testWidths=tiny&testSleepInterval=5&testLifetimeCU=0.3&testStepsPerSecond=20&${FAST}`)
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
@@ -138,7 +142,9 @@ test("refreshed knowledge: the running learner's next log file records the new k
   await expect(page.getByTestId("knowledge")).toContainText("dddddddddddd")
   await expect(page.getByText("This learner's life is complete")).toBeVisible({ timeout: 60_000 })
   const files = await outbox(page, id)
-  expect(files).toHaveLength(1)
-  expect(files[0]).toMatchObject({ final: true, knowledgeSha: "d".repeat(64), sessionsSeenAtBirth: 2 })
+  expect(files).toHaveLength(2)
+  expect(files[0]).toMatchObject({ seq: 0, final: false, knowledgeSha: "c".repeat(64), sessionsSeenAtBirth: 2 }) // the boundary log
+  expect(files[1]).toMatchObject({ seq: 1, final: true, knowledgeSha: "d".repeat(64), sessionsSeenAtBirth: 2 })
+  for (const p of files[1]!.curve) expect(p.steps).toBeGreaterThan(Math.max(0, ...files[0]!.curve.map(q => q.steps)))
   expect(await page.getByTestId("life").textContent()).not.toContain("stopped")
 })

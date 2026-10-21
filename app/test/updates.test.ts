@@ -68,7 +68,7 @@ describe("createPoller", () => {
     const clock = fakeTimers()
     const vis = fakeVisibility(o.hidden)
     const at: number[] = []
-    const poller = createPoller(() => { at.push(clock.now()) }, MANIFEST_POLL, { timers: clock.timers, visibility: vis, random: o.random ?? (() => 0.5) })
+    const poller = createPoller(() => { at.push(clock.now()) }, MANIFEST_POLL, { timers: clock.timers, visibility: vis, random: o.random ?? (() => 0.5), now: clock.now })
     return { clock, vis, at, poller }
   }
 
@@ -105,6 +105,35 @@ describe("createPoller", () => {
     expect(at).toEqual([65 * MIN, 75 * MIN])
   })
 
+  it("shown again within half a period of the last check: no check at once, the period goes on from there", async () => {
+    const { clock, vis, at } = setup()
+    await clock.advance(10 * MIN) // the first check
+    expect(at).toEqual([10 * MIN])
+    vis.set(true)
+    await clock.advance(4 * MIN)
+    vis.set(false) // 4 min after the check: under half of 10 min
+    await clock.flush()
+    expect(at).toEqual([10 * MIN])
+    await clock.advance(10 * MIN)
+    expect(at).toEqual([10 * MIN, 24 * MIN]) // a period after being shown
+    vis.set(true)
+    await clock.advance(5 * MIN)
+    vis.set(false) // exactly half a period since the last check: checks at once
+    await clock.flush()
+    expect(at).toEqual([10 * MIN, 24 * MIN, 29 * MIN])
+  })
+
+  it("the page's own load counts as a check: shown within half a period of start, nothing runs at once", async () => {
+    const { clock, vis, at } = setup()
+    vis.set(true)
+    await clock.advance(1 * MIN)
+    vis.set(false)
+    await clock.flush()
+    expect(at).toEqual([])
+    await clock.advance(10 * MIN)
+    expect(at).toEqual([11 * MIN])
+  })
+
   it("a tab hidden from the start checks nothing until shown", async () => {
     const { clock, vis, at } = setup({ hidden: true })
     await clock.advance(60 * MIN)
@@ -123,7 +152,7 @@ describe("createPoller", () => {
       calls++; running++; most = Math.max(most, running)
       await new Promise<void>(r => { release = r })
       running--
-    }, MANIFEST_POLL, { timers: clock.timers, visibility: vis, random: () => 0.5 })
+    }, MANIFEST_POLL, { timers: clock.timers, visibility: vis, random: () => 0.5, now: clock.now })
     await clock.advance(10 * MIN)
     vis.set(true); vis.set(false) // shown again while a check is still running
     await clock.flush()
@@ -141,7 +170,7 @@ describe("createPoller", () => {
   it("a check that throws does not stop the polling", async () => {
     const clock = fakeTimers()
     let calls = 0
-    createPoller(() => { calls++; throw new Error("network") }, MANIFEST_POLL, { timers: clock.timers, visibility: fakeVisibility(), random: () => 0.5 })
+    createPoller(() => { calls++; throw new Error("network") }, MANIFEST_POLL, { timers: clock.timers, visibility: fakeVisibility(), random: () => 0.5, now: clock.now })
     await clock.advance(30 * MIN)
     expect(calls).toBe(3)
   })
@@ -160,7 +189,7 @@ describe("startUpdates", () => {
     const given: string[] = []
     let manifestCalls = 0
     const deps: UpdatesDeps = {
-      env: { timers: clock.timers, visibility: vis, random: o.random ?? (() => 0.5) },
+      env: { timers: clock.timers, visibility: vis, random: o.random ?? (() => 0.5), now: clock.now },
       initial: knowledge("c".repeat(64)),
       codeSha: SHA, learnerStateVersion: 1, storage: o.storage ?? stubStorage(),
       loadKnowledge: async () => (o.knowledge ?? (() => knowledge("c".repeat(64))))(),
@@ -298,9 +327,39 @@ describe("startUpdates", () => {
     await s.clock.flush()
     expect(s.manifestCalls()).toBe(1)
     m = { knowledgeSha: "c".repeat(64), codeSha: NEW, learnerStateVersion: 3 }
-    s.vis.set(true); s.vis.set(false)
+    s.vis.set(true)
+    await s.clock.advance(6 * MIN) // more than half a period since the check on showing
+    s.vis.set(false)
     await s.clock.flush()
     expect(s.log).toEqual([`notice:${INCOMPATIBLE_MESSAGE}`])
+  })
+
+  it("a late halt: the page gave up waiting, then the learner saved and halted; the page reloads on it, with no more retries", async () => {
+    const storage = stubStorage()
+    let answer: (saved: boolean) => void = () => {}
+    let asked = 0
+    // The first request is never answered in time (the page's own wait gives up: false); the learner halts later.
+    const s = setup({ storage, random: () => 0, manifest: () => ({ knowledgeSha: "c".repeat(64), codeSha: NEW, learnerStateVersion: 1 }), checkpoint: () => { asked++; return new Promise<boolean>(r => { answer = r }) } })
+    await s.clock.advance(8 * MIN) // random 0: the poll at 8 min sees new code; the reload wait is 0
+    expect(asked).toBe(1)
+    answer(false) // timed out
+    await s.clock.flush()
+    expect(s.log).toEqual([`checkpoint@${8 * MIN}`])
+    await s.clock.advance(10_000)
+    s.u.halted() // the worker: {type: "halted"}
+    expect(s.log).toEqual([`checkpoint@${8 * MIN}`, `reload@${8 * MIN + 10_000}`])
+    expect(JSON.parse(storage.getItem(RELOAD_TARGET_KEY)!)).toEqual({ codeSha: NEW, tries: 1 })
+    await s.clock.advance(10 * CHECKPOINT_RETRY_MS)
+    expect(asked).toBe(1) // the retry was cancelled
+    expect(s.log).toHaveLength(2)
+    s.u.halted() // a second report changes nothing
+    expect(s.log).toHaveLength(2)
+  })
+
+  it("a halt with no reload pending still reloads (the learner has stopped; the page resumes it)", async () => {
+    const s = setup()
+    s.u.halted()
+    expect(s.log).toEqual([`reload@0`])
   })
 
   it("stop() ends every poller and a pending reload", async () => {

@@ -300,6 +300,32 @@ test("a reload resumes the learner from its checkpoint; a duplicated tab (same s
   await expect.poll(() => stepsLived(dup)).toBeGreaterThan(0)
 })
 
+test("a local-only learner (3 PRs closed in a row): resumed, it keeps learning and the page says it no longer contributes", async ({ page }) => {
+  await setup(page, { knowledge: "ok", token: TOKEN })
+  await page.goto(LONG)
+  const learner = page.getByTestId("learner-id")
+  await expect(learner).toHaveText(ID_RE)
+  const id = (await learner.textContent())!.match(ID_RE)![0]
+  await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  // What the contributor records after the gate closed three of its PRs unmerged (packages/harness contributor settle).
+  await page.evaluate(i => new Promise<void>((res, rej) => {
+    const req = indexedDB.open("blanktab")
+    req.onsuccess = () => {
+      const tx = req.result.transaction("contribution", "readwrite")
+      tx.objectStore("contribution").put({ learnerId: i, lastPr: 3, closedInARow: 3, localOnly: true })
+      tx.oncomplete = () => { req.result.close(); res() }
+      tx.onerror = () => rej(tx.error)
+    }
+    req.onerror = () => rej(req.error)
+  }), id)
+  await page.reload()
+  await expect(learner).toHaveText(id)
+  await expect(page.getByTestId("life")).toHaveText("This learner's logs were rejected; it keeps learning here but no longer contributes.")
+  const before = await stepsLived(page)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(before)
+  await page.screenshot({ path: test.info().outputPath("page-local-only.png"), fullPage: true })
+})
+
 test("a closed tab's learner is adopted by the next new tab; surplus and stale orphans are deleted", async ({ page, context }) => {
   await setup(page, { knowledge: "ok" })
   await page.goto(LONG)

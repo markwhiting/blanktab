@@ -36,6 +36,8 @@ export type FromWorker =
   | { type: "status"; message: string }
   | { type: "queued"; seq: number; steps: number; cu: number; final: boolean }
   | { type: "final"; steps: number; cu: number }
+  /** The life stopped at a forced save asked with `halt`: its checkpoint is current; the page reloads onto it. */
+  | { type: "halted" }
   /** The answer to CheckpointNowMessage `id`: saved, or not (skipped updates outstanding, or the life ended): ask again later. */
   | { type: "checkpointed"; id: number; saved: boolean }
   | { type: "error"; message: string }

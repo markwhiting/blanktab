@@ -2,8 +2,8 @@
 // checkpoint taken with it can be written in a single transaction.
 
 export const DB_NAME = "blanktab"
-/** 1: outbox. 2: + checkpoints. 3: + checkpointMeta. */
-export const DB_VERSION = 3
+/** 1: outbox. 2: + checkpoints. 3: + checkpointMeta. 4: + contribution. */
+export const DB_VERSION = 4
 export const OUTBOX = "outbox"
 export const CHECKPOINTS = "checkpoints"
 /**
@@ -11,6 +11,11 @@ export const CHECKPOINTS = "checkpoints"
  * the startup sweep can judge every checkpoint without reading tens of MB each.
  */
 export const CHECKPOINT_META = "checkpointMeta"
+/**
+ * Per learner, how its logs fare at the gate (queue.ts Contribution): the last PR looked at, closed-unmerged PRs in a
+ * row, and whether the learner is local-only (it keeps learning but no longer contributes).
+ */
+export const CONTRIBUTION = "contribution"
 /** The stores a checkpoint write or removal touches. */
 export const CHECKPOINT_STORES = [CHECKPOINTS, CHECKPOINT_META]
 
@@ -65,6 +70,7 @@ export function openDb(idb: IDBFactory, blockedTimeoutMs = DB_BLOCKED_TIMEOUT_MS
       const db = req.result
       if (!db.objectStoreNames.contains(OUTBOX)) db.createObjectStore(OUTBOX, { keyPath: ["learnerId", "seq"] })
       if (!db.objectStoreNames.contains(CHECKPOINTS)) db.createObjectStore(CHECKPOINTS, { keyPath: "learnerId" })
+      if (!db.objectStoreNames.contains(CONTRIBUTION)) db.createObjectStore(CONTRIBUTION, { keyPath: "learnerId" })
       if (!db.objectStoreNames.contains(CHECKPOINT_META)) {
         const meta = db.createObjectStore(CHECKPOINT_META, { keyPath: "learnerId" })
         // Checkpoints from before v3 get their meta records now (once: each record is read a single time).

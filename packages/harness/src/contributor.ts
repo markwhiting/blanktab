@@ -1,4 +1,4 @@
-import type { Queue } from "./queue"
+import type { Contribution, Queue } from "./queue"
 import type { LogFile } from "./log"
 import { GitHubError, NetworkError, createApi, toBase64, type Api } from "./github"
 import { REPO, REJECTED_MESSAGE, getToken, whoAmI, type Identity } from "./token"
@@ -11,6 +11,8 @@ export interface ContributorDeps {
   fetchFn: typeof fetch
   now: () => Date
   onStatus: (s: ContributorStatus) => void
+  /** A learner just became local-only (MAX_CLOSED_IN_A_ROW of its PRs closed unmerged): its logs are no longer sent. */
+  onLocalOnly?: (learnerId: string) => void
   /** Injectable for tests. Default: real timers. */
   sleep?: (ms: number) => Promise<void>
   schedule?: (fn: () => void, ms: number) => void
@@ -25,6 +27,10 @@ const DEFAULT_RATE_LIMIT_MS = 60_000
 /** The gate's cap: a PR over this many files is not merged. */
 export const MAX_PR_FILES = 16
 export const PERMISSION_MESSAGE = "Your GitHub token can't write to the repo — check its permissions."
+/** After this many of a learner's PRs in a row are closed unmerged, it stops contributing (decision 0014). */
+export const MAX_CLOSED_IN_A_ROW = 3
+/** What the page shows for a local-only learner. */
+export const LOCAL_ONLY_MESSAGE = "This learner's logs were rejected; it keeps learning here but no longer contributes."
 
 class Wait extends Error { constructor(readonly ms: number, readonly why: string) { super(why) } }
 
@@ -41,9 +47,13 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
 
   let lastState: ContributorStatus["state"] | null = null
   const status = (state: ContributorStatus["state"], message: string, pending: number) => { lastState = state; onStatus({ state, message, pending }) }
-  const idle = (pending: number) => status("idle", pending === 0
-    ? "All session logs are shared."
-    : `${pending} session log${pending === 1 ? "" : "s"} waiting; they are sent every 10 minutes and when a life ends.`, pending)
+  /** Idle with `pending` waiting. A local-only learner's logs are never waiting, so "all shared" would not be true then. */
+  const idle = async (pending: number) => {
+    const local = pending === 0 ? (await queue.localOnly()).length : 0
+    status("idle", pending > 0
+      ? `${pending} session log${pending === 1 ? "" : "s"} waiting; they are sent every 10 minutes and when a life ends.`
+      : local > 0 ? "No session logs waiting; a learner here no longer contributes (its logs were rejected)." : "All session logs are shared.", pending)
+  }
 
   const armRetry = (ms: number) => {
     if (retryArmed) return
@@ -78,11 +88,50 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     return shaOf((await api.call("GET", `/repos/${UPSTREAM}/git/ref/heads/main`)).body, "ref")
   }
 
-  /** Whether the learner has an OPEN PR. Only an open one counts: once the gate merges or closes one, later logs need a fresh PR. */
-  async function hasOpenPr(api: Api, owner: string, learnerId: string): Promise<boolean> {
+  /** The learner's OPEN PR's number, or null. Only an open one counts: once the gate merges or closes one, later logs need a fresh PR. */
+  async function openPr(api: Api, owner: string, learnerId: string): Promise<number | null> {
     const head = `${owner}:${branchOf(learnerId)}`
     const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=open`)
-    return Array.isArray(found.body) && found.body.length > 0
+    const first = Array.isArray(found.body) ? (found.body[0] as { number?: unknown } | undefined) : undefined
+    if (first === undefined) return null
+    if (!(Number.isInteger(first.number) && (first.number as number) > 0)) throw new GitHubError(502, "unexpected pulls response", null)
+    return first.number as number
+  }
+
+  /**
+   * Takes stock of the learner's PRs the gate has decided since `c.lastPr` (oldest first, up to an open one): a merge
+   * resets the count of closed-unmerged PRs in a row; a PR closed unmerged has its files dropped from the outbox (they
+   * are never proposed again: the gate allows seq gaps, so the learner's next PR goes on without them). The
+   * MAX_CLOSED_IN_A_ROW-th in a row makes the learner local-only. Saved in the outbox's database.
+   */
+  async function settle(api: Api, owner: string, c: Contribution): Promise<Contribution> {
+    const head = `${owner}:${branchOf(c.learnerId)}`
+    const found = await api.call("GET", `/repos/${UPSTREAM}/pulls?head=${encodeURIComponent(head)}&state=all&per_page=100`)
+    if (!Array.isArray(found.body)) throw new GitHubError(502, "unexpected pulls response", null)
+    const prs = (found.body as { number?: unknown; state?: unknown; merged_at?: unknown }[])
+      .filter(p => Number.isInteger(p.number) && (p.number as number) > c.lastPr)
+      .sort((a, b) => (a.number as number) - (b.number as number))
+    let next = { ...c }
+    for (const p of prs) {
+      if (p.state !== "closed") break // still open: not decided yet
+      const n = p.number as number
+      if (typeof p.merged_at === "string" && p.merged_at !== "") next = { ...next, lastPr: n, closedInARow: 0 }
+      else {
+        await queue.dropPr(c.learnerId, n)
+        next = { ...next, lastPr: n, closedInARow: next.closedInARow + 1 }
+      }
+      if (next.closedInARow >= MAX_CLOSED_IN_A_ROW) next = { ...next, localOnly: true }
+      await queue.setContribution(next) // after each: a dropped PR is never counted twice
+      if (next.localOnly) break
+    }
+    return next
+  }
+
+  /** Whether PR `n` is open with its head at `commit`: then the files just pushed are on it. */
+  async function carries(api: Api, n: number, commit: string): Promise<boolean> {
+    const r = await api.call("GET", `/repos/${UPSTREAM}/pulls/${n}`)
+    const b = r.body as { state?: unknown; head?: { sha?: unknown } } | null
+    return b?.state === "open" && b.head?.sha === commit
   }
 
   /**
@@ -124,8 +173,8 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     }
   }
 
-  /** All of a learner's pending files as one commit on its branch. Returns false when they were all there already. */
-  async function commitFiles(api: Api, dest: string, learnerId: string, parent: string, files: LogFile[]): Promise<boolean> {
+  /** All of a learner's pending files as one commit on its branch. Resolves to that commit, or null when they were all there already. */
+  async function commitFiles(api: Api, dest: string, learnerId: string, parent: string, files: LogFile[]): Promise<string | null> {
     const baseTree = (await api.call("GET", `/repos/${dest}/git/commits/${parent}`)).body as { tree?: { sha?: unknown } } | null
     const baseTreeSha = baseTree?.tree?.sha
     if (typeof baseTreeSha !== "string") throw new GitHubError(502, "unexpected commit response", null)
@@ -135,27 +184,34 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       entries.push({ path: `${runPath(learnerId)}/${f.seq}.json`, mode: "100644", type: "blob", sha: shaOf(blob.body, "blob") })
     }
     const tree = shaOf((await api.call("POST", `/repos/${dest}/git/trees`, { base_tree: baseTreeSha, tree: entries })).body, "tree")
-    if (tree === baseTreeSha) return false // a crash after an earlier commit: nothing new to write
+    if (tree === baseTreeSha) return null // a crash after an earlier commit: nothing new to write
     const seqs = files.map(f => f.seq)
     const message = `log: ${learnerId} #${seqs.length === 1 ? seqs[0] : `${seqs[0]}-${seqs[seqs.length - 1]}`}`
     const commit = shaOf((await api.call("POST", `/repos/${dest}/git/commits`, { message, tree, parents: [parent] })).body, "commit")
     // force:false: if another tab moved the branch meanwhile this fails and the whole send is retried.
     await api.call("PATCH", `/repos/${dest}/git/refs/heads/${branchOf(learnerId)}`, { sha: commit, force: false })
-    return true
+    return commit
   }
 
-  async function createPr(api: Api, dest: string, owner: string, learnerId: string): Promise<void> {
+  /** Opens the learner's PR; resolves to its number. */
+  async function createPr(api: Api, dest: string, owner: string, learnerId: string): Promise<number> {
     try {
-      await api.call("POST", `/repos/${UPSTREAM}/pulls`, {
+      const r = await api.call("POST", `/repos/${UPSTREAM}/pulls`, {
         title: `run: ${learnerId}`,
         head: `${owner}:${branchOf(learnerId)}`,
         base: "main",
         draft: true,
         body: `Session logs from learner ${learnerId}, submitted by the learner page on behalf of @${owner}. Branch: ${dest}@${branchOf(learnerId)}.`,
       })
+      const n = (r.body as { number?: unknown } | null)?.number
+      if (!(Number.isInteger(n) && (n as number) > 0)) throw new GitHubError(502, "unexpected pull request response", null)
+      return n as number
     } catch (e) {
       // Two tabs share one outbox: the other tab may have opened it first.
-      if (e instanceof GitHubError && e.status === 422 && (await hasOpenPr(api, owner, learnerId))) return
+      if (e instanceof GitHubError && e.status === 422) {
+        const n = await openPr(api, owner, learnerId)
+        if (n !== null) return n
+      }
       throw e
     }
   }
@@ -171,23 +227,35 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const owner = dest.split("/")[0]!
     for (const [id, files] of byLearner) {
       files.sort((a, b) => a.seq - b.seq)
-      const prOpen = await hasOpenPr(api, owner, id)
+      const open = await openPr(api, owner, id)
+      if (open === null) {
+        // No open PR: the last one was decided. Closed unmerged, its files are dropped; too many in a row, local-only.
+        const c = await settle(api, owner, await queue.contribution(id))
+        if (c.localOnly) {
+          deps.onLocalOnly?.(id)
+          continue
+        }
+      }
+      const prOpen = open !== null
       // Never let an open PR pass the gate's file cap: send the oldest files that fit, the rest wait for the merge.
       const fit = prOpen ? await room(api, owner, id) : MAX_PR_FILES
       files.splice(fit)
       if (files.length === 0) continue
       status("sending", `Sending ${files.length} session log${files.length === 1 ? "" : "s"} of learner ${id}…`, pending.length)
       const parent = await branchBase(api, dest, id, prOpen)
-      const changed = await commitFiles(api, dest, id, parent, files)
-      // Unchanged with no open PR: a fresh branch from main already holds these files, i.e. they were merged.
-      if (!prOpen && changed) await createPr(api, dest, owner, id)
-      // The gate merges every hour and may have merged the PR between the check above and our push. Then the commit
-      // sits on a branch with no open PR: keep the files queued; the next send starts a fresh branch from main.
-      if (prOpen && changed && !(await hasOpenPr(api, owner, id))) throw new Wait(BACKOFF_START_MS, "The pull request was merged while sending")
+      const commit = await commitFiles(api, dest, id, parent, files)
+      let pr: number | undefined
+      if (commit === null) pr = open ?? undefined // all there already: on the open PR's branch, or (no open PR) merged to main
+      else if (open === null) pr = await createPr(api, dest, owner, id)
+      // The gate merges (or closes) every hour and may have done so between the check above and our push. Then the
+      // commit sits on a branch with no open PR: keep the files queued; the next send starts a fresh branch from main.
+      // Checked on the PR itself (by number), not the open-PR list, which can lag.
+      else if (await carries(api, open, commit)) pr = open
+      else throw new Wait(BACKOFF_START_MS, "The pull request was merged or closed while sending")
       // Only now, with the commit and an open PR both in place (or the files already on main), are they sent.
-      for (const f of files) await queue.markSent(f.learnerId, f.seq)
+      for (const f of files) await queue.markSent(f.learnerId, f.seq, pr)
     }
-    await queue.prune() // finished lives' files are on GitHub now: the browser need not keep them
+    await queue.prune() // sent files are on GitHub now (or rejected): the browser keeps only each learner's newest
   }
 
   async function run(): Promise<void> {
@@ -195,12 +263,12 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
     const token = getToken(ls)
     if (token === null) return status("no-token", "Add a GitHub token to share your session logs.", await count())
     const before = await count()
-    if (before === 0) return idle(0)
+    if (before === 0) return await idle(0)
     status("sending", `Sending ${before} session log${before === 1 ? "" : "s"} to GitHub…`, before)
     try {
       await sendAll(token)
       backoff = BACKOFF_START_MS
-      idle(await count())
+      await idle(await count())
     } catch (e) {
       const pending = await count()
       if (e instanceof GitHubError && e.status === 401) return status("error", REJECTED_MESSAGE, pending)
@@ -234,7 +302,7 @@ export function createContributor(deps: ContributorDeps): { flush(): Promise<voi
       if (inFlight !== null || lastState === "error") return
       const pending = (await queue.pending()).length
       if (getToken(ls) === null) return status("no-token", "Add a GitHub token to share your session logs.", pending)
-      idle(pending)
+      await idle(pending)
     },
     flush(): Promise<void> {
       if (inFlight === null) {
