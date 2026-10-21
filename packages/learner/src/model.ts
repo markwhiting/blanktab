@@ -1,5 +1,5 @@
 import { FOVEA, PERIPHERY, PRED_FOVEA, PRED_PERIPHERY } from "@blanktab/interface"
-import { add, conv2d, createRng, gruCell, linear, relu, reshape, tanh, tensor, zeros } from "@blanktab/tensor"
+import { add, composite, conv2d, createRng, gatherRows, gruCell, linear, matmul, mul, relu, reshape, softmax, sub, tanh, tensor, zeros } from "@blanktab/tensor"
 import type { Backend, GruParams, Tensor } from "@blanktab/tensor"
 import { ACTION_DIM } from "./encode"
 
@@ -34,8 +34,9 @@ export interface Model {
   /**
    * Residual next-frame prediction conditioned on the chosen action one-hot [1,76]: for each output,
    * base + tanh(linear(z)), where `base` is the current frame's targets (targetsFromObs of the observation
-   * the core just saw): periphery [1,3000], fovea [1,768] (HWC, 0..1). The two output layers start at zero,
-   * so a fresh model predicts exactly copy-last (no change) and learns only the change.
+   * the core just saw): periphery [1,3000], fovea [1,768] (HWC, 0..1). The fovea also gets an action-conditioned
+   * translation of its base: + g(a)·(shift(base; k(a)) − base), see `shiftFovea`. The output layers and the gate
+   * g start at zero, so a fresh model predicts exactly copy-last (no change) and learns only the change.
    */
   predict(h: Tensor, action: Tensor, base: { periphery: Tensor; fovea: Tensor }): { periphery: Tensor; fovea: Tensor }
   /** [1,hidden] zeros, caller-owned. */
@@ -48,6 +49,44 @@ const PROPRIO = 3
 const outDim = (n: number, k: number, s: number, p: number) => Math.floor((n + 2 * p - k) / s) + 1
 const PRED_P = PRED_PERIPHERY.width * PRED_PERIPHERY.height * PRED_PERIPHERY.channels
 const PRED_F = PRED_FOVEA.width * PRED_FOVEA.height * PRED_FOVEA.channels
+
+/*
+ * Fovea translation (docs/research/2026-10-21-why-not-learning.md). The fovea is a window centred on the cursor, so
+ * a move translates its content, which a linear readout of z cannot express. This architectural prior (translation
+ * of the current image, as in CDNA, Finn et al. 2016) predicts the next fovea as a convex, separable, action-chosen
+ * blend of shifted copies of the current one: kernel kx ⊗ ky, kx = softmax(a·Wx + c), ky = softmax(a·Wy + c),
+ * applied as two banded matmuls with zero padding, then gated by g = a·Wg (zero-initialised). No knowledge of the
+ * world or of which action moves the cursor: the action → kernel map is learned.
+ */
+/** Kernel taps per axis: ±8 target pixels, the largest move (16 world px). */
+export const SHIFT_TAPS = 17
+const SHIFT_R = (SHIFT_TAPS - 1) / 2
+/** Initial logit of the centre tap: e^4 / (e^4 + 16) ≈ 0.77 of each axis's mass stays put before learning. */
+const SHIFT_CENTRE_LOGIT = 4
+const FW = PRED_FOVEA.width, FH = PRED_FOVEA.height, FC = PRED_FOVEA.channels
+const ROWS = FC * FH // the fovea as a [FC*FH, FW] plane stack
+/** gather HWC -> CHW: the HWC index of each CHW element. */
+const HWC_TO_CHW = Int32Array.from({ length: PRED_F }, (_, i) => (i % (FW * FH)) * FC + Math.floor(i / (FW * FH)))
+/** gather CHW -> HWC: the CHW index of each HWC element. */
+const CHW_TO_HWC = Int32Array.from({ length: PRED_F }, (_, i) => (i % FC) * FW * FH + Math.floor(i / FC))
+/** [SHIFT_TAPS, FW*FW] 0/1: kx · this = Bx [FW, FW], Bx[x', x] = kx[x' − x + R] (horizontal correlation). */
+const BAND_X = (() => {
+  const m = new Float32Array(SHIFT_TAPS * FW * FW)
+  for (let xp = 0; xp < FW; xp++) for (let x = 0; x < FW; x++) {
+    const j = xp - x + SHIFT_R
+    if (j >= 0 && j < SHIFT_TAPS) m[j * FW * FW + xp * FW + x] = 1
+  }
+  return m
+})()
+/** [SHIFT_TAPS, ROWS*ROWS] 0/1: ky · this = By [ROWS, ROWS], block-diagonal per channel, By[y, y'] = ky[y' − y + R]. */
+const BAND_Y = (() => {
+  const m = new Float32Array(SHIFT_TAPS * ROWS * ROWS)
+  for (let c = 0; c < FC; c++) for (let y = 0; y < FH; y++) for (let yp = 0; yp < FH; yp++) {
+    const j = yp - y + SHIFT_R
+    if (j >= 0 && j < SHIFT_TAPS) m[j * ROWS * ROWS + (c * FH + y) * ROWS + c * FH + yp] = 1
+  }
+  return m
+})()
 
 /**
  * Builds the model with every weight drawn from `seed`, or, given `initial` (a checkpoint's parameter values in
@@ -114,11 +153,47 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
   const gru: GruParams = { wz: gz.w, uz: gz.u, bz: gz.b, wr: gr.w, ur: gr.u, br: gr.b, wh: gh.w, uh: gh.u, bh: gh.b }
   const headPolicy = dense(hidden, ACTION_DIM)
   const headValue = dense(hidden, 1)
+  // Fovea translation (see SHIFT_TAPS): action -> kernel logits per axis and gate, all zero-initialised.
+  const shiftX = p0([ACTION_DIM, SHIFT_TAPS])
+  const shiftY = p0([ACTION_DIM, SHIFT_TAPS])
+  const shiftGate = p0([ACTION_DIM, 1])
   const predH = dense(hidden, enc)
   const predA = dense(ACTION_DIM, enc)
   // Residual output layers, zero-initialised (weights and biases): the predictor starts at copy-last.
   const headP = { w: p0([enc, PRED_P]), b: p0([PRED_P]) }
   const headF = { w: p0([enc, PRED_F]), b: p0([PRED_F]) }
+
+  // Constants (caller-owned, freed in dispose).
+  const centre = new Float32Array(SHIFT_TAPS)
+  centre[SHIFT_R] = SHIFT_CENTRE_LOGIT
+  const consts: Tensor[] = []
+  const constant = (d: Float32Array, shape: number[]) => {
+    const t = tensor(d, shape, { backend })
+    consts.push(t)
+    return t
+  }
+  let centreT: Tensor, bandX: Tensor, bandY: Tensor
+  try {
+    centreT = constant(centre, [1, SHIFT_TAPS])
+    bandX = constant(BAND_X, [SHIFT_TAPS, FW * FW])
+    bandY = constant(BAND_Y, [SHIFT_TAPS, ROWS * ROWS])
+  } catch (e) {
+    for (const t of consts) t.dispose()
+    throw e
+  }
+
+  /** The fovea's translation term g(a)·(shift(base; kx(a) ⊗ ky(a)) − base), for base [1, PRED_F] HWC. */
+  const shiftFovea = (action: Tensor, base: Tensor): Tensor => composite(() => {
+    // composite: the gathers of the (constant) base have no graph node and would otherwise leak (tensor README rule 2).
+    const kx = softmax(add(matmul(action, shiftX), centreT))
+    const ky = softmax(add(matmul(action, shiftY), centreT))
+    const bx = reshape(matmul(kx, bandX), [FW, FW])
+    const by = reshape(matmul(ky, bandY), [ROWS, ROWS])
+    const planes = reshape(gatherRows(reshape(base, [PRED_F, 1]), HWC_TO_CHW), [ROWS, FW])
+    const moved = matmul(by, matmul(planes, bx))
+    const movedHwc = reshape(gatherRows(reshape(moved, [PRED_F, 1]), CHW_TO_HWC), [1, PRED_F])
+    return mul(sub(movedHwc, base), matmul(action, shiftGate))
+  })
 
   return {
     params,
@@ -145,7 +220,7 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
       const z = relu(add(linear(h, predH.w, predH.b), linear(action, predA.w, predA.b)))
       return {
         periphery: add(base.periphery, tanh(linear(z, headP.w, headP.b))),
-        fovea: add(base.fovea, tanh(linear(z, headF.w, headF.b))),
+        fovea: add(add(base.fovea, shiftFovea(action, base.fovea)), tanh(linear(z, headF.w, headF.b))),
       }
     },
 
@@ -154,6 +229,7 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
     },
 
     dispose() {
+      for (const t of consts) t.dispose()
       for (const t of params) {
         t.grad?.dispose()
         t.grad = null
