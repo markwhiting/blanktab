@@ -7,14 +7,20 @@
 // (on a shadow copy of the learner's pre-step weights, so the learner itself is untouched) against copy-last,
 // the gradient norm reaching the residual output layers, how often the target changed at all, and the action
 // distribution. The shadow total is checked against the learner's own UpdateInfo.lossBefore every step.
+//
+// Held-out evaluation (--eval K, default 400): the learner's own stream depends on its curiosity-driven policy
+// (it can park the cursor where nothing changes, or where change is easy), so every --log steps the current
+// weights are also scored, without learning, on a fixed trajectory of K transitions in the same world (a second
+// instance) driven by uniformly random actions, the same for every run of a seed.
 import { createCanvas } from "@napi-rs/canvas"
 import { PRED_FOVEA, PRED_PERIPHERY, decodeMove, type Action, type Observation } from "@blanktab/interface"
 import {
   CPU_WIDTHS, DEFAULT_SETTINGS, GPU_WIDTHS, actionOneHot, createLearner, createModel, obsToInputs, targetsFromObs,
   type LearnerSettings, type Targets, type UpdateInfo, type Widths,
 } from "@blanktab/learner"
-import { add, backward, composite, createCpuBackend, disposeGraph, linear, mse, noGrad, scale, tensor } from "@blanktab/tensor"
+import { add, backward, composite, createCpuBackend, disposeGraph, linear, mse, noGrad, scale, tensor, type Tensor } from "@blanktab/tensor"
 import { createWorld } from "@blanktab/world"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS } from "@blanktab/interface"
 
 const args = new Map<string, string>()
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i]!.replace(/^--/, ""), process.argv[i + 1] ?? "")
@@ -31,6 +37,7 @@ const LIVE: LearnerSettings = { lr: 0.002, headLrScale: 0.086, entropyWeight: 0.
 const settings: LearnerSettings = { ...(args.get("settings") === "default" ? DEFAULT_SETTINGS : LIVE) }
 for (const k of Object.keys(settings) as (keyof LearnerSettings)[]) if (args.has(k)) settings[k] = Number(args.get(k))
 const JSON_OUT = args.get("json")
+const EVAL_N = num("eval", 400)
 
 const PP = PRED_PERIPHERY.width * PRED_PERIPHERY.height * PRED_PERIPHERY.channels
 const PF = PRED_FOVEA.width * PRED_FOVEA.height * PRED_FOVEA.channels
@@ -65,6 +72,50 @@ function shiftedFovea(prevNative: Uint8Array, dxPx: number, dyPx: number): Float
   return out
 }
 
+/** K+1 observations and the K uniformly random actions between them, in the world of `seed` (a fresh instance). */
+function heldOut(seed: number, k: number): { obs: Observation[]; actions: Action[] } {
+  const w = createWorld({ seed, canvas: createCanvas(320, 200) })
+  let st = (seed * 2654435761 + 12345) >>> 0
+  const rnd = () => { st = (st + 0x6d2b79f5) >>> 0; let t = st; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
+  const pick = (n: number) => Math.min(n - 1, Math.floor(rnd() * n))
+  const obs = [w.observe()]
+  const actions: Action[] = []
+  for (let i = 0; i < k; i++) {
+    const a = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+    w.act(a)
+    actions.push(a)
+    obs.push(w.observe())
+  }
+  return { obs, actions }
+}
+
+/** Scores weights `params` on the held-out trajectory (core run along it from the zero state): mean losses and copy-last, split. */
+async function evaluate(params: Float32Array[], widths: Widths, set: { obs: Observation[]; actions: Action[] }) {
+  const be = createCpuBackend()
+  const m = createModel(be, 0, widths, params)
+  const T = (d: Float32Array, sh: number[]) => tensor(d, sh, { backend: be })
+  let h = m.zeroState()
+  let lP = 0, lF = 0, cP = 0, cF = 0
+  for (let i = 0; i < set.actions.length; i++) {
+    const inp = obsToInputs(set.obs[i]!)
+    const base = targetsFromObs(set.obs[i]!), y = targetsFromObs(set.obs[i + 1]!)
+    const its = [T(inp.periphery, [3, 50, 80]), T(inp.fovea, [3, 32, 32]), T(inp.proprio, [1, 3]), T(base.periphery, [1, PP]), T(base.fovea, [1, PF]), T(actionOneHot(set.actions[i]!), [1, 76])]
+    const [ip, iF, ipr, bp, bf, aT] = its as [Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+    const hNext = noGrad(() => composite(() => m.core({ periphery: ip, fovea: iF, proprio: ipr }, h)))
+    const pP = noGrad(() => composite(() => m.predict(hNext, aT, { periphery: bp, fovea: bf }).periphery))
+    const pF = noGrad(() => composite(() => m.predict(hNext, aT, { periphery: bp, fovea: bf }).fovea))
+    const [vp, vf] = await Promise.all([pP.read(), pF.read()])
+    lP += sq(vp, y.periphery); lF += sq(vf, y.fovea); cP += sq(base.periphery, y.periphery); cF += sq(base.fovea, y.fovea)
+    for (const x of [...its, pP, pF, h]) x.dispose()
+    h = hNext
+  }
+  h.dispose()
+  m.dispose()
+  const n = set.actions.length
+  const loss = (W_P * lP + W_F * lF) / n, cl = (W_P * cP + W_F * cF) / n
+  return { ratio: loss / cl, ratioP: lP / cP, ratioF: lF / cF, loss, copyLast: cl }
+}
+
 class Acc {
   n = 0; s: Record<string, number> = {}
   add(k: string, v: number) { this.s[k] = (this.s[k] ?? 0) + v }
@@ -80,6 +131,7 @@ async function main() {
   const lastInfo = (): UpdateInfo | null => got.info
   const learner = await createLearner({ backend, seed: SEED, widths, settings, onUpdate: (u) => { got.info = u } })
 
+  const evalSet = EVAL_N > 0 ? heldOut(SEED, EVAL_N) : null
   let win = new Acc()
   const all = new Acc()
   const rows: Record<string, number>[] = []
@@ -173,7 +225,9 @@ async function main() {
       const st = learner.stats()
       const sn = Math.max(1, win.s.sn ?? 0)
       const r = (k: string) => (win.s[k] ?? 0) / sn
+      const ev = evalSet ? await evaluate(await learner.readParams(), widths, evalSet) : null
       const row = {
+        evalRatio: ev?.ratio ?? NaN, evalRatioP: ev?.ratioP ?? NaN, evalRatioF: ev?.ratioF ?? NaN,
         step, cu: st.cu, emaRatio: st.predLoss / st.baselineLoss,
         winRatio: win.mean("lb") / win.mean("cl"),
         lP: r("lP"), clP: r("clPs"), ratioP: r("lP") / r("clPs"),
@@ -187,7 +241,7 @@ async function main() {
       rows.push(row)
       const f = (v: number, d = 4) => (Number.isFinite(v) ? (Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d)) : "nan")
       console.log(
-        `step ${step} cu ${f(row.cu, 1)} | ema ${f(row.emaRatio, 5)} win ${f(row.winRatio, 5)} | P ${f(row.lP, 6)}/${f(row.clP, 6)}=${f(row.ratioP, 5)}`
+        `step ${step} cu ${f(row.cu, 1)} | heldout ${f(row.evalRatio, 5)} (P ${f(row.evalRatioP, 4)} F ${f(row.evalRatioF, 4)}) | ema ${f(row.emaRatio, 5)} win ${f(row.winRatio, 5)} | P ${f(row.lP, 6)}/${f(row.clP, 6)}=${f(row.ratioP, 5)}`
         + ` F ${f(row.lF, 6)}/${f(row.clF, 6)}=${f(row.ratioF, 5)} | shiftOracle ${f(row.shiftOracleRatio, 4)}`
         + ` | chP ${f(row.chP, 2)} chF ${f(row.chF, 2)} moved ${f(row.moved, 2)} m0 ${f(row.move0, 2)} btn ${f(row.btn, 2)} key ${f(row.key, 2)}`
         + ` | zAlive ${f(row.zAlive, 3)} | |g| P ${f(row.gHeadP)} F ${f(row.gHeadF)} predH ${f(row.gPredH)} | |W| P ${f(row.wHeadP)} F ${f(row.wHeadF)} b ${f(row.bHeadP)}/${f(row.bHeadF)} | ${f(row.sps, 1)} st/s`,
@@ -206,6 +260,7 @@ async function main() {
     shiftOracleRatio: all.mean("shiftOracle") / all.mean("cl"),
     chP: all.mean("chP"), chF: all.mean("chF"), moved: all.mean("moved"),
     moveMagnitudes: Object.fromEntries(moveHist), maxShadowCheckRelErr: maxCheckErr, shadowSamples: sn,
+    heldOut: rows.map((r) => [r.step, r.evalRatio]),
   }
   console.log("SUMMARY " + JSON.stringify(summary))
   if (JSON_OUT) (await import("node:fs")).writeFileSync(JSON_OUT, JSON.stringify({ summary, rows }, null, 1))
