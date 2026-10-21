@@ -61,16 +61,16 @@ describe("loadKnowledge", () => {
     ]
     const k = await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 1, sessions: [bad[0], good, ...bad.slice(1), oddTime] } }).fn)
     expect(k.offline).toBe(false)
-    expect(k.summary.sessions).toEqual([{ ...good, cu: null, lossRatio: null }, { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: null, lossRatio: null }])
+    expect(k.summary.sessions).toEqual([{ ...good, cu: null, lossRatio: null, heldOutRatio: null }, { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: null, lossRatio: null, heldOutRatio: null }])
   })
   it("reads a row's cu and lossRatio as numbers >= 0 or null (never drops the row for them)", async () => {
     const rows = [
-      { ...row("lrn_aaaaaaaaaaaaaaaa"), cu: 12.5, lossRatio: 0.9 },
-      { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: "12", lossRatio: -1 },
-      { ...row("lrn_cccccccccccccccc"), cu: null, lossRatio: { evil: 1 } },
+      { ...row("lrn_aaaaaaaaaaaaaaaa"), cu: 12.5, lossRatio: 0.9, heldOutRatio: 1.1 },
+      { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: "12", lossRatio: -1, heldOutRatio: -1 },
+      { ...row("lrn_cccccccccccccccc"), cu: null, lossRatio: { evil: 1 }, heldOutRatio: "0.9" },
     ]
     const k = await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 1, sessions: rows } }).fn)
-    expect(k.summary.sessions.map(r => [r.cu, r.lossRatio])).toEqual([[12.5, 0.9], [null, null], [null, null]])
+    expect(k.summary.sessions.map(r => [r.cu, r.lossRatio, r.heldOutRatio])).toEqual([[12.5, 0.9, 1.1], [null, null, null], [null, null, null]])
   })
   it("falls back when a file is malformed", async () => {
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 2, sessions: [] } }).fn))

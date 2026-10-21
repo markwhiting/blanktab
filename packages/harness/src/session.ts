@@ -194,6 +194,18 @@ class Interrupted {
   constructor(readonly error: unknown) {}
 }
 
+/**
+ * The curve point of a sleep at `steps`, from the learner's stats: its own-stream losses and, when the learner scored
+ * a held-out set (both finite), that score (decision 0015 §3). Null while either own-stream loss is not finite: never
+ * NaN in a log. The one place a point is made (the session's log and the page's live curve).
+ */
+export function curvePoint(st: Pick<LearnerStats, "cu" | "predLoss" | "baselineLoss" | "heldOutLoss" | "heldOutBaseline">, steps: number): CurvePoint | null {
+  const { cu, predLoss, baselineLoss, heldOutLoss, heldOutBaseline } = st
+  if (!Number.isFinite(predLoss) || !Number.isFinite(baselineLoss)) return null
+  const heldOut = Number.isFinite(heldOutLoss) && Number.isFinite(heldOutBaseline) ? { heldOut: { loss: heldOutLoss, baseline: heldOutBaseline } } : {}
+  return { cu, steps, predLoss, baselineLoss, ...heldOut }
+}
+
 /** Keeps every other point, always the newest, until at most MAX_CURVE_POINTS remain. */
 function thin(curve: CurvePoint[]): CurvePoint[] {
   let c = curve
@@ -291,7 +303,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   let birth: Birth | undefined
   let knowledgeSha = cfg.knowledgeSha
   let sessionsSeenAtBirth = cfg.sessionsSeenAtBirth
-  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates"> }) | undefined
+  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates" | "evalCU"> }) | undefined
 
   /** The final log file of a life that failed (see runSession), or null if there is nothing to put on the record. */
   const failedLog = async (): Promise<LogFileV2 | null> => {
@@ -315,11 +327,16 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const atLeast = (f: LogFileV2): LogFileV2 => !prior ? f : {
       ...f, stepsTotal: Math.max(f.stepsTotal, prior.stepsTotal), cu: Math.max(f.cu, prior.cu), restores: Math.max(f.restores, prior.restores),
       lostCU: Math.max(f.lostCU, prior.lostCU), skippedUpdates: Math.max(f.skippedUpdates, prior.skippedUpdates),
+      ...(f.evalCU !== undefined ? { evalCU: Math.max(f.evalCU, prior.evalCU ?? 0) } : {}),
     }
+    /** evalCU, when the stats have it (a learner state from before the held-out check, or a stub, may not). */
+    const evalOf = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? { evalCU: v } : {})
     if (cp && birth && cp.seq === nextSeq) {
       const st = (cp.learnerState as { stats?: Partial<LearnerStats> } | null)?.stats
       const savedSkips = typeof st?.skippedUpdates === "number" ? st.skippedUpdates : 0
+      // The scoring done since the checkpoint is thrown away with the life (it is not training: not in lostCU).
       return atLeast({
+        ...evalOf(st?.evalCU),
         ...base, ...birthFields(birth), stepsTotal: cp.steps, cu: cp.cu, curve: thin([...cp.curveTail]), restores: cp.restores,
         // The CU lived since the checkpoint is thrown away with the life: on the record, as a restore's is.
         lostCU: cp.lostCU + Math.max(0, (lived?.stats.cu ?? cp.cu) - cp.cu),
@@ -331,6 +348,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     if (!last && birth && lived && lived.steps > 0) {
       return {
+        ...evalOf(lived.stats.evalCU),
         ...base, ...birthFields(birth), stepsTotal: lived.steps, cu: lived.stats.cu, curve: thin([...lived.curve]), restores: lived.restores,
         lostCU: lived.lostCU, skippedUpdates: lived.stats.skippedUpdates + lived.lostSkips,
       }
@@ -412,14 +430,13 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
           stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed }, hostSig: { ...cfg.hostSig },
           sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
-          skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU,
+          skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU, evalCU: st.evalCU,
         }
       }
       const addPoint = () => {
-        const { cu, predLoss, baselineLoss } = learner.stats()
-        if (!Number.isFinite(predLoss) || !Number.isFinite(baselineLoss)) return // never NaN in a log
-        if (curve.at(-1)?.steps === steps) return
-        curve = thin([...curve, { cu, steps, predLoss, baselineLoss }])
+        const p = curvePoint(learner.stats(), steps)
+        if (!p || curve.at(-1)?.steps === steps) return
+        curve = thin([...curve, p])
       }
       /** After any save of the learner's current state. */
       const saved = () => {

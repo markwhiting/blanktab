@@ -17,6 +17,8 @@ export interface HistoryRow {
   learnerId: string; href: string; steps: string; final: string; setting: string; host: string
   /** Compute lived (CU) and the last loss ratio (predLoss ÷ the lazy guess's), "—" for a v1 (flailer) learner. */
   cu: string; lossRatio: string
+  /** The latest held-out ratio (decision 0015 §3), "—" for a learner from before the held-out check. */
+  heldOutRatio: string
 }
 
 const orDash = (v: number | null | undefined) => (typeof v === "number" ? fmt(v) : "—")
@@ -46,6 +48,7 @@ export function historyRows(summary: Summary, repo: Repo): HistoryRow[] {
       host: `${s.hostSig.cores} cores · ${s.hostSig.webgpu ? "webgpu" : "no webgpu"}`,
       cu: orDash(s.cu),
       lossRatio: orDash(s.lossRatio),
+      heldOutRatio: orDash(s.heldOutRatio),
     }))
 }
 

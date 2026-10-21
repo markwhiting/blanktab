@@ -24,7 +24,7 @@ const SPACE = [
   { name: "maxStepsPerSec", min: 30, max: 30 }, { name: "moveProbability", min: 0.1, max: 1 },
 ]
 const KNOWLEDGE: Record<string, unknown> = {
-  "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123 }] },
+  "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123, heldOutRatio: 1.0456 }] },
   // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
   "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
   "settings-space.json": { schemaVersion: 1, settings: SPACE },
@@ -107,6 +107,9 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   await expect.poll(() => cuLived(page)).toBeGreaterThan(0)
   await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
   await expect(page.getByTestId("ratio")).toHaveText(/^\d+(\.\d+)? \(its guesses are/)
+  // The chart and the ratio are on the fixed held-out set (decision 0015 §3); the own-stream ratio is secondary text.
+  await expect(page.getByTestId("heldout-label")).toHaveText("on a fixed test it never trains on")
+  await expect(page.getByTestId("own-ratio")).toHaveText(/^On what it chose to look at \(which it also trains on\): \d+(\.\d+)?$/)
   await expect(page.getByTestId("rate")).toHaveText(/^[\d.]+ steps\/s$/)
   await expect(page.getByTestId("curve-legend")).toContainText("how wrong its guesses are")
   await expect(page.getByTestId("curve-legend")).toContainText("the lazy guess: nothing changes")
@@ -132,7 +135,7 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(gh.prFiles(gh.pulls[0]!)).toEqual([`data/runs/${id}/0.json`])
   expect(githubCalls().some(r => r.method === "PUT" || r.url.includes("/contents/") || (r.body ?? "").includes("heartbeat"))).toBe(false)
   await expect(page.getByTestId("change-token")).toBeVisible()
-  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; curve: { predLoss: number; baselineLoss: number }[]; settings: Record<string, number> }
+  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; evalCU: number; curve: { predLoss: number; baselineLoss: number; heldOut?: { loss: number; baseline: number } }[]; settings: Record<string, number> }
   expect(final).toMatchObject({
     schemaVersion: 2, seq: 0, final: true, sessionsSeenAtBirth: 2, knowledgeSha: "c".repeat(64), codeSha: "dev", condition: "A",
     widths: TINY, hostSig: { webgpu: false }, restores: 0, lostCU: 0,
@@ -140,6 +143,9 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(final.cu).toBeGreaterThanOrEqual(LIFETIME_CU)
   expect(final.curve.length).toBeGreaterThan(0)
   for (const p of final.curve) expect(Number.isFinite(p.predLoss) && Number.isFinite(p.baselineLoss)).toBe(true)
+  // Every point (each at a sleep) carries the held-out score; its compute is billed apart from the life's.
+  for (const p of final.curve) expect(p.heldOut!.baseline > 0 && Number.isFinite(p.heldOut!.loss)).toBe(true)
+  expect(final.evalCU).toBeGreaterThan(0)
   expect(final.settings).toMatchObject({ replayPerSleep: 16, bufferSize: 500, maxStepsPerSec: 10 })
   expect(final.settings).not.toHaveProperty("moveProbability")
 
@@ -471,9 +477,12 @@ test("tabs: LEARNER by default; HISTORY lists past sessions newest first; ABOUT 
   await expect(rows.nth(0)).toContainText("3000")
   await expect(rows.nth(0)).toContainText("moveProbability = 0.5")
   await expect(rows.nth(0)).toContainText("4 cores")
-  await expect(rows.nth(0)).toContainText("0.912") // its loss ratio
+  await expect(rows.nth(0)).toContainText("0.912") // its own-stream ratio
+  await expect(rows.nth(0)).toContainText("1.046") // its held-out ratio
+  await expect(rows.nth(1)).toContainText("—") // a learner from before the held-out check
   await expect(rows.nth(0)).toContainText("1024.5") // its CU
-  await expect(page.getByTestId("history").locator("thead")).toContainText(/loss ratio/i)
+  await expect(page.getByTestId("history").locator("thead")).toContainText(/held-out ratio/i)
+  await expect(page.getByTestId("history").locator("thead")).toContainText(/own-stream ratio/i)
   await expect(page.getByTestId("history").locator("thead")).toContainText(/CU/)
   await expect(footer).toBeVisible()
 

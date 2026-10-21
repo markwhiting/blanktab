@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest"
 import type { CurvePoint } from "@blanktab/harness"
-import { ratioText, sparkline, appendPoints, MAX_SHOWN_POINTS } from "../src/curve"
+import { ownStreamText, ratioText, sparkline, appendPoints, MAX_SHOWN_POINTS } from "../src/curve"
 
-const pt = (cu: number, predLoss: number, baselineLoss: number, steps = Math.round(cu * 100)): CurvePoint => ({ cu, steps, predLoss, baselineLoss })
+/** A point whose held-out score is (loss, baseline); its own-stream losses are something else entirely. */
+const pt = (cu: number, loss: number, baseline: number, steps = Math.round(cu * 100)): CurvePoint => ({ cu, steps, predLoss: 9, baselineLoss: 10, heldOut: { loss, baseline } })
+/** A point from a learner before the held-out check: own-stream losses only. */
+const own = (cu: number, predLoss: number, baselineLoss: number, steps = Math.round(cu * 100)): CurvePoint => ({ cu, steps, predLoss, baselineLoss })
 
 describe("sparkline", () => {
   it("is empty without points", () => {
@@ -32,11 +35,31 @@ describe("sparkline", () => {
   })
 })
 
+describe("the chart and the ratio are on the held-out set (decision 0015 §3)", () => {
+  it("sparkline plots heldOut.loss and heldOut.baseline, not the own-stream losses, and skips points without a score", () => {
+    const s = sparkline([own(0.5, 0.01, 0.02), pt(1, 0.4, 0.2), pt(2, 0.1, 0.2)], 100, 40, 2)
+    expect(s.pred).toHaveLength(2)
+    expect(s.pred.map(p => p[0])).toEqual([50, 98])
+    expect(s.pred[0]![1]).toBeCloseTo(2) // 0.4, the top of the shared scale
+    expect(s.pred[1]![1]).toBeCloseTo(38) // 0.1, the bottom
+    expect(sparkline([own(1, 0.01, 0.02)], 100, 40)).toEqual({ pred: [], base: [] })
+  })
+  it("ratioText is the latest held-out score's loss / baseline", () => {
+    expect(ratioText([pt(1, 0.44, 0.5), own(2, 0.1, 0.5)])).toBe("0.880 (its guesses are 12% less wrong than the lazy guess)")
+    expect(ratioText([own(2, 0.1, 0.5)])).toBe("no guesses measured yet")
+  })
+  it("ownStreamText gives the own-stream ratio as the secondary number, in plain words", () => {
+    expect(ownStreamText([])).toBe("")
+    expect(ownStreamText([own(2, 0.41, 1)])).toBe("On what it chose to look at (which it also trains on): 0.410")
+    expect(ownStreamText([{ ...own(2, 0.41, 0) }])).toBe("")
+  })
+})
+
 describe("ratioText", () => {
   it("says nothing until there is a point", () => {
     expect(ratioText([])).toBe("no guesses measured yet")
   })
-  it("gives the last point's predLoss / baselineLoss to 3 significant digits, in plain words", () => {
+  it("gives the latest held-out loss / baseline to 3 significant digits, in plain words", () => {
     expect(ratioText([pt(1, 0.5, 0.5), pt(2, 0.44, 0.5)])).toBe("0.880 (its guesses are 12% less wrong than the lazy guess)")
     expect(ratioText([pt(2, 0.6, 0.5)])).toBe("1.20 (its guesses are 20% more wrong than the lazy guess)")
     expect(ratioText([pt(2, 0.5, 0.5)])).toBe("1.00 (its guesses are about as wrong as the lazy guess)")

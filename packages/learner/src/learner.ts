@@ -57,7 +57,26 @@ export interface LearnerStats {
   /** Skipped updates since the last applied one (reset by any applied update): the harness restores the last checkpoint after N. */
   consecutiveSkips: number
   sleeps: number
+  /**
+   * Compute units spent scoring the held-out set (decision 0015 §3): FLOP deltas on the learner's backend around the
+   * scoring only, never included in `cu`.
+   */
+  evalCU: number
+  /** Mean prediction loss on the held-out set at the last sleep (forward only, from the zero state); NaN until then or without a set. */
+  heldOutLoss: number
+  /** Copy-last's mean loss on the same transitions (the same size weighting); NaN until the first scoring or without a set. */
+  heldOutBaseline: number
 }
+
+/**
+ * A fixed held-out trajectory (decision 0015 §3): `obs.length === actions.length + 1`, transition i being
+ * (obs[i], actions[i]) → obs[i+1]. Recorded at birth by the caller (the learner cannot see the world): in the tab, 64
+ * transitions of a separate world seeded hashSeed(learnerSeed, "heldout") under uniformly random actions. It is only
+ * ever scored, never trained on, and is kept for the learner's whole life (saved and restored with it).
+ */
+export interface HeldOutSet { obs: Observation[]; actions: Action[] }
+/** Bounds on a held-out set's transitions (a hostile or corrupt checkpoint cannot make a sleep arbitrarily expensive). */
+export const HELD_OUT_MAX = 1024
 
 /**
  * Everything a learner carries between steps, as plain typed arrays and JSON (structured-clone friendly, for
@@ -83,6 +102,8 @@ export interface LearnerState {
   /** The replay buffer, oldest first. */
   replay: Transition[]
   stats: LearnerStats
+  /** The learner's held-out set (fixed at birth), or null for a learner born without one. */
+  heldOut: HeldOutSet | null
 }
 
 /** What one online update did, for instrumentation and tests (not part of the learner's inputs). */
@@ -105,6 +126,8 @@ export interface TrainableLearner extends Learner {
    * Consolidation condition A: replayPerSleep prediction updates, each on one transition sampled uniformly from
    * the replay buffer with the learner's RNG (core from the stored h_{t-2} and obs, predict with the stored action
    * against the next frame; size-weighted MSE, Adam). Counts one sleep, even on an empty buffer (no updates).
+   * Then, if the learner has a held-out set, scores it (no update, no RNG draw): stats heldOutLoss and
+   * heldOutBaseline, its FLOPs billed to evalCU, not cu.
    */
   sleep(): Promise<void>
   /** A snapshot of the whole learner (independent of it: later steps do not change it, nor it them). */
@@ -239,7 +262,23 @@ const allFinite = (a: Float32Array) => {
   for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i]!)) return false
   return true
 }
-const STATE_KEYS = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats"] as const
+const STATE_KEYS = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats", "heldOut"] as const
+
+/** Throws RangeError unless `h` is a well-formed held-out set (see HeldOutSet). */
+function checkHeldOut(h: unknown, where: string): asserts h is HeldOutSet {
+  const fail = (what: string) => { throw new RangeError(`${where}: ${what}`) }
+  if (!isRecord(h) || !Array.isArray(h.obs) || !Array.isArray(h.actions)) return fail("must be { obs, actions } arrays")
+  const n = h.actions.length
+  if (!(n >= 1 && n <= HELD_OUT_MAX)) fail(`must have 1 to ${HELD_OUT_MAX} transitions, has ${n}`)
+  if (h.obs.length !== n + 1) fail(`needs ${n + 1} observations for ${n} transitions, has ${h.obs.length}`)
+  h.obs.forEach((o: unknown, i) => {
+    if (!(isRecord(o) && o.periphery instanceof Uint8Array && o.fovea instanceof Uint8Array && isRecord(o.cursor)
+      && typeof o.cursor.x === "number" && typeof o.cursor.y === "number" && typeof o.buttonHeld === "boolean")) fail(`obs[${i}] is malformed`)
+    const ob = o as Observation
+    if (ob.periphery.length !== PERIPHERY_LEN || ob.fovea.length !== FOVEA_LEN) fail(`obs[${i}]: malformed frame`)
+  })
+  h.actions.forEach((a: unknown, i) => { if (!isRecord(a) || !isValidAction(a as unknown as Action)) fail(`actions[${i}] is not a valid action`) })
+}
 
 function checkState(s: LearnerState): void {
   const fail = (what: string) => { throw new RangeError(`LearnerState: ${what}`) }
@@ -304,6 +343,13 @@ function checkState(s: LearnerState): void {
     if (!(Number.isInteger(s.stats[k]) && s.stats[k] >= 0)) fail(`stats.${k} = ${s.stats[k]}`)
   }
   if (!(Number.isFinite(s.stats.cu) && s.stats.cu >= 0)) fail(`stats.cu = ${s.stats.cu}`)
+  if (!(Number.isFinite(s.stats.evalCU) && s.stats.evalCU >= 0)) fail(`stats.evalCU = ${s.stats.evalCU}`)
+  for (const k of ["heldOutLoss", "heldOutBaseline"] as const) {
+    const v = s.stats[k]
+    // NaN (not scored yet, or no set) or a finite loss: a scoring never stores anything else.
+    if (!(typeof v === "number" && (Number.isNaN(v) || (Number.isFinite(v) && v >= 0)))) fail(`stats.${k} = ${v}`)
+  }
+  if (s.heldOut !== null) checkHeldOut(s.heldOut, "LearnerState: heldOut")
   if ((s.last === null) !== (s.stats.steps === 0)) fail("last must be null exactly when no step has been taken")
 }
 
@@ -355,11 +401,22 @@ interface Last {
 export async function createLearner(opts: {
   backend: Backend
   onUpdate?: (u: UpdateInfo) => void
-} & ({ seed: number; widths: Widths; settings: LearnerSettings; state?: undefined } | { state: LearnerState })): Promise<TrainableLearner> {
+} & (
+  | { seed: number; widths: Widths; settings: LearnerSettings; heldOut?: HeldOutSet; state?: undefined }
+  | { state: LearnerState }
+)): Promise<TrainableLearner> {
   const { backend } = opts
   // The learner owns its copy. Any state given (even a falsy one) is a checkpoint and is validated.
   const saved = opts.state !== undefined ? structuredClone(opts.state) : null
   if (opts.state !== undefined) validateState(saved as LearnerState)
+  const bornWith: unknown = opts.state === undefined ? opts.heldOut : undefined
+  if (bornWith !== undefined) checkHeldOut(bornWith, "heldOut")
+  /** The held-out set, the learner's own copy, fixed for its life. */
+  const heldOut: HeldOutSet | null = saved ? saved.heldOut : bornWith !== undefined ? structuredClone(bornWith) : null
+  /** Copy-last on the held-out set: a constant of the set, computed on the host once. */
+  const heldOutCopyLast = heldOut
+    ? heldOut.actions.reduce((acc, _, i) => acc + copyLastBaseline(targetsFromObs(heldOut.obs[i]!), targetsFromObs(heldOut.obs[i + 1]!)), 0) / heldOut.actions.length
+    : Number.NaN
   const seed = saved ? saved.seed : (opts as { seed: number }).seed
   const widths: Widths = saved ? saved.widths : (opts as { widths: Widths }).widths
   const settings = saved ? saved.settings : clampSettings((opts as { settings: LearnerSettings }).settings)
@@ -376,7 +433,10 @@ export async function createLearner(opts: {
   // Action sampling has its own stream, independent of the initializer's.
   const rng = createRng((seed ^ 0x9e3779b9) >>> 0)
   const replay = new ReplayBuffer(settings.bufferSize)
-  const stats: LearnerStats = { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 }
+  const stats: LearnerStats = {
+    steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0,
+    evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN,
+  }
 
   // Every tensor made by `t` while the learner is being constructed is registered (see `owned` below).
   let constructing: ((x: Tensor) => void) | null = null
@@ -528,6 +588,56 @@ export async function createLearner(opts: {
     }
     stats.sleeps++
     stats.cu += (backend.stats.flops - flops0) / 1e9
+    await scoreHeldOut()
+  }
+
+  /**
+   * The held-out check (decision 0015 §3): the current weights on the fixed held-out trajectory, forward only (noGrad,
+   * no update, no RNG draw), the core run along it from the zero recurrent state. One read. Its FLOPs go to evalCU.
+   */
+  async function scoreHeldOut(): Promise<void> {
+    if (!heldOut) return
+    const flops0 = backend.stats.flops
+    const n = heldOut.actions.length
+    let hh = model.zeroState()
+    let total: Tensor | null = null
+    const made: Tensor[] = []
+    try {
+      let base = targetTensors(targetsFromObs(heldOut.obs[0]!))
+      made.push(base.periphery, base.fovea)
+      for (let i = 0; i < n; i++) {
+        const inputs = upload(obsToInputs(heldOut.obs[i]!))
+        const y = targetTensors(targetsFromObs(heldOut.obs[i + 1]!))
+        const aT = t(actionOneHot(heldOut.actions[i]!), [1, ACTION_DIM])
+        made.push(inputs.periphery, inputs.fovea, inputs.proprio, y.periphery, y.fovea, aT)
+        const h0 = hh
+        const hNext = noGrad(() => composite(() => model.core(inputs, h0)))
+        h0.dispose()
+        hh = hNext
+        const b = base
+        const li = noGrad(() => composite(() => {
+          const p = model.predict(hNext, aT, b)
+          return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
+        }))
+        const prev: Tensor | null = total
+        total = prev ? noGrad(() => composite(() => add(prev, li))) : li
+        if (prev) { prev.dispose(); li.dispose() }
+        // This step's constants are done with, except y: it is the next transition's base.
+        for (const x of [b.periphery, b.fovea, inputs.periphery, inputs.fovea, inputs.proprio, aT]) x.dispose()
+        made.length = 0
+        made.push(y.periphery, y.fovea)
+        base = y
+      }
+      const sum = await scalar(total!)
+      const loss = sum / n
+      stats.heldOutLoss = Number.isFinite(loss) ? loss : Number.NaN
+      stats.heldOutBaseline = heldOutCopyLast
+    } finally {
+      for (const x of made) x.dispose()
+      total?.dispose()
+      hh.dispose()
+      stats.evalCU += (backend.stats.flops - flops0) / 1e9
+    }
   }
 
   async function replayLossNow(): Promise<number> {
@@ -558,6 +668,7 @@ export async function createLearner(opts: {
       last: last && { obs: last.obs, action: last.action, hIn: hInData },
       replay: replay.toArray(),
       stats: { ...stats },
+      heldOut,
     } satisfies LearnerState)
   }
 

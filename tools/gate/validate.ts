@@ -64,6 +64,8 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   const MONOTONIC = ["cu", "restores", "lostCU", "skippedUpdates"] as const
   const lastV2 = Object.fromEntries(MONOTONIC.map(k => [k, -Infinity])) as Record<(typeof MONOTONIC)[number], number>
   for (const p of prevSorted) if (p.schemaVersion === 2) for (const k of MONOTONIC) lastV2[k] = Math.max(lastV2[k], p[k])
+  let lastEvalCU = -Infinity
+  for (const p of prevSorted) if (p.schemaVersion === 2 && p.evalCU !== undefined) lastEvalCU = Math.max(lastEvalCU, p.evalCU)
   const reported = new Set<number>()
   for (const { path, log } of sorted) {
     if (reported.has(log.seq)) continue // duplicate already reported
@@ -77,6 +79,11 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
       for (const k of MONOTONIC) {
         if (log[k] < lastV2[k]) errors.push(`${path}: ${k} decreased (${log[k]} < ${lastV2[k]})`)
         lastV2[k] = Math.max(lastV2[k], log[k])
+      }
+      // Optional (files before the held-out check have none): checked between files that both have it.
+      if (log.evalCU !== undefined) {
+        if (log.evalCU < lastEvalCU) errors.push(`${path}: evalCU decreased (${log.evalCU} < ${lastEvalCU})`)
+        lastEvalCU = Math.max(lastEvalCU, log.evalCU)
       }
     }
   }

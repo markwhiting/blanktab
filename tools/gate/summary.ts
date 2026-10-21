@@ -34,6 +34,24 @@ export function lossRatio(logs: LogFile[]): number | null {
   return null
 }
 
+/**
+ * The learner's latest held-out ratio (decision 0015 §3): heldOut.loss ÷ heldOut.baseline at the newest curve point
+ * of its v2 logs that has a held-out score, or null if none has or the ratio is not finite (a zero baseline).
+ */
+export function heldOutRatio(logs: LogFile[]): number | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const l = logs[i]!
+    if (l.schemaVersion !== 2) continue
+    for (let j = l.curve.length - 1; j >= 0; j--) {
+      const h = l.curve[j]!.heldOut
+      if (!h) continue
+      const r = h.loss / h.baseline
+      return Number.isFinite(r) ? r : null
+    }
+  }
+  return null
+}
+
 export function buildSummary(runsDir: string): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
@@ -48,6 +66,7 @@ export function buildSummary(runsDir: string): Summary {
         lastWrittenAt: last.writtenAt,
         cu: last.schemaVersion === 2 ? last.cu : null,
         lossRatio: lossRatio(logs),
+        heldOutRatio: heldOutRatio(logs),
       })
     }
   }
