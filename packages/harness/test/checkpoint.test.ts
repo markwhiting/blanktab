@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
 import { checkpointMetas, deleteCheckpoint, hasCheckpoint, loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
 import { openQueue } from "../src/queue"
-import { openDb } from "../src/db"
+import { DB_VERSION, openDb } from "../src/db"
 import { mkFile } from "./helpers"
 import { emptyObservation, PERIPHERY, decodeMove, type Action, type Observation } from "@blanktab/interface"
 import { createCpuBackend } from "@blanktab/tensor"
@@ -154,6 +154,34 @@ describe("the database connection", () => {
     const q = await openQueue(idb)
     await q.put(mkFile(A, 0))
     expect((await q.pending()).length).toBe(1)
+  })
+
+  /** A database as newer code would leave it: version DB_VERSION + 1, with `stores` (and maybe more). */
+  const newer = (idb: IDBFactory, stores: string[]) => new Promise<void>((res, rej) => {
+    const req = idb.open("blanktab", DB_VERSION + 1)
+    req.onupgradeneeded = () => {
+      for (const name of stores) req.result.createObjectStore(name, { keyPath: name === "outbox" ? ["learnerId", "seq"] : "learnerId" })
+      req.result.createObjectStore("fromTheFuture", { keyPath: "id" })
+    }
+    req.onsuccess = () => { req.result.close(); res() }
+    req.onerror = () => rej(req.error)
+  })
+
+  it("a database a newer page already upgraded (VersionError for this code's version): used as it is, if every store this code needs is there", async () => {
+    const idb = new IDBFactory()
+    await newer(idb, ["outbox", "checkpoints", "checkpointMeta", "contribution"])
+    const q = await openQueue(idb)
+    await q.put(mkFile(A, 0), { save: cp(A, 1) })
+    expect((await q.pending()).map(f => f.seq)).toEqual([0])
+    expect((await loadCheckpoint(idb, A))?.steps).toBe(1)
+    const db = await openDb(idb)
+    expect(db.version).toBe(DB_VERSION + 1)
+  })
+
+  it("a newer database missing a store this code needs: fails as before", async () => {
+    const idb = new IDBFactory()
+    await newer(idb, ["outbox", "checkpoints"])
+    await expect(openDb(idb)).rejects.toThrow(/VersionError|version|store/i)
   })
 
   it("steps aside for a version change (here: the database being deleted) and reopens on the next call", async () => {
