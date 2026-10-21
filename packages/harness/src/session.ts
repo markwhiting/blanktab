@@ -74,23 +74,32 @@ export type SessionEvent =
 export class SessionInbox {
   #knowledge: Manifest | undefined
   #waiting: { resolve: (saved: boolean) => void; halt: boolean }[] = []
+  #halted = false
 
   /**
-   * The manifest of refreshed knowledge, in force from now on: every later log file (and checkpoint) records its
-   * knowledgeSha. The offline fallback's (OFFLINE_KNOWLEDGE_SHA) is ignored.
+   * The manifest of refreshed knowledge, in force from the next clean step on (never while skipped updates are
+   * outstanding): every later log file (and checkpoint) records its knowledgeSha. A new knowledgeSha is a boundary: the
+   * points lived under the old one are first written in a log file of their own (runSession). The offline fallback's
+   * (OFFLINE_KNOWLEDGE_SHA) is ignored.
    */
   setKnowledge(m: Manifest): void {
     if (m.knowledgeSha !== OFFLINE_KNOWLEDGE_SHA) this.#knowledge = m
   }
   /**
-   * A checkpoint of the learner as it is now, outside the throttle (in its own transaction, with no log file). True
+   * A checkpoint of the learner as it is now, outside the throttle (with no log file, unless `halt` or a crossing). True
    * once it is saved; false if it was not: skipped updates were outstanding (a save then would be of a learner going
    * non-finite), or the life ended first. The caller asks again later. With `halt`, a life that saves for it stops
    * right after the save, at that step (runSession returns `halted`): the page reloads onto exactly that checkpoint.
+   * Once a run has halted, every request (one made during the halting save, one the page had given up waiting for and
+   * asks again, any later one) is answered true at once: that save is the learner's current state, as nothing runs after it.
    */
   checkpointNow(opts: { halt?: boolean } = {}): Promise<boolean> {
+    if (this.#halted) return Promise.resolve(true)
     return new Promise(resolve => this.#waiting.push({ resolve, halt: opts.halt ?? false }))
   }
+
+  /** Whether the last run halted at a forced save (and no run has started since). */
+  get halted(): boolean { return this.#halted }
 
   /** runSession: the latest knowledge given (the same object until a newer one comes). */
   get knowledge(): Manifest | undefined { return this.#knowledge }
@@ -101,6 +110,15 @@ export class SessionInbox {
   /** runSession: answers every waiting request. */
   answer(saved: boolean): void {
     for (const r of this.take()) r.resolve(saved)
+  }
+  /** runSession: the run halted at a save that is current; every waiting request, and every later one, is answered true. */
+  markHalted(): void {
+    this.#halted = true
+    this.answer(true)
+  }
+  /** runSession: a run starts; requests wait for it again. */
+  markRunning(): void {
+    this.#halted = false
   }
 }
 
@@ -219,11 +237,16 @@ function birthOf(state: unknown, id: string): Birth {
  *   after RESTORE_AFTER_SKIPS in a row it is restored from the last checkpoint. Restores stay on the record: the log
  *   counts them (`restores`), the CU they threw away (`lostCU`) and their skipped updates (in `skippedUpdates`).
  * - The final log file removes the checkpoint in the same transaction.
- * - `inbox` (SessionInbox), checked after every step: knowledge given there is in force from then on (each log file's
- *   knowledgeSha is the knowledge in force when it was written, and the checkpoint keeps it across a reload) and is
- *   handed to `learner.onKnowledge`. A forced checkpoint is saved then, whatever the throttle, under the same rule as
- *   every other save: never while skipped updates are outstanding (it is answered false then, and when the life ends).
- *   One asked with `halt` stops the life right after its save (the result says `halted`; no final log is written).
+ * - `inbox` (SessionInbox), checked after every clean step (none while skipped updates are outstanding): knowledge
+ *   given there is in force from then on (each log file's knowledgeSha is the knowledge in force when it was written,
+ *   and the checkpoint keeps it across a reload) and is handed to `learner.onKnowledge`. Knowledge with a new
+ *   knowledgeSha is a boundary: a log file under the old sha (with its checkpoint, one transaction) is written first, so
+ *   no log file holds points lived under two versions. A forced checkpoint is saved then, whatever the throttle, under
+ *   the same rule as every other save: never while skipped updates are outstanding (it is answered false then, and when
+ *   the life ends). One asked with `halt` (before a code reload) stops the life right after its save, and that save
+ *   writes a log file with it (one transaction), so every point lived on this code is logged with this codeSha; the
+ *   result says `halted`, no final log is written, and the inbox answers every later request true (markHalted).
+ *   Boundary and halt logs are ordinary log files (the contributor's 16-per-PR cap counts them like any other).
  * - A life that fails (any error but the caller's recoverable ones and those its own onTick / onEvent throw: the
  *   restore limits, a checkpoint that will not load or resume, a full disk, the learner throwing) is ended on the
  *   record before the error is rethrown: a final log file built from its last checkpoint (steps, CU, seq, curve tail,
@@ -350,11 +373,15 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     sessionsSeenAtBirth = cp?.sessionsSeenAtBirth ?? cfg.sessionsSeenAtBirth
 
     const inbox = deps.inbox
+    inbox?.markRunning()
     /** The inbox's knowledge this run has put in force (none yet: the checkpoint's or the config's sha is). */
     let applied: Manifest | undefined
-    const takeKnowledge = () => {
+    /** Knowledge the inbox holds that this run has not put in force yet. */
+    const freshKnowledge = (): Manifest | undefined => {
       const k = inbox?.knowledge
-      if (!k || k === applied) return
+      return k && k !== applied ? k : undefined
+    }
+    const takeKnowledge = (k: Manifest) => {
       applied = k
       knowledgeSha = k.knowledgeSha
       learner.onKnowledge?.(k)
@@ -422,7 +449,6 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         } catch (err) {
           throw new Interrupted(err)
         }
-        takeKnowledge()
         let checkpointDue = false
         if (steps % sleepInterval === 0) {
           await learner.sleep()
@@ -463,30 +489,41 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         }
         // Taken before the save: a request made while it is written waits for the next step's.
         const forced = inbox?.take() ?? []
-        if (st.cu >= crossing) {
-          const f = logFile(false)
+        const halt = forced.some(r => r.halt)
+        const fresh = freshKnowledge()
+        // A log file now: at a crossing; before a halt (a code reload: the points so far are this code's); and before a
+        // new knowledgeSha comes into force (the points so far are the old knowledge's). One file covers all three.
+        if (st.cu >= crossing || halt || (fresh !== undefined && fresh.knowledgeSha !== knowledgeSha)) {
+          const f = logFile(false) // under the code and knowledge the points in it were lived with
           seq++
           curve = []
           crossing = nextCrossing(st.cu)
+          if (fresh) takeKnowledge(fresh) // the checkpoint saved with the file is already under the new knowledge
           const next = await checkpointNow()
           await queue.put(f, { save: next })
           cp = restorePoint = next
           saved()
           emit({ type: "logged", seq: f.seq, steps: f.stepsTotal, cu: f.cu, final: false })
-        } else if (forced.length > 0 || (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs)) {
-          const next = await checkpointNow()
-          await saveCheckpoint(idb, next)
-          cp = restorePoint = next
-          saved()
+        } else {
+          if (fresh) takeKnowledge(fresh) // the same sha (new content): nothing to separate
+          if (forced.length > 0 || (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs)) {
+            const next = await checkpointNow()
+            await saveCheckpoint(idb, next)
+            cp = restorePoint = next
+            saved()
+          }
         }
         for (const r of forced) r.resolve(true)
-        if (forced.some(r => r.halt)) {
+        if (halt) {
           halted = true
           break
         }
       }
 
-      if (halted) return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: true }
+      if (halted) {
+        inbox?.markHalted() // a request made during the save, or the page asking again, is answered true: the save is current
+        return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: true }
+      }
 
       addPoint()
       const end = logFile(true)

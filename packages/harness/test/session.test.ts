@@ -392,12 +392,12 @@ describe("session v2", { timeout: 60_000 }, () => {
         },
       }))
 
-    it("the new knowledgeSha is in the next log file (and every later one); the learner is handed the knowledge", async () => {
+    it("a new knowledgeSha: a log under the old one first (with its checkpoint), then the new one in every later file; the learner is handed the knowledge", async () => {
       const idb = new IDBFactory()
       const handed: [number, string][] = []
       await live(idb, new SessionInbox(), { at: { 20: knowledgeWith("e".repeat(64)) }, knowledge: handed })
       const logs = await logsOf(idb)
-      expect(logs.map(f => [f.stepsTotal, f.knowledgeSha[0]])).toEqual([[16, "f"], [32, "e"], [64, "e"], [128, "e"]])
+      expect(logs.map(f => [f.stepsTotal, f.knowledgeSha[0]])).toEqual([[16, "f"], [20, "f"], [32, "e"], [64, "e"], [128, "e"]])
       expect(logs.every(f => f.sessionsSeenAtBirth === 3)).toBe(true) // still a birth fact
       expect(handed).toEqual([[20, "e".repeat(64)]]) // before step 21, once
       expectContinuous(logs)
@@ -406,24 +406,67 @@ describe("session v2", { timeout: 60_000 }, () => {
     it("offline knowledge (a failed refresh) never replaces the knowledge in force", async () => {
       const idb = new IDBFactory()
       await live(idb, new SessionInbox(), { at: { 20: knowledgeWith("e".repeat(64)), 40: knowledgeWith(OFFLINE_KNOWLEDGE_SHA) } })
-      expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["f", "e", "e", "e"])
+      expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["f", "f", "e", "e", "e"])
+    })
+
+    it("the same knowledgeSha again (new content, same priors) writes no boundary log; the learner is still handed it", async () => {
+      const idb = new IDBFactory()
+      const handed: [number, string][] = []
+      await live(idb, new SessionInbox(), { at: { 20: knowledgeWith("f".repeat(64)) }, knowledge: handed })
+      expect((await logsOf(idb)).map(f => f.stepsTotal)).toEqual([16, 32, 64, 128])
+      expect(handed).toEqual([[20, "f".repeat(64)]])
+    })
+
+    it("no log file holds curve points from two knowledge versions", async () => {
+      const idb = new IDBFactory()
+      // Changes at steps 23 and 41 (off the crossings at 16, 32 and 64; sleeps every 5 steps).
+      await live(idb, new SessionInbox(), { at: { 23: knowledgeWith("e".repeat(64)), 41: knowledgeWith("d".repeat(64)) } })
+      const logs = await logsOf(idb)
+      expect(logs.map(f => [f.stepsTotal, f.knowledgeSha[0]])).toEqual([[16, "f"], [23, "f"], [32, "e"], [41, "e"], [64, "d"], [128, "d"]])
+      const switchedAt = { f: 0, e: 23, d: 41 } as Record<string, number>
+      const until = { f: 23, e: 41, d: Infinity } as Record<string, number>
+      for (const f of logs) {
+        const k = f.knowledgeSha[0]!
+        for (const p of f.curve) {
+          expect(p.steps, `${k} @ ${f.stepsTotal}`).toBeGreaterThan(switchedAt[k]!)
+          expect(p.steps, `${k} @ ${f.stepsTotal}`).toBeLessThanOrEqual(until[k]!)
+        }
+      }
+      expectContinuous(logs)
+    })
+
+    it("a change that comes while skipped updates are outstanding waits for them to clear (the boundary log needs a checkpoint)", async () => {
+      const idb = new IDBFactory()
+      const handed: [number, string][] = []
+      const inbox = new SessionInbox()
+      await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 5 }), depsFor(idb, {
+        inbox, createLearner: stubFactory({ cuPerStep: 1 / 2, knowledge: handed, skip: n => n >= 20 && n <= 24 }),
+        onTick: ({ steps }) => { if (steps === 20) inbox.setKnowledge(knowledgeWith("e".repeat(64))) },
+      }))
+      const logs = await logsOf(idb)
+      expect(logs.map(f => [f.stepsTotal, f.knowledgeSha[0]])).toEqual([[16, "f"], [25, "f"], [32, "e"], [64, "e"], [128, "e"]])
+      expect(handed).toEqual([[25, "e".repeat(64)]])
     })
 
     it("is kept by the checkpoint: a reload before the next log file still writes it", async () => {
       const idb = new IDBFactory()
       await expect(live(idb, new SessionInbox(), { at: { 20: knowledgeWith("e".repeat(64)) }, stopAt: 25 })).rejects.toThrow("reload")
-      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 20, knowledgeSha: "e".repeat(64) }) // the sleep at step 20, just after the knowledge came
+      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 20, seq: 2, knowledgeSha: "e".repeat(64) }) // saved with the boundary log at step 20
       await live(idb, new SessionInbox())
-      expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["f", "e", "e", "e"])
+      expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["f", "f", "e", "e", "e"])
     })
 
-    it("knowledge given before the life starts applies from its first step (after the checkpoint's own is read)", async () => {
+    it("knowledge given before a resumed life starts: the points the checkpoint carries are logged under its own sha first", async () => {
       const idb = new IDBFactory()
-      await expect(live(idb, new SessionInbox(), { stopAt: 10 })).rejects.toThrow("reload")
+      await expect(live(idb, new SessionInbox(), { stopAt: 12 })).rejects.toThrow("reload")
+      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 10, knowledgeSha: "f".repeat(64) }) // the sleep at step 10, two points in its tail
       const inbox = new SessionInbox()
       inbox.setKnowledge(knowledgeWith("e".repeat(64)))
       await live(idb, inbox)
-      expect((await logsOf(idb)).map(f => f.knowledgeSha[0])).toEqual(["e", "e", "e", "e"])
+      const logs = await logsOf(idb)
+      expect(logs.map(f => [f.stepsTotal, f.knowledgeSha[0]])).toEqual([[11, "f"], [16, "e"], [32, "e"], [64, "e"], [128, "e"]])
+      expect(logs[0]!.curve.map(p => p.steps)).toEqual([5, 10])
+      expectContinuous(logs)
     })
   })
 
@@ -598,10 +641,11 @@ describe("session v2", { timeout: 60_000 }, () => {
         onTick: ({ steps }) => { ticks.push(steps); if (steps === 1500) answer = inbox.checkpointNow({ halt: true }) },
       }))
       expect(await answer).toBe(true)
-      expect(r).toMatchObject({ steps: 1500, seq: 1, halted: true, alreadyFinal: false })
+      expect(r).toMatchObject({ steps: 1500, seq: 2, halted: true, alreadyFinal: false })
       expect(ticks.at(-1)).toBe(1500) // not one step more
-      expect((await logsOf(idb)).map(f => [f.stepsTotal, f.final])).toEqual([[1024, false]])
-      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 1500, seq: 1 })
+      // The halting save writes a log with it (one transaction): every point lived on this code is logged on it.
+      expect((await logsOf(idb)).map(f => [f.stepsTotal, f.final])).toEqual([[1024, false], [1500, false]])
+      expect(await loadCheckpoint(idb, ID)).toMatchObject({ steps: 1500, seq: 2, curveTail: [] })
       const events: SessionEvent[] = []
       const again = await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(idb, {
         inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024 }), onEvent: e => events.push(e),
@@ -609,6 +653,44 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(events[0]).toMatchObject({ type: "resumed", steps: 1500 })
       expect(again.halted).toBe(false)
       expectContinuous(await logsOf(idb))
+    })
+
+    it("after a halt, every later request (one the page timed out on, or a retry) is answered true at once: the halted save is current", async () => {
+      const inbox = new SessionInbox()
+      await runSession(cfgFor({ sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(new IDBFactory(), {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024 }),
+        onTick: ({ steps }) => { if (steps === 300) void inbox.checkpointNow({ halt: true }) },
+      }))
+      expect(inbox.halted).toBe(true)
+      const answers = await Promise.all([inbox.checkpointNow(), inbox.checkpointNow({ halt: true })])
+      expect(answers).toEqual([true, true])
+    })
+
+    it("a request made during the halting save is answered true by the halt (no run is left to answer it)", async () => {
+      const inbox = new SessionInbox()
+      let during: Promise<boolean> | undefined
+      await runSession(cfgFor({ sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined }), depsFor(new IDBFactory(), {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024, onSave: steps => { if (steps === 300) during = inbox.checkpointNow({ halt: true }) } }),
+        onTick: ({ steps }) => { if (steps === 300) void inbox.checkpointNow({ halt: true }) },
+      }))
+      expect(await during).toBe(true)
+    })
+
+    it("new code after a halt: logs before the reload carry the old codeSha, after it the new one; none holds points from both", async () => {
+      const idb = new IDBFactory()
+      const inbox = new SessionInbox()
+      const cfg = (codeSha: string) => cfgFor({ codeSha, lifetimeCU: 64, sleepInterval: 50, maxStepsPerSec: 10, checkpointEveryMs: undefined })
+      const OLD = "a".repeat(40), NEW = "b".repeat(40)
+      await runSession(cfg(OLD), depsFor(idb, {
+        inbox, createLearner: stubFactory({ cuPerStep: 8 / 1024 }),
+        onTick: ({ steps }) => { if (steps === 1700) void inbox.checkpointNow({ halt: true }) },
+      }))
+      await runSession(cfg(NEW), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 8 / 1024 }) }))
+      const logs = await logsOf(idb)
+      expect(logs.map(f => [f.stepsTotal, f.codeSha[0]])).toEqual([[1024, "a"], [1700, "a"], [2048, "b"], [4096, "b"], [8192, "b"]])
+      for (const f of logs) for (const p of f.curve) expect(f.codeSha === OLD ? p.steps <= 1700 : p.steps > 1700).toBe(true)
+      expect(logs[1]!.curve.map(p => p.steps)).toEqual([1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700])
+      expectContinuous(logs)
     })
 
     it("halt with skips outstanding: not saved (false) and the life goes on; a later halt request stops it", async () => {
