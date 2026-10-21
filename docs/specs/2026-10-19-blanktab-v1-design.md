@@ -284,7 +284,8 @@ The method used (random or UCB) is logged. Rows from other `schemaVersion`s are 
 - **Token type [user]:** whichever type spike 1 shows works with the least access. A classic `public_repo` token is acceptable. **Hard rule [user]:** the token lives only in this browser's `localStorage`. It is never written to IndexedDB, logs, checkpoints, the live layer, telemetry, the repo, or any network destination other than `api.github.com`. Enforce this with a test that scans submitted payloads and checkpoints for the token string.
 - **Shared storage accepted:** all `markwhiting.github.io` projects share one storage origin. The user accepted this risk. All keys are prefixed `blanktab:`.
 
-### 9.4 What a tab submits [user: rolling PRs, logs kept, 0006; agent: mechanics; **amended by 0011**: one commit per flush, no heartbeat.json]
+### 9.4 What a tab submits [user: rolling PRs, logs kept, 0006; agent: mechanics; **amended by 0011**: one commit per flush, no heartbeat.json; **amended by 0014**: log schedule, seq gaps]
+> **Superseded in part by decision 0014.** Logs are written at CU 8, 16, …, 512, then every 1024 CU (not at each sleep), as `<seq>.json`, with no heartbeat. A learner has at most one open PR; once the gate merges or closes it, the next PR starts on a fresh branch. A closed PR's files are dropped and the learner goes on (seq gaps are allowed); after 3 closed PRs in a row it stops contributing.
 - **Contributors in v1 [agent]:** the owner and invited collaborators; public contribution comes later.
 - **Setup (once per contributor):** if the token's user has push access to `markwhiting/blanktab` (the owner, or a collaborator), branches are pushed to upstream directly. Otherwise the tab ensures a fork exists and pushes there. In both cases, PRs target upstream `main`.
 - **Log stream:** one branch per learner, `run/<learnerId>`, in the contributor's fork, with one draft PR to upstream `main`.
@@ -295,7 +296,8 @@ The method used (random or UCB) is logged. Rows from other `schemaVersion`s are 
   - **What it contains:** a separate branch `knowledge/<learnerId>-<n>` and PR holding its final scorer weights (condition C only).
   - **What else it must include:** a `claim.json` that points at the log files supporting it.
 
-### 9.5 The gate (GitHub Actions) [user: "a simple action that decides what to merge"; agent: rules; resolves Q18, Q7; **amended by 0011**: liveness from newest log, 16-file cap, 7-day max age, dev builds closed, validate not a required check]
+### 9.5 The gate (GitHub Actions) [user: "a simple action that decides what to merge"; agent: rules; resolves Q18, Q7; **amended by 0011**: liveness from newest log, 16-file cap, 7-day max age, dev builds closed, validate not a required check; **amended by 0014**: merge every valid PR, seq gaps]
+> **Superseded in part by decision 0014.** The final / 48 h heartbeat rule below and 0011's 7-day rule no longer apply: every valid session PR is merged at each hourly run. "Counters only increase" still holds for CU, steps and restores; for seq it now means strictly above the highest seq already on `main`, unique in the PR, with gaps allowed.
 - **`validate.yml` (on `pull_request`):**
   - Declares `permissions: contents: read` explicitly, so it is read-only for same-repo branches as well as forks. It uses no secrets.
   - Runs only `tools/gate/validate` from **`main`'s** copy of the code, against the PR's files *as data*. It never executes PR code.
@@ -313,7 +315,8 @@ The method used (random or UCB) is logged. Rows from other `schemaVersion`s are 
   - **After merging:** rebuild `summary.json` and `best.json`, commit, and deploy Pages in the same job. Merges made with `GITHUB_TOKEN` don't trigger other workflows, so the job must do this itself.
 - **Branch protection on `main`:** require the validate check. Only the gate's token and humans may merge.
 
-## 10. Persistence, lifecycle, and the live layer [agent; resolves Q17]
+## 10. Persistence, lifecycle, and the live layer [agent; resolves Q17; **amended by 0014**: no fixed lifetime]
+> **Superseded in part by decision 0014.** There is no lifetime: a learner lives as long as its tab (and, through adoption, a later tab). `final: true` is written only when a life fails (or a test lifetime ends). New compatible code is reloaded onto with the learner resumed from a forced checkpoint; incompatible code leaves the learner running on its old code. Checkpoints are written every 5 minutes and with every log file, not at every sleep.
 - **Lifetime [agent]:** a learner lives until one of the following happens, then becomes *final*:
   - it reaches `lifetimeCU` (default 2^`maxLevel` CU; `maxLevel` is a setting, default 12);
   - the deployed `schemaVersion` changes (it retires rather than resuming under different semantics);

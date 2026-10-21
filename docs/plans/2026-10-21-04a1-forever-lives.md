@@ -33,13 +33,13 @@ A learner now keeps learning for as long as its tab is open (decision 0014). The
 
 **Interfaces:**
 - `SessionConfig.lifetimeCU?: number`; undefined means no end.
-- `export function logThresholds(): Iterable<number>`, which yields 8, 16, …, 512, 1024, 1536, …
+- `export function logThresholds(): Iterable<number>`, which yields 8, 16, …, 512, 1024, 2048, 3072, …
 - The page shows "Compute lived N CU", with no "of …".
 
 **Tests:**
 - the schedule's first 12 values;
 - no `final` log without a lifetime;
-- a stub learner adding 10,000 CU writes exactly 7 + 19 = 26 files: 8…512 is 7 thresholds, then 1024…10240 in steps of 512 is 19;
+- a stub learner adding 10,240 CU writes exactly 7 + 10 = 17 files: 8…512 is 7 thresholds, then 1024…10240 in steps of 1024 is 10 (the contributor never lets an open PR pass 16 files; the rest wait for the merge);
 - a test lifetime still ends in a final log.
 
 Commit: `feat(harness): learners live as long as their tab`
@@ -65,9 +65,9 @@ Commit: `feat(gate): merge valid session PRs every run`
 
 **Behaviour:**
 - **`updates.ts`** has a scheduler with injectable timers and visibility. It holds two pollers: knowledge every 15 ± 3 min and manifest every 10 ± 2 min. While the tab is hidden it pauses, and it checks immediately when the tab becomes visible.
-- **On new knowledge:** the main thread posts `{ type: "knowledge", knowledge }` to the worker. The session's `knowledgeSha`, as written into later logs, updates. The worker hands it to the learner through an optional `learner.onKnowledge?.(k)`, which is a no-op in 04a.
+- **On new knowledge:** the main thread posts `{ type: "knowledge", manifest }` to the worker. The session's `knowledgeSha`, as written into later logs, updates; if it changed, a log under the old sha is written first (final-review fix: a boundary log). The worker hands it to the learner through an optional `learner.onKnowledge?.(k)`, which is a no-op in 04a.
 - **On a new `codeSha` in the manifest:**
-  - **compatible** (same `learnerStateVersion`): wait a random 0–5 min, post `{ type: "checkpointNow" }`, wait for `{ type: "checkpointed" }` (the session forces a save, bypassing the throttle, still in one transaction with no log), then `location.reload()`;
+  - **compatible** (same `learnerStateVersion`): wait a random 0–5 min, post `{ type: "checkpointNow", halt: true }`, wait for `{ type: "checkpointed" }` (the session forces a save, bypassing the throttle, and writes a log with it in one transaction, final-review fix; it halts there), then `location.reload()`. A halt the page stopped waiting for is reported by `{ type: "halted" }`, and the page reloads on it;
   - **incompatible:** show the exact text from Review Focus 2, and stop polling the manifest.
 
 **Tests:**
