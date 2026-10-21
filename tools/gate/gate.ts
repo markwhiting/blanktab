@@ -5,10 +5,12 @@ import { pathToFileURL } from "node:url"
 import { parseLogFile, type LogFile } from "@blanktab/harness/log"
 import { validateSessionPr, type PrFile } from "./validate.ts"
 import { readLearnerLogs } from "./summary.ts"
-import { closePr, labelNeedsHuman, listOpenPrs, loadPr, mergePr } from "./github.ts"
+import { boundAuthor, closePr, labelNeedsHuman, listOpenPrs, loadPr, mergePr } from "./github.ts"
 
 export interface OpenPr {
   number: number
+  /** Must be `run: <learnerId>` for the learner whose files it carries. */
+  title: string
   headRef: string
   /** branch the PR targets; only main is acceptable */
   baseRef: string
@@ -18,12 +20,19 @@ export interface OpenPr {
   loadErrors?: string[]
   /** head commit that was validated; merging is pinned to it */
   headSha?: string
+  /** The PR's GitHub author (user.login). */
+  author?: string
+  /** Who the PR's learner belongs to: the author of its first merged PR (github.ts boundAuthor); null if none yet. */
+  boundAuthor?: string | null
 }
 export type GateDecision = { pr: number; action: "merge" | "close" | "label-needs-human"; reason: string }
 
 export const DEV_BUILD_REASON = "Development builds don't contribute."
 
 const LOG_PATH_RE = /^data\/runs\/[^/]+\/\d+\.json$/
+const LEARNER_DIR_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\//
+/** The learnerIds a PR's file paths name. */
+export const learnersIn = (files: PrFile[]): string[] => [...new Set(files.map(f => LEARNER_DIR_RE.exec(f.path)?.[1]).filter((x): x is string => !!x))]
 function logsIn(files: PrFile[]): LogFile[] {
   return files.flatMap(f => {
     if (!LOG_PATH_RE.test(f.path)) return []
@@ -40,6 +49,14 @@ export function decide(prs: OpenPr[]): GateDecision[] {
   return prs.map((pr): GateDecision => {
     if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
     if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
+    const ids = learnersIn(pr.files)
+    if (ids.length === 1) {
+      const id = ids[0]!
+      if (pr.title !== `run: ${id}`) return { pr: pr.number, action: "close", reason: `A session PR's title must be "run: ${id}", the learner whose files it carries.` }
+      // A learner belongs to the author of its first merged PR: nobody else may add to its record.
+      const owner = pr.boundAuthor
+      if (owner && pr.author?.toLowerCase() !== owner.toLowerCase()) return { pr: pr.number, action: "close", reason: `Learner ${id} belongs to @${owner}.` }
+    }
     const v = validateSessionPr(pr.files, pr.previous)
     if (!v.ok) {
       return v.kind === "needs-human"
@@ -99,9 +116,24 @@ function main(): void {
     try {
       const loaded = loadPr(repo, listed.number)
       if (loaded.headSha === undefined) { console.error(`PR #${listed.number}: GitHub gave no head commit; leaving it for the next run`); continue }
-      const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
+      if (loaded.author === undefined) { console.error(`PR #${listed.number}: GitHub gave no author; leaving it for the next run`); continue }
+      const ids = learnersIn(loaded.files)
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })
-      prs.push({ number: listed.number, headRef: loaded.headRef, baseRef: loaded.baseRef, files: loaded.files, previous, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
+      let bound: string | null = null
+      if (ids.length === 1) {
+        try {
+          bound = boundAuthor(repo, ids[0]!)
+        } catch (e) {
+          console.error(`PR #${listed.number}: who learner ${ids[0]} belongs to could not be found (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+          continue
+        }
+        // Logs on main but no commit for them: the history is incomplete (a shallow checkout). Never decide blind.
+        if (bound === null && previous.length > 0) { console.error(`PR #${listed.number}: learner ${ids[0]} has logs on main but no commit found for them; leaving it for the next run`); continue }
+      }
+      prs.push({
+        number: listed.number, title: listed.title, headRef: loaded.headRef, baseRef: loaded.baseRef, files: loaded.files, previous,
+        loadErrors: loaded.loadErrors, headSha: loaded.headSha, author: loaded.author, boundAuthor: bound, learnerId: ids.length === 1 ? ids[0]! : null,
+      })
     } catch (e) {
       console.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
     }

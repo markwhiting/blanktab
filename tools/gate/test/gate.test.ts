@@ -14,7 +14,7 @@ const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
 })
 const file = (l: LogFile): PrFile => ({ path: `data/runs/${ID}/${l.seq}.json`, content: JSON.stringify(l) })
 const written = (h: number) => ({ writtenAt: hoursAgo(h).toISOString() })
-const pr = (over: Partial<OpenPr> = {}): OpenPr => ({ number: 1, headRef: "run/x", baseRef: "main", files: [file(log(0))], previous: [], ...over })
+const pr = (over: Partial<OpenPr> = {}): OpenPr => ({ number: 1, title: `run: ${ID}`, headRef: `run/${ID}`, baseRef: "main", files: [file(log(0))], previous: [], author: "ann", boundAuthor: null, ...over })
 
 describe("decide", () => {
   it("valid + final -> merge", () => {
@@ -88,5 +88,42 @@ describe("act", () => {
     const a = { ...pr({ number: 1 }), headSha: "c".repeat(40), learnerId: ID }, b = { ...pr({ number: 2 }), headSha: "d".repeat(40), learnerId: ID }
     expect(act(decide([a, b]), [a, b], o)).toBe(1)
     expect(calls.filter(c => c.startsWith("merge"))).toEqual([`merge 1 ${"c".repeat(40)}`])
+  })
+})
+
+describe("decide: a learner belongs to the author of its first merged PR", () => {
+  it("bound to the PR's author (any letter case): merged", () => {
+    expect(decide([pr({ author: "ann", boundAuthor: "ann", previous: [log(0)], files: [file(log(1))] })])[0]).toMatchObject({ action: "merge" })
+    expect(decide([pr({ author: "Ann", boundAuthor: "aNN", previous: [log(0)], files: [file(log(1))] })])[0]).toMatchObject({ action: "merge" })
+  })
+  it("bound to someone else: closed, saying whose it is", () => {
+    const [d] = decide([pr({ author: "mallory", boundAuthor: "ann", previous: [log(0)], files: [file(log(1))] })])
+    expect(d).toEqual({ pr: 1, action: "close", reason: `Learner ${ID} belongs to @ann.` })
+  })
+  it("bound, but the PR's author is unknown: closed", () => {
+    expect(decide([pr({ author: undefined, boundAuthor: "ann", previous: [log(0)], files: [file(log(1))] })])[0]).toMatchObject({ action: "close", reason: `Learner ${ID} belongs to @ann.` })
+  })
+  it("not bound yet (nothing of it on main): anyone's valid first PR is merged", () => {
+    expect(decide([pr({ author: "bob", boundAuthor: null })])[0]).toMatchObject({ action: "merge" })
+  })
+  it("the title must name the files' learner", () => {
+    const [d] = decide([pr({ title: "run: lrn_fedcba9876543210" })])
+    expect(d).toMatchObject({ action: "close" })
+    expect(d!.reason).toContain(`run: ${ID}`)
+    expect(decide([pr({ title: "run: x" })])[0]!.action).toBe("close")
+  })
+  it("two first PRs for one learner in one run, from two authors: one merges; next run the other is closed as someone else's", () => {
+    const { o, calls } = (() => {
+      const calls: string[] = []
+      const o: GateOps = { close: n => void calls.push(`close ${n}`), label: () => {}, merge: n => void calls.push(`merge ${n}`), log: () => {}, error: () => {} }
+      return { o, calls }
+    })()
+    const a = { ...pr({ number: 1, author: "ann" }), headSha: "c".repeat(40), learnerId: ID }
+    const b = { ...pr({ number: 2, author: "bob" }), headSha: "d".repeat(40), learnerId: ID }
+    expect(act(decide([a, b]), [a, b], o)).toBe(1)
+    expect(calls).toEqual(["merge 1"])
+    // Next run: PR 1's merge bound the learner to ann.
+    const b2 = { ...b, boundAuthor: "ann", previous: [log(0)] }
+    expect(decide([b2])[0]).toEqual({ pr: 2, action: "close", reason: `Learner ${ID} belongs to @ann.` })
   })
 })

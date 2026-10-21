@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest"
-import { bytesToContent, statusErrors, listOpenPrs, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { boundAuthor, bytesToContent, statusErrors, listOpenPrs, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -107,5 +111,76 @@ describe("mergePr", () => {
       return Buffer.from("")
     }
     expect(() => mergePr("o/r", 7, "abc123", ghFn)).toThrow("Head branch was modified")
+  })
+})
+
+describe("loadPr author", () => {
+  const prWith = (user: unknown) => (a: string[]) => {
+    const j = a.join(" ")
+    if (j.endsWith("pulls/7")) return Buffer.from(JSON.stringify({ base: { ref: "main" }, head: { sha: "s", ref: "run/x", repo: { full_name: "o/r" } }, changed_files: 0, user }))
+    return Buffer.from(JSON.stringify([[]]))
+  }
+  it("is the PR's user.login; anything else is undefined", () => {
+    expect(loadPr("o/r", 7, prWith({ login: "ann" })).author).toBe("ann")
+    for (const u of [undefined, null, {}, { login: 5 }, { login: "" }]) expect(loadPr("o/r", 7, prWith(u)).author).toBeUndefined()
+  })
+})
+
+const LRN = "lrn_0123456789abcdef"
+describe("boundAuthor (fake gh)", () => {
+  const git = (out: string) => () => out
+  it("the first commit touching the learner's dir, its merged PR, that PR's author", () => {
+    const calls: string[] = []
+    const gh = (a: string[]) => {
+      calls.push(a.join(" "))
+      return Buffer.from(JSON.stringify([{ number: 3, merged_at: null, user: { login: "eve" } }, { number: 4, merged_at: "2026-10-21T00:00:00Z", user: { login: "ann" } }]))
+    }
+    expect(boundAuthor("o/r", LRN, git(`${"a".repeat(40)}\n${"b".repeat(40)}\n`), gh)).toBe("ann")
+    expect(calls).toEqual([`api repos/o/r/commits/${"a".repeat(40)}/pulls`])
+  })
+  it("nothing of the learner on main: null, and GitHub is not asked", () => {
+    expect(boundAuthor("o/r", LRN, git(""), () => { throw new Error("must not ask") })).toBeNull()
+  })
+  it("throws when the lookup fails: no merged PR, no login, a gh error, a malformed answer", () => {
+    for (const body of [[], [{ merged_at: null, user: { login: "x" } }], [{ merged_at: "t", user: {} }], { not: "a list" }]) {
+      expect(() => boundAuthor("o/r", LRN, git(`${"a".repeat(40)}\n`), () => Buffer.from(JSON.stringify(body)))).toThrow()
+    }
+    expect(() => boundAuthor("o/r", LRN, git(`${"a".repeat(40)}\n`), () => { throw new Error("HTTP 502") })).toThrow()
+  })
+  it("git output that is not a commit sha is a failed lookup", () => {
+    expect(() => boundAuthor("o/r", LRN, git("fatal: bad\n"), () => Buffer.from("[]"))).toThrow("no commit")
+  })
+  it("refuses a malformed learnerId (never put into a pathspec or URL)", () => {
+    expect(() => boundAuthor("o/r", "lrn_../../x", git(""), () => Buffer.from("[]"))).toThrow()
+  })
+})
+
+describe("boundAuthor (git, in a temporary repository)", { timeout: 60_000 }, () => {
+  let dir: string
+  const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim()
+  const commit = (path: string) => {
+    mkdirSync(join(dir, path, ".."), { recursive: true })
+    writeFileSync(join(dir, path), String(Math.random()))
+    run("add", "-A"); run("commit", "-q", "-m", path)
+    return run("rev-parse", "HEAD")
+  }
+  it("the oldest commit to data/runs/<id>/ wins; another learner's and look-alike paths are ignored", () => {
+    dir = mkdtempSync(join(tmpdir(), "bound-"))
+    try {
+      run("init", "-q")
+      commit(`data/runs/lrn_fedcba9876543210/0.json`) // another learner
+      commit(`data/runs/${LRN}.bak/0.json`) // look-alike: not the learner's dir
+      commit(`other/data/runs/${LRN}/0.json`) // look-alike: not at the top
+      const first = commit(`data/runs/${LRN}/0.json`)
+      commit(`data/runs/${LRN}/1.json`)
+      const asked: string[] = []
+      const gh = (a: string[]) => { asked.push(a[1]!); return Buffer.from(JSON.stringify([{ merged_at: "t", user: { login: "ann" } }])) }
+      const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" })
+      expect(boundAuthor("o/r", LRN, git, gh)).toBe("ann")
+      expect(asked).toEqual([`repos/o/r/commits/${first}/pulls`])
+      expect(boundAuthor("o/r", "lrn_1111111111111111", git, gh)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

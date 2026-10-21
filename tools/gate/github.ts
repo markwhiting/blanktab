@@ -1,6 +1,7 @@
 // Thin `gh` wrappers. Everything fetched from a PR is treated as data; nothing from a PR is ever executed.
 // Arguments go through execFileSync (no shell), so untrusted file names cannot inject commands.
 import { execFileSync } from "node:child_process"
+import { LEARNER_ID_RE } from "@blanktab/harness/log"
 import type { PrFile } from "./validate.ts"
 
 const MAX_BYTES = 1_048_576
@@ -17,8 +18,11 @@ export function listOpenPrs(repo: string, ghFn: (args: string[]) => Buffer = gh)
   return JSON.parse(ghFn(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]).toString("utf8")) as ListedPr[]
 }
 
-/** `headSha` is undefined when the PR object gave none: such a PR is never merged (there is no commit to pin the merge to). */
-export interface LoadedPr { headRef: string; baseRef: string; headSha: string | undefined; files: PrFile[]; loadErrors: string[] }
+/**
+ * `headSha` is undefined when the PR object gave none: such a PR is never merged (there is no commit to pin the merge
+ * to). `author`: the PR's user.login, undefined if it gave none (such a PR is not decided).
+ */
+export interface LoadedPr { headRef: string; baseRef: string; headSha: string | undefined; author: string | undefined; files: PrFile[]; loadErrors: string[] }
 
 /** Only added/modified files are acceptable; anything else (removed, renamed, copied, changed...) is an error. */
 export function statusErrors(changed: { filename: string; status: string }[]): string[] {
@@ -44,9 +48,10 @@ export function loadFile(ghFn: (args: string[]) => Buffer, headRepo: string, pat
 
 export function loadPr(repo: string, number: number, ghFn: (args: string[]) => Buffer = gh): LoadedPr {
   const get = <T>(args: string[]): T => JSON.parse(ghFn(args).toString("utf8")) as T
-  const pr = get<{ base: { ref: string }; head: { sha?: unknown; ref: string; repo: { full_name: string } | null }; changed_files?: unknown }>(["api", `repos/${repo}/pulls/${number}`])
+  const pr = get<{ base: { ref: string }; head: { sha?: unknown; ref: string; repo: { full_name: string } | null }; changed_files?: unknown; user?: { login?: unknown } | null }>(["api", `repos/${repo}/pulls/${number}`])
   const headSha = typeof pr.head.sha === "string" && pr.head.sha !== "" ? pr.head.sha : undefined
-  const base = { headRef: pr.head.ref, baseRef: pr.base.ref, headSha }
+  const login = pr.user?.login
+  const base = { headRef: pr.head.ref, baseRef: pr.base.ref, headSha, author: typeof login === "string" && login !== "" ? login : undefined }
   // Files are read at the head commit; without one there is nothing to read them at (the gate leaves such a PR alone).
   if (headSha === undefined) return { ...base, files: [], loadErrors: ["head commit is unavailable"] }
   // Budget first, from the PR object alone: an oversized PR is never listed, let alone downloaded.
@@ -69,6 +74,30 @@ export function loadPr(repo: string, number: number, ghFn: (args: string[]) => B
     }
   }
   return { ...base, files, loadErrors }
+}
+
+/** Runs git in the gate's checkout of main (no shell). */
+export function git(args: string[]): string {
+  return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] })
+}
+
+/**
+ * Who a learner belongs to (decision 0014): the GitHub author of the PR that first put its logs on main, i.e. the PR
+ * of the oldest commit on main touching data/runs/<learnerId>/ (needs main's full history: gate.yml fetch-depth 0).
+ * Null if main has none of its files yet (then the first author to get a PR merged claims it). Throws if the lookup
+ * fails (no merged PR for that commit, no login, a gh error): the caller must not decide that learner's PRs then.
+ */
+export function boundAuthor(repo: string, learnerId: string, gitFn: (args: string[]) => string = git, ghFn: (args: string[]) => Buffer = gh): string | null {
+  if (!LEARNER_ID_RE.test(learnerId)) throw new Error(`not a learnerId: ${JSON.stringify(learnerId.slice(0, 40))}`)
+  const first = gitFn(["log", "--reverse", "--format=%H", "--", `:(top,literal)data/runs/${learnerId}/`]).split("\n")[0]?.trim() ?? ""
+  if (first === "") return null
+  if (!/^[0-9a-f]{40}$/.test(first)) throw new Error(`git gave no commit for ${learnerId}`)
+  const pulls = JSON.parse(ghFn(["api", `repos/${repo}/commits/${first}/pulls`]).toString("utf8")) as unknown
+  if (!Array.isArray(pulls)) throw new Error(`unexpected answer for the pulls of commit ${first}`)
+  const merged = (pulls as { merged_at?: unknown; user?: { login?: unknown } | null }[]).find(p => typeof p?.merged_at === "string" && p.merged_at !== "")
+  const login = merged?.user?.login
+  if (typeof login !== "string" || login === "") throw new Error(`no merged PR with an author for commit ${first} (learner ${learnerId})`)
+  return login
 }
 
 const fence = (s: string) => "```\n" + s.replaceAll("`", "'").slice(0, 3000) + "\n```"
