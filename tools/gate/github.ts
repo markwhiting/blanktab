@@ -10,15 +10,15 @@ export const MAX_PR_FILES = 16
 export function gh(args: string[]): Buffer {
   return execFileSync("gh", args, { maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] })
 }
-const ghJson = <T>(args: string[]): T => JSON.parse(gh(args).toString("utf8")) as T
 
-export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string; updatedAt: string; createdAt: string }
+export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string }
 
-export function listOpenPrs(repo: string): ListedPr[] {
-  return ghJson<ListedPr[]>(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,updatedAt,createdAt"])
+export function listOpenPrs(repo: string, ghFn: (args: string[]) => Buffer = gh): ListedPr[] {
+  return JSON.parse(ghFn(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]).toString("utf8")) as ListedPr[]
 }
 
-export interface LoadedPr { headRef: string; baseRef: string; headSha: string; files: PrFile[]; loadErrors: string[] }
+/** `headSha` is undefined when the PR object gave none: such a PR is never merged (there is no commit to pin the merge to). */
+export interface LoadedPr { headRef: string; baseRef: string; headSha: string | undefined; files: PrFile[]; loadErrors: string[] }
 
 /** Only added/modified files are acceptable; anything else (removed, renamed, copied, changed...) is an error. */
 export function statusErrors(changed: { filename: string; status: string }[]): string[] {
@@ -44,9 +44,11 @@ export function loadFile(ghFn: (args: string[]) => Buffer, headRepo: string, pat
 
 export function loadPr(repo: string, number: number, ghFn: (args: string[]) => Buffer = gh): LoadedPr {
   const get = <T>(args: string[]): T => JSON.parse(ghFn(args).toString("utf8")) as T
-  const pr = get<{ base: { ref: string }; head: { sha: string; ref: string; repo: { full_name: string } | null }; changed_files?: unknown }>(["api", `repos/${repo}/pulls/${number}`])
-  const headSha = pr.head.sha
+  const pr = get<{ base: { ref: string }; head: { sha?: unknown; ref: string; repo: { full_name: string } | null }; changed_files?: unknown }>(["api", `repos/${repo}/pulls/${number}`])
+  const headSha = typeof pr.head.sha === "string" && pr.head.sha !== "" ? pr.head.sha : undefined
   const base = { headRef: pr.head.ref, baseRef: pr.base.ref, headSha }
+  // Files are read at the head commit; without one there is nothing to read them at (the gate leaves such a PR alone).
+  if (headSha === undefined) return { ...base, files: [], loadErrors: ["head commit is unavailable"] }
   // Budget first, from the PR object alone: an oversized PR is never listed, let alone downloaded.
   const count = pr.changed_files
   if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return { ...base, files: [], loadErrors: ["PR file count is unavailable"] }
@@ -79,7 +81,9 @@ export function labelNeedsHuman(repo: string, n: number): void {
   gh(["pr", "edit", String(n), "--repo", repo, "--add-label", "needs-human"])
 }
 /** Drafts cannot be merged, so mark ready first. --match-head-commit refuses to merge if the head moved since validation. */
-export function mergePr(repo: string, n: number, headSha: string, ghFn: (args: string[]) => Buffer = gh): void {
+export function mergePr(repo: string, n: number, headSha: string | undefined, ghFn: (args: string[]) => Buffer = gh): void {
+  // Never an unpinned merge: without the validated head, a commit pushed after validation could be merged unchecked.
+  if (typeof headSha !== "string" || headSha === "") throw new Error(`PR #${n}: no validated head commit to pin the merge to`)
   ghFn(["pr", "ready", String(n), "--repo", repo])
   ghFn(["pr", "merge", String(n), "--repo", repo, "--squash", "--delete-branch", "--match-head-commit", headSha])
 }

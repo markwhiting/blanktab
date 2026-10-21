@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { bytesToContent, statusErrors, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
+import { bytesToContent, statusErrors, listOpenPrs, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -64,7 +64,35 @@ describe("loadPr budget", () => {
   })
 })
 
+describe("listOpenPrs", () => {
+  it("asks only for the fields the gate uses", () => {
+    const calls: string[][] = []
+    const listed = listOpenPrs("o/r", a => { calls.push(a); return Buffer.from(JSON.stringify([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])) })
+    expect(calls).toEqual([["pr", "list", "--repo", "o/r", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]])
+    expect(listed).toEqual([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])
+  })
+})
+
+describe("loadPr head commit", () => {
+  const files = (a: string[]) => {
+    const j = a.join(" ")
+    if (j.includes("/files")) return Buffer.from(JSON.stringify([[{ filename: "data/runs/lrn_0123456789abcdef/0.json", status: "added" }]]))
+    return j.includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
+  }
+  it("a PR object without a head sha loads with headSha undefined (the gate then never merges it)", () => {
+    for (const head of [{ ref: "run/x", repo: { full_name: "o/r" } }, { sha: 42, ref: "run/x", repo: { full_name: "o/r" } }, { sha: "", ref: "run/x", repo: { full_name: "o/r" } }]) {
+      const r = loadPr("o/r", 7, a => (a.join(" ").endsWith("pulls/7") ? Buffer.from(JSON.stringify({ base: { ref: "main" }, head, changed_files: 1 })) : files(a)))
+      expect(r.headSha).toBeUndefined()
+    }
+  })
+})
+
 describe("mergePr", () => {
+  it("refuses a missing head commit rather than merge unpinned", () => {
+    const calls: string[][] = []
+    for (const bad of [undefined, ""]) expect(() => mergePr("o/r", 7, bad, a => { calls.push(a); return Buffer.from("") })).toThrow("no validated head commit")
+    expect(calls).toEqual([])
+  })
   it("marks ready, then squash-merges pinned to the validated head commit", () => {
     const calls: string[][] = []
     mergePr("o/r", 7, "abc123", args => { calls.push(args); return Buffer.from("") })

@@ -52,6 +52,43 @@ export function decide(prs: OpenPr[]): GateDecision[] {
   })
 }
 
+/** What act() does to GitHub (gh in production; injected in tests). */
+export interface GateOps {
+  close(n: number, reason: string): void
+  label(n: number): void
+  merge(n: number, headSha: string): void
+  log(message: string): void
+  error(message: string): void
+}
+
+/**
+ * Carries out the decisions; resolves to the number merged. A merge is pinned to the head commit that was validated,
+ * so a PR without one (headSha missing) is never merged: it is logged and left for the next run. `previous` is main as
+ * of the start of this run, so at most one PR per learner is merged per run.
+ */
+export function act(decisions: GateDecision[], prs: (OpenPr & { learnerId: string | null })[], ops: GateOps): number {
+  let merged = 0
+  const mergedLearners = new Set<string>()
+  for (const d of decisions) {
+    const pr = prs.find(p => p.number === d.pr)!
+    ops.log(`PR #${d.pr}: ${d.action} (${d.reason.split("\n")[0]})`)
+    try {
+      if (d.action === "close") ops.close(d.pr, d.reason)
+      else if (d.action === "label-needs-human") ops.label(d.pr)
+      else if (d.action === "merge") {
+        if (pr.learnerId && mergedLearners.has(pr.learnerId)) { ops.log(`PR #${d.pr}: deferred, another PR for ${pr.learnerId} merged this run`); continue }
+        if (!pr.headSha) { ops.error(`PR #${d.pr}: no head commit was validated, so it is not merged; leaving it for the next run`); continue }
+        ops.merge(d.pr, pr.headSha)
+        merged++
+        if (pr.learnerId) mergedLearners.add(pr.learnerId)
+      }
+    } catch (e) {
+      ops.error(`PR #${d.pr}: action ${d.action} failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+  return merged
+}
+
 function main(): void {
   const repo = process.env.REPO
   if (!repo) throw new Error("REPO env var is required (owner/name)")
@@ -61,6 +98,7 @@ function main(): void {
     if (!listed.title.startsWith("run: ")) continue // not a session PR: leave alone
     try {
       const loaded = loadPr(repo, listed.number)
+      if (loaded.headSha === undefined) { console.error(`PR #${listed.number}: GitHub gave no head commit; leaving it for the next run`); continue }
       const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })
       prs.push({ number: listed.number, headRef: loaded.headRef, baseRef: loaded.baseRef, files: loaded.files, previous, loadErrors: loaded.loadErrors, headSha: loaded.headSha, learnerId: ids.length === 1 ? ids[0]! : null })
@@ -68,26 +106,13 @@ function main(): void {
       console.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
     }
   }
-  const decisions = decide(prs)
-  let merged = 0
-  const mergedLearners = new Set<string>()
-  for (const d of decisions) {
-    const pr = prs.find(p => p.number === d.pr)!
-    console.log(`PR #${d.pr}: ${d.action} (${d.reason.split("\n")[0]})`)
-    try {
-      if (d.action === "close") closePr(repo, d.pr, d.reason)
-      else if (d.action === "label-needs-human") labelNeedsHuman(repo, d.pr)
-      else if (d.action === "merge") {
-        // `previous` is main as of the start of this run: merge at most one PR per learner per run
-        if (pr.learnerId && mergedLearners.has(pr.learnerId)) { console.log(`PR #${d.pr}: deferred, another PR for ${pr.learnerId} merged this run`); continue }
-        mergePr(repo, d.pr, pr.headSha!)
-        merged++
-        if (pr.learnerId) mergedLearners.add(pr.learnerId)
-      }
-    } catch (e) {
-      console.error(`PR #${d.pr}: action ${d.action} failed: ${e instanceof Error ? e.message : e}`)
-    }
-  }
+  const merged = act(decide(prs), prs, {
+    close: (n, reason) => closePr(repo, n, reason),
+    label: n => labelNeedsHuman(repo, n),
+    merge: (n, sha) => mergePr(repo, n, sha),
+    log: m => console.log(m),
+    error: m => console.error(m),
+  })
   console.log(`merged ${merged}`)
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `merged=${merged}\n`)
 }

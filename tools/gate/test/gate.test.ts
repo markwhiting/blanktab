@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { decide, type OpenPr } from "../gate.ts"
+import { act, decide, type GateOps, type OpenPr } from "../gate.ts"
 import type { PrFile } from "../validate.ts"
 import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
 
@@ -53,5 +53,35 @@ describe("decide", () => {
     it("dev build that is also old -> close, never merge", () => {
       expect(decide([pr({ files: [file(log(0, { codeSha: "dev", ...written(100) }))] })])[0]).toMatchObject({ action: "close", reason: "Development builds don't contribute." })
     })
+  })
+})
+
+describe("act", () => {
+  const ops = () => {
+    const calls: string[] = []
+    const o: GateOps = {
+      close: n => void calls.push(`close ${n}`), label: n => void calls.push(`label ${n}`),
+      merge: (n, sha) => void calls.push(`merge ${n} ${sha}`), log: m => void calls.push(`log ${m}`), error: m => void calls.push(`error ${m}`),
+    }
+    return { o, calls }
+  }
+  it("merges a valid PR pinned to its validated head commit", () => {
+    const { o, calls } = ops()
+    const p = { ...pr(), headSha: "c".repeat(40), learnerId: ID }
+    expect(act(decide([p]), [p], o)).toBe(1)
+    expect(calls).toContain(`merge 1 ${"c".repeat(40)}`)
+  })
+  it("a PR loaded without a head commit is not merged (merge never sees undefined); it is logged and left for the next run", () => {
+    const { o, calls } = ops()
+    const p = { ...pr(), learnerId: ID } // no headSha
+    expect(act(decide([p]), [p], o)).toBe(0)
+    expect(calls.some(c => c.startsWith("merge"))).toBe(false)
+    expect(calls.some(c => c.startsWith("error PR #1") && c.includes("no head commit"))).toBe(true)
+  })
+  it("merges at most one PR per learner per run", () => {
+    const { o, calls } = ops()
+    const a = { ...pr({ number: 1 }), headSha: "c".repeat(40), learnerId: ID }, b = { ...pr({ number: 2 }), headSha: "d".repeat(40), learnerId: ID }
+    expect(act(decide([a, b]), [a, b], o)).toBe(1)
+    expect(calls.filter(c => c.startsWith("merge"))).toEqual([`merge 1 ${"c".repeat(40)}`])
   })
 })
