@@ -10,5 +10,6 @@ Spec: `../specs/2026-10-19-blanktab-v1-design.md`.
 | 02 | [Tensor library](2026-10-19-02-tensor-library.md) | Our own in-browser neural-network math (CPU + WebGPU), including spike 2 (speed). | **done 2026-10-20** — ~108 learner steps/s on an M4 GPU ([result](../research/2026-10-20-webgpu-step-throughput.md)) |
 | 03 | [World](2026-10-20-03-world.md) | The desktop shell and the four rooms (crib, toys, hide-and-seek, places), plus spike 3 (rendering speed). | **done 2026-10-20** — ~900–2,300 render steps/s per room ([result](../research/2026-10-20-world-render-speed.md)) |
 | 04a | [The learner learns](2026-10-20-04a-learner-learns.md) | Replaces the flailer: prediction, curiosity, actor-critic, replay sleep, checkpoints and resume (spike 4), CU-measured lives, loss curve vs baseline; live "does it learn?" run. | **merged 2026-10-20** (live run: see research note) |
+| 04a.1 | [Forever lives, live updates](2026-10-21-04a1-forever-lives.md) | No fixed lifetimes; hourly merges; knowledge refresh; code reload with resume; the live "does it learn?" run. | written |
 | 04b | Growing up | Caregiver, milestones M1–M6, checkups at 2^k CU on fresh variants. | not written |
 | 05 | Getting smarter as a population | GP picker over past sessions, knowledge PRs and `best.json`, consolidation conditions B and C, the first A/B/C comparison. | not written |
