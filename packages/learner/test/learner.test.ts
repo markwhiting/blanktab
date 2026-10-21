@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest"
-import { emptyObservation, isValidAction } from "@blanktab/interface"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, emptyObservation, isValidAction } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
-import { createCpuBackend } from "@blanktab/tensor"
+import { createCpuBackend, createRng } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, HEAD_LR_SCALE_RANGE, clampSettings, createLearner, curiosityReward, LR_RANGE } from "../src/learner"
-import type { LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
+import { DEFAULT_SETTINGS, LearnerStateVersionError, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
+import type { HeldOutSet, LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
+import { copyLastBaseline, targetsFromObs } from "../src/encode"
 import type { Widths } from "../src/model"
 import { createSyntheticStream } from "./synthetic"
 
@@ -70,7 +71,8 @@ const finiteParams = async (l: { readParams(): Promise<Float32Array[]> }) =>
 describe("learner", { timeout: 30_000 }, () => { // every test builds a real learner: >= 30 s (controller ruling; ~1-8 s unloaded)
   // Several seeds must pass (task brief + controller rulings): after 3,000 steps the action-conditioned predictor
   // beats copy-last (predLoss < baselineLoss, both EMAs with the same alpha). Measured predLoss/baselineLoss at
-  // 3,000 steps (default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
+  // 3,000 steps (the then-default lr 1e-3, headLrScale 0.1, widths 4,4,16,16): seed 1 0.883, seed 2 0.874, seed 3 0.786.
+  // Still passing at the Plan 04a.2 defaults (lr 5e-4, exploreEpsilon 0.1, residualDecay 1e-3).
   for (const seed of [1, 2, 3]) {
     it(`learns to predict the next frame better than copy-last after 3000 steps (seed ${seed})`, async () => {
       const { learner } = await run({ seed, steps: 3000 })
@@ -93,6 +95,111 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     expect(c.updates).not.toEqual(a.updates)
     for (const r of [a, b, c]) r.learner.dispose()
   }, 30_000) // ~2.7 s unloaded; timed out at the 5 s default under load (controller ruling: >= 2x, min 30 s)
+
+  describe("ε-uniform exploration (exploreEpsilon)", () => {
+    // Recorded from the learner before exploreEpsilon existed (commit 863adae): seed 5, TINY, DEFAULT_SETTINGS, the
+    // synthetic stream, 40 steps with a sleep every 10. Actions as move.button.scroll.key; losses as an FNV-1a hash of
+    // the 39 UpdateInfo.lossBefore values' float64 bytes.
+    const GOLDEN_ACTIONS = "5.2.2.33 4.2.2.41 1.2.2.34 12.1.2.12 10.0.0.38 12.1.0.16 1.2.1.26 7.2.2.33 7.0.1.11 14.0.0.30 20.0.2.10 22.1.2.20 3.2.1.31 3.2.0.29 10.0.0.2 3.1.1.40 3.2.0.15 15.1.2.25 3.2.0.2 9.0.1.8 2.2.0.6 18.2.1.27 22.1.0.44 8.2.2.32 8.2.1.16 17.2.0.22 18.1.2.12 16.1.1.44 16.1.0.43 2.1.2.38 12.0.2.32 13.0.2.7 0.2.2.2 17.0.1.26 15.1.2.0 8.2.2.21 8.2.1.20 11.2.0.7 18.1.1.39 5.1.2.33"
+    const GOLDEN_LOSS_HASH = "e40e135c"
+    /** The settings of that recording, on top of today's DEFAULT_SETTINGS: no exploration, no residual decay. */
+    const BEFORE = { lr: 1e-3, exploreEpsilon: 0, residualDecay: 0 }
+    const fnv = (xs: number[]) => {
+      let h = 0x811c9dc5
+      for (const b of new Uint8Array(new Float64Array(xs).buffer)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0 }
+      return h.toString(16)
+    }
+    const fmt = (as: Action[]) => as.map((a) => `${a.move}.${a.button}.${a.scroll}.${a.key}`).join(" ")
+
+    it("defaults to 0.1 and is clamped into [0, 0.5]; a non-finite value is rejected", () => {
+      expect(DEFAULT_SETTINGS.exploreEpsilon).toBe(0.1)
+      expect(EXPLORE_EPSILON_RANGE).toEqual([0, 0.5])
+      expect(clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: 0.9 }).exploreEpsilon).toBe(0.5)
+      expect(clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: -1 }).exploreEpsilon).toBe(0)
+      for (const v of [Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number]) {
+        expect(() => clampSettings({ ...DEFAULT_SETTINGS, exploreEpsilon: v })).toThrow(RangeError)
+      }
+    })
+
+    it("ε = 0 and residualDecay = 0 (at the then-default lr 1e-3) reproduce the learner from before either existed, bit for bit", async () => {
+      const r = await run({ seed: 5, steps: 40, sleepEvery: 10, settings: BEFORE })
+      expect(fmt(r.actions)).toBe(GOLDEN_ACTIONS)
+      expect(r.updates.length).toBe(39)
+      expect(fnv(r.updates.map((u) => u.lossBefore))).toBe(GOLDEN_LOSS_HASH)
+      r.learner.dispose()
+    })
+
+    it("ε > 0 stays deterministic per seed, keeps actions valid, and changes what is done", async () => {
+      const a = await run({ seed: 5, steps: 80, sleepEvery: 10, settings: { exploreEpsilon: 0.3 } })
+      const b = await run({ seed: 5, steps: 80, sleepEvery: 10, settings: { exploreEpsilon: 0.3 } })
+      expect(b.actions).toEqual(a.actions)
+      expect(b.updates).toEqual(a.updates)
+      expect(a.actions.every(isValidAction)).toBe(true)
+      expect(fmt(a.actions.slice(0, 40))).not.toBe(GOLDEN_ACTIONS)
+      for (const r of [a, b]) r.learner.dispose()
+    })
+
+    it("ε > 0 survives save and load: the resumed learner explores exactly as one that never stopped", async () => {
+      const whole = await run({ seed: 6, steps: 60, settings: { exploreEpsilon: 0.2 } })
+      const first = await run({ seed: 6, steps: 30, settings: { exploreEpsilon: 0.2 } })
+      const state = await first.learner.save()
+      first.learner.dispose()
+      expect(state.settings.exploreEpsilon).toBe(0.2)
+      const be = createCpuBackend()
+      const resumed = await createLearner({ backend: be, state })
+      const world = createSyntheticStream()
+      for (const a of first.actions) { world.observe(); world.act(a) }
+      const rest: Action[] = []
+      for (let i = 0; i < 30; i++) { const a = await resumed.step(world.observe()); rest.push(a); world.act(a) }
+      expect(rest).toEqual(whole.actions.slice(30))
+      resumed.dispose()
+      whole.learner.dispose()
+    })
+
+    it("residualDecay: defaults to 1e-3 (with lr 5e-4), clamped into [0, 1e-2]; a non-finite value is rejected", () => {
+      expect(DEFAULT_SETTINGS.residualDecay).toBe(1e-3)
+      expect(DEFAULT_SETTINGS.lr).toBe(5e-4)
+      expect(RESIDUAL_DECAY_RANGE).toEqual([0, 1e-2])
+      expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: 0.5 }).residualDecay).toBe(1e-2)
+      expect(clampSettings({ ...DEFAULT_SETTINGS, residualDecay: -1 }).residualDecay).toBe(0)
+      for (const v of [Number.NaN, undefined as unknown as number]) expect(() => clampSettings({ ...DEFAULT_SETTINGS, residualDecay: v })).toThrow(RangeError)
+    })
+
+    it("residualDecay > 0 pulls the residual layers (shift gate, output layers) toward zero, deterministically", async () => {
+      const resid = async (l: { readParams(): Promise<Float32Array[]> }) => {
+        const ps = await l.readParams()
+        const n = ps.length
+        return [ps[n - 9]!, ...ps.slice(-4)].reduce((a, p) => a + p.reduce((b, v) => b + v * v, 0), 0)
+      }
+      const off = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 0 } })
+      const on = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 1e-2 } })
+      const on2 = await run({ seed: 5, steps: 60, sleepEvery: 10, settings: { exploreEpsilon: 0, residualDecay: 1e-2 } })
+      expect(await resid(on.learner)).toBeLessThan(await resid(off.learner))
+      expect(on2.updates).toEqual(on.updates)
+      for (const r of [off, on, on2]) r.learner.dispose()
+    })
+
+    it("sampleAction: with probability ε a factor is uniform, otherwise it follows the policy", () => {
+      const sizes = [MOVE_OPTIONS, BUTTON_OPTIONS, SCROLL_OPTIONS, KEYS.length]
+      const logits = new Float32Array(sizes.reduce((a, n) => a + n, 0)).fill(-100)
+      let off = 0
+      for (const n of sizes) { logits[off] = 100; off += n } // the policy always picks index 0 of every factor
+      const draws = 20_000
+      for (const eps of [0, 0.2]) {
+        const rng = createRng(11)
+        const off0 = [0, 0, 0, 0]
+        for (let i = 0; i < draws; i++) {
+          const a = sampleAction(logits, eps, rng)
+          expect(isValidAction(a)).toBe(true)
+          ;[a.move, a.button, a.scroll, a.key].forEach((v, f) => { if (v !== 0) off0[f]!++ })
+        }
+        sizes.forEach((n, f) => {
+          const want = eps * (n - 1) / n // explored, and the uniform draw missed index 0
+          expect(Math.abs(off0[f]! / draws - want)).toBeLessThan(eps === 0 ? 1e-12 : 0.012)
+        })
+      }
+    })
+  })
 
   it("returns only valid actions, counts steps and compute", async () => {
     const { learner, actions, updates } = await run({ seed: 4, steps: 200 })
@@ -217,7 +324,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     for (const i of [n - 4, n - 3]) expect(maxStep(i)).toBeGreaterThan(0.9e-4)
     // On this first update the zero output layers block every gradient upstream of them (core, predictor h/action
     // layers get exactly 0), so compare with the policy and value heads, which are on the main optimizer.
-    for (const i of [n - 12, n - 11, n - 10, n - 9]) { // policy w/b, value w/b
+    for (const i of [n - 15, n - 14, n - 13, n - 12]) { // policy w/b, value w/b (then shiftX, shiftY, shiftGate, predH, predA)
       expect(maxStep(i)).toBeGreaterThan(0.9e-3)
       expect(maxStep(i)).toBeLessThan(1.01e-3)
     }
@@ -249,8 +356,8 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
     const world = createSyntheticStream()
     for (let i = 0; i < 5; i++) world.act(await learner.step(world.observe()))
     const before = await learner.readParams()
-    // Poison the periphery output-layer bias (Model.params index 32: ..., predA w/b, headP w (31), headP b (32), headF w/b).
-    const POISONED = 32
+    // Poison the periphery output-layer bias (Model.params index 35: ..., predA w/b, headP w (34), headP b (35), headF w/b).
+    const POISONED = 35
     expect(allocated[POISONED]!.length).toBe(3000)
     ;(allocated[POISONED] as unknown as { data: Float32Array }).data[7] = Number.NaN
     const skipped = learner.stats().skippedUpdates
@@ -345,7 +452,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       expect(firstDifference(tweaked, state)).toBe("state.adam.1.slots.3.v")
       expect(state.params[0]).toBeInstanceOf(Float32Array)
       expect(state.replay.length).toBe(16)
-      expect(state.version).toBe(1)
+      expect(state.version).toBe(LEARNER_STATE_VERSION)
       expect(state.seed).toBe(13)
       expect(state.widths).toEqual(TINY)
       // A snapshot: stepping on does not change it, and loading from it does not alias it.
@@ -370,7 +477,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       learner.dispose()
       const be = createCpuBackend()
       const bad: LearnerState[] = [
-        { ...state, version: 2 as 1 },
+        { ...state, version: (LEARNER_STATE_VERSION + 1) as typeof LEARNER_STATE_VERSION },
         { ...state, params: state.params.slice(1) },
         { ...state, widths: { ...TINY, hidden: 8 } },
         { ...state, h: new Float32Array(3) },
@@ -378,6 +485,24 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
         { ...state, settings: { ...state.settings, bufferSize: 2 } }, // fewer slots than the 4 stored transitions
       ]
       for (const s of bad) await expect(createLearner({ backend: be, state: s })).rejects.toThrow(RangeError)
+      expect(be.stats.liveBuffers).toBe(0)
+    })
+
+    it("a state of another version is a LearnerStateVersionError (a RangeError), whatever else is in it, telling which version it is", async () => {
+      const { learner } = await run({ seed: 14, steps: 5 })
+      const state = await learner.save()
+      learner.dispose()
+      const be = createCpuBackend()
+      for (const [s, found] of [[{ ...state, version: 1 }, 1], [{ version: 1 }, 1], [{ version: 3, seed: "x" }, 3], [{ version: "2" }, "2"]] as const) {
+        const e = await createLearner({ backend: be, state: s as unknown as LearnerState }).catch((x: unknown) => x)
+        expect(e).toBeInstanceOf(LearnerStateVersionError)
+        expect(e).toBeInstanceOf(RangeError)
+        expect((e as LearnerStateVersionError).found).toBe(found)
+        expect((e as LearnerStateVersionError).older).toBe(found === 1)
+      }
+      const other = await createLearner({ backend: be, state: { ...state, seed: -1 } }).catch((x: unknown) => x)
+      expect(other).toBeInstanceOf(RangeError)
+      expect(other).not.toBeInstanceOf(LearnerStateVersionError)
       expect(be.stats.liveBuffers).toBe(0)
     })
 
@@ -408,7 +533,7 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       const state = await learner.save()
       learner.dispose()
       const be = createCpuBackend()
-      const keys = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats"] as const
+      const keys = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats", "heldOut"] as const
       for (const k of keys) {
         const s = { ...state } as Partial<LearnerState>
         delete s[k]
@@ -531,5 +656,190 @@ describe("learner", { timeout: 30_000 }, () => { // every test builds a real lea
       expect(restored.stats().skippedUpdates).toBe(0)
       restored.dispose()
     })
+  })
+})
+
+/** A held-out trajectory from the synthetic stream under uniformly random actions (the worker builds the real one from the world). */
+function syntheticHeldOut(seed: number, n: number): HeldOutSet {
+  const w = createSyntheticStream({ start: { x: 60, y: 60 } })
+  const rnd = createRng(seed)
+  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
+  const obs = [w.observe()]
+  const actions: Action[] = []
+  for (let i = 0; i < n; i++) {
+    const a = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+    w.act(a)
+    actions.push(a)
+    obs.push(w.observe())
+  }
+  return { obs, actions }
+}
+const copyLastOn = (set: HeldOutSet) =>
+  set.actions.reduce((s, _, i) => s + copyLastBaseline(targetsFromObs(set.obs[i]!), targetsFromObs(set.obs[i + 1]!)), 0) / set.actions.length
+
+describe("the held-out check (decision 0015 §3)", { timeout: 60_000 }, () => {
+  const SET = syntheticHeldOut(7, 16)
+
+  it("a newborn scores exactly copy-last on it; nothing is measured before the first sleep", async () => {
+    const be = createCpuBackend()
+    const learner = await createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET })
+    const s0 = learner.stats()
+    expect(Number.isNaN(s0.heldOutLoss) && Number.isNaN(s0.heldOutBaseline)).toBe(true)
+    expect(s0.evalCU).toBe(0)
+    await learner.sleep() // empty buffer: no training, but the held-out set is scored
+    const s1 = learner.stats()
+    expect(s1.heldOutBaseline).toBeCloseTo(copyLastOn(SET), 9)
+    expect(s1.heldOutBaseline).toBeGreaterThan(0)
+    expect(Math.abs(s1.heldOutLoss / s1.heldOutBaseline - 1)).toBeLessThan(1e-5) // newborn = copy-last
+    expect(s1.evalCU).toBeGreaterThan(0)
+    expect(s1.cu).toBe(0) // the scoring is not billed to training
+    learner.dispose()
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("never trains: actions, updates, weights, RNG and cu are bit-identical to a learner without it; evalCU grows per sleep", async () => {
+    const plain = await run({ seed: 21, steps: 60, sleepEvery: 20 })
+    const be = createCpuBackend()
+    const updates: UpdateInfo[] = []
+    const learner = await createLearner({ backend: be, seed: 21, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET, onUpdate: u => updates.push(u) })
+    const world = createSyntheticStream()
+    const actions: Action[] = []
+    const evals: number[] = []
+    const losses: number[] = []
+    for (let i = 1; i <= 60; i++) {
+      const a = await learner.step(world.observe())
+      actions.push(a)
+      world.act(a)
+      if (i % 20 === 0) {
+        await learner.sleep()
+        evals.push(learner.stats().evalCU)
+        losses.push(learner.stats().heldOutLoss)
+      }
+    }
+    expect(actions).toEqual(plain.actions)
+    expect(updates).toEqual(plain.updates)
+    expect(await learner.readParams()).toEqual(await plain.learner.readParams())
+    const { evalCU, heldOutLoss, heldOutBaseline, ...rest } = learner.stats()
+    const { evalCU: e0, heldOutLoss: l0, heldOutBaseline: b0, ...plainRest } = plain.learner.stats()
+    expect(rest).toEqual(plainRest) // incl. cu: bit-identical
+    expect(e0).toBe(0)
+    expect(Number.isNaN(l0) && Number.isNaN(b0)).toBe(true)
+    // Each sleep scores the same set the same way: the same FLOPs each time.
+    expect(evals[0]).toBeGreaterThan(0)
+    expect(evals[1]! - evals[0]!).toBeCloseTo(evals[0]!, 12)
+    expect(evals[2]! - evals[1]!).toBeCloseTo(evals[0]!, 12)
+    expect(losses.every(Number.isFinite)).toBe(true)
+    expect(heldOutLoss).toBe(losses[2])
+    expect(heldOutBaseline).toBeCloseTo(copyLastOn(SET), 9)
+    expect(evalCU).toBe(evals[2])
+    learner.dispose()
+    plain.learner.dispose()
+  })
+
+  it("is fixed for the learner's life: saved, restored bit-exactly, and an own copy (the caller's arrays can change)", async () => {
+    const mine = structuredClone(SET)
+    const full = await createLearner({ backend: createCpuBackend(), seed: 22, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: mine })
+    mine.obs[3]!.fovea.fill(0) // the learner holds its own copy
+    mine.actions[0]!.move = 0
+    const w1 = createSyntheticStream()
+    for (let i = 1; i <= 30; i++) { w1.act(await full.step(w1.observe())); if (i % 10 === 0) await full.sleep() }
+
+    const w2 = createSyntheticStream()
+    const first = await createLearner({ backend: createCpuBackend(), seed: 22, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET })
+    for (let i = 1; i <= 20; i++) { w2.act(await first.step(w2.observe())); if (i % 10 === 0) await first.sleep() }
+    const state = await first.save()
+    first.dispose()
+    expect(firstDifference(state.heldOut, SET)).toBeNull()
+    const second = await createLearner({ backend: createCpuBackend(), state: structuredClone(state) })
+    for (let i = 21; i <= 30; i++) { w2.act(await second.step(w2.observe())); if (i % 10 === 0) await second.sleep() }
+    expect(second.stats()).toEqual(full.stats())
+    expect(firstDifference(await second.save(), await full.save())).toBeNull()
+    full.dispose()
+    second.dispose()
+  })
+
+  it("a learner born without one saves heldOut null and measures nothing", async () => {
+    const { learner } = await run({ seed: 23, steps: 10, sleepEvery: 5 })
+    const s = learner.stats()
+    expect(s.evalCU).toBe(0)
+    expect(Number.isNaN(s.heldOutLoss)).toBe(true)
+    expect((await learner.save()).heldOut).toBeNull()
+    learner.dispose()
+  })
+
+  it("rejects a malformed held-out set (newborn or in a state) with RangeError, allocating nothing", async () => {
+    const be = createCpuBackend()
+    const badSets: unknown[] = [
+      { obs: SET.obs, actions: SET.actions.slice(1) }, // obs must be one more than actions
+      { obs: [SET.obs[0]], actions: [] }, // at least one transition
+      { obs: SET.obs.map((o, i) => (i === 2 ? { ...o, fovea: new Uint8Array(5) } : o)), actions: SET.actions },
+      { obs: SET.obs, actions: SET.actions.map((a, i) => (i === 1 ? { ...a, move: 999 } : a)) },
+      { obs: SET.obs },
+      null, 7,
+    ]
+    for (const h of badSets) {
+      await expect(createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: h as HeldOutSet })).rejects.toThrow(RangeError)
+    }
+    const l = await createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET })
+    const state = await l.save()
+    l.dispose()
+    for (const h of badSets.filter(x => x !== null)) {
+      await expect(createLearner({ backend: be, state: { ...state, heldOut: h as HeldOutSet } })).rejects.toThrow(RangeError)
+    }
+    const { heldOut: _drop, ...without } = state
+    void _drop
+    await expect(createLearner({ backend: be, state: without as LearnerState })).rejects.toThrow(RangeError)
+    for (const k of ["evalCU", "heldOutLoss", "heldOutBaseline"] as const) {
+      const { [k]: _gone, ...st } = state.stats
+      void _gone
+      await expect(createLearner({ backend: be, state: { ...state, stats: st as LearnerState["stats"] } }), `stats without ${k}`).rejects.toThrow(RangeError)
+    }
+    for (const bad of [{ evalCU: -1 }, { evalCU: Number.NaN }, { heldOutLoss: Number.POSITIVE_INFINITY }, { heldOutBaseline: -0.1 }, { heldOutLoss: "0.1" }]) {
+      await expect(createLearner({ backend: be, state: { ...state, stats: { ...state.stats, ...bad } as LearnerState["stats"] } }), JSON.stringify(bad)).rejects.toThrow(RangeError)
+    }
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("a sleep that fails part-way (the device refuses an allocation) leaks nothing: replay and scoring free what they made", async () => {
+    const make = async (failAt: number) => {
+      const be = createCpuBackend()
+      const { upload, zeros } = be
+      let k = 0, armed = false
+      const take = () => { if (armed && ++k === failAt) throw new Error("device lost") }
+      Object.assign(be, { upload: (d: Float32Array) => { take(); return upload(d) }, zeros: (m: number) => { take(); return zeros(m) } })
+      const l = await createLearner({ backend: be, seed: 25, widths: TINY, settings: { ...DEFAULT_SETTINGS, replayPerSleep: 2 }, heldOut: syntheticHeldOut(3, 3) })
+      const w = createSyntheticStream()
+      for (let i = 0; i < 4; i++) w.act(await l.step(w.observe()))
+      const before = be.stats.liveBuffers
+      armed = true
+      return { be, l, before, count: () => k }
+    }
+    const probe = await make(0)
+    await probe.l.sleep()
+    const n = probe.count()
+    expect(n).toBeGreaterThan(20)
+    probe.l.dispose()
+    for (let failAt = 1; failAt <= n; failAt++) {
+      const { be, l, before } = await make(failAt)
+      await expect(l.sleep(), `failing at allocation ${failAt}`).rejects.toThrow("device lost")
+      expect(be.stats.liveBuffers, `failing at allocation ${failAt}`).toBe(before)
+      l.dispose()
+      expect(be.stats.liveBuffers).toBe(0)
+    }
+  })
+
+  it("keeps liveBuffers flat across sleeps that score it", async () => {
+    const be = createCpuBackend()
+    const learner = await createLearner({ backend: be, seed: 24, widths: TINY, settings: DEFAULT_SETTINGS, heldOut: SET })
+    const w = createSyntheticStream()
+    let after = -1
+    for (let i = 1; i <= 40; i++) {
+      w.act(await learner.step(w.observe()))
+      if (i % 10 === 0) await learner.sleep()
+      if (i === 10) after = be.stats.liveBuffers
+    }
+    expect(be.stats.liveBuffers).toBe(after)
+    learner.dispose()
+    expect(be.stats.liveBuffers).toBe(0)
   })
 })

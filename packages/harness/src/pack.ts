@@ -19,11 +19,12 @@ export interface PackedFrames {
 
 interface PackedTransition { obs: number; hIn: Float32Array; action: Action; next: number }
 
-/** A LearnerState with its observations replaced by indices into `frames`. */
-export type PackedLearnerState = Omit<LearnerState, "replay" | "last"> & {
+/** A LearnerState with its observations replaced by indices into `frames` (the replay's, then the held-out set's). */
+export type PackedLearnerState = Omit<LearnerState, "replay" | "last" | "heldOut"> & {
   frames: PackedFrames
   replay: PackedTransition[]
   last: { obs: number; action: Action; hIn: Float32Array } | null
+  heldOut: { obs: number[]; actions: Action[] } | null
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -51,6 +52,9 @@ export async function packLearnerState(state: unknown, o: { compress?: boolean }
   const last = s.last as LearnerState["last"] | unknown
   if (last !== null && !(isRecord(last) && isObs(last.obs))) return state
   if (!s.replay.every(tr => isRecord(tr) && isObs(tr.obs) && isObs(tr.next))) return state
+  // A state from before the held-out set (or without one) has none to pack.
+  const heldOut = (s as { heldOut?: unknown }).heldOut ?? null
+  if (heldOut !== null && !(isRecord(heldOut) && Array.isArray(heldOut.obs) && heldOut.obs.every(isObs) && Array.isArray(heldOut.actions))) return state
   // Distinct observations, by identity: consecutive transitions share one (`next` of one is `obs` of the next).
   const index = new Map<Observation, number>()
   const all: Observation[] = []
@@ -65,6 +69,8 @@ export async function packLearnerState(state: unknown, o: { compress?: boolean }
   }
   const replay: PackedTransition[] = s.replay.map(tr => ({ obs: add(tr.obs), hIn: tr.hIn, action: tr.action, next: add(tr.next) }))
   const packedLast = s.last === null ? null : { obs: add(s.last.obs), action: s.last.action, hIn: s.last.hIn }
+  const ho = heldOut as LearnerState["heldOut"]
+  const packedHeldOut = ho === null ? null : { obs: ho.obs.map(add), actions: ho.actions }
   const peripheryLen = all[0]?.periphery.length ?? 0
   const foveaLen = all[0]?.fovea.length ?? 0
   if (!all.every(ob => ob.periphery.length === peripheryLen && ob.fovea.length === foveaLen)) return state
@@ -82,7 +88,7 @@ export async function packLearnerState(state: unknown, o: { compress?: boolean }
   const gzip = (o.compress ?? true) && typeof CompressionStream === "function"
   const data = gzip ? await pipe(raw, new CompressionStream("gzip")) : raw
   return {
-    ...s, replay, last: packedLast,
+    ...s, replay, last: packedLast, heldOut: packedHeldOut,
     frames: { codec: gzip ? "gzip" : "raw", count: all.length, peripheryLen, foveaLen, data, cursors, buttons },
   } satisfies PackedLearnerState
 }
@@ -90,7 +96,7 @@ export async function packLearnerState(state: unknown, o: { compress?: boolean }
 /** The learner state a packed one stands for (shared observations shared again). Unpacked states are returned as is. */
 export async function unpackLearnerState(stored: unknown): Promise<unknown> {
   if (!isPacked(stored)) return stored
-  const { frames: f, replay, last, ...rest } = stored
+  const { frames: f, replay, last, heldOut, ...rest } = stored
   const fail = (what: string): never => { throw new RangeError(`packed learner state: ${what}`) }
   if (!(f.data instanceof Uint8Array && f.cursors instanceof Float64Array && f.buttons instanceof Uint8Array)) fail("malformed frames")
   if (![f.count, f.peripheryLen, f.foveaLen].every(n => Number.isInteger(n) && n >= 0)) fail("malformed frame sizes")
@@ -115,5 +121,11 @@ export async function unpackLearnerState(stored: unknown): Promise<unknown> {
     ...rest,
     replay: replay.map(tr => ({ obs: at(tr.obs), hIn: tr.hIn, action: tr.action, next: at(tr.next) })),
     last: last === null ? null : { obs: at(last.obs), action: last.action, hIn: last.hIn },
-  } satisfies LearnerState
+    // A state packed before the held-out set has none (the learner then rejects it: it is not this version's).
+    ...(heldOut === undefined ? {} : {
+      heldOut: heldOut === null ? null : isRecord(heldOut) && Array.isArray(heldOut.obs)
+        ? { obs: heldOut.obs.map(at), actions: heldOut.actions }
+        : fail("heldOut is malformed"),
+    }),
+  } as LearnerState
 }

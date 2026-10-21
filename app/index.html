@@ -228,18 +228,20 @@
 
           <section class="panel surface" aria-labelledby="learning-title">
             <h2 id="learning-title">Is it learning?</h2>
-            <p class="muted">At every step it guesses what it will see next. The lazy guess is that nothing changes; a learner
-              that learns ends up below it.</p>
+            <p class="muted">At every step it guesses what it will see next. Here those guesses are scored
+              <strong data-testid="heldout-label">on a fixed test it never trains on</strong>: 64 moments of a differently laid-out
+              copy of its world, recorded at its birth. The lazy guess is that nothing changes; a learner that learns ends up below it.</p>
             <canvas id="curve" data-testid="curve" data-points="0" width="360" height="96" role="img"
-              aria-label="Loss curve: how wrong its guesses are, and the lazy guess, over the compute it has lived"></canvas>
+              aria-label="Loss curve on a fixed test it never trains on: how wrong its guesses are, and the lazy guess, over the compute it has lived"></canvas>
             <div class="axis" aria-hidden="true"><span>birth</span><span>compute lived →</span></div>
             <ul class="legend" data-testid="curve-legend">
-              <li><span class="swatch"></span>how wrong its guesses are</li>
+              <li><span class="swatch"></span>how wrong its guesses are, on the fixed test</li>
               <li><span class="swatch base"></span>the lazy guess: nothing changes</li>
             </ul>
             <dl class="stats" style="margin-top: 10px">
               <dt>Ratio</dt><dd data-testid="ratio">no guesses measured yet</dd>
             </dl>
+            <p class="muted" data-testid="own-ratio" style="margin: 6px 0 0"></p>
           </section>
 
           <section class="panel surface" data-testid="token-panel" aria-labelledby="token-title" hidden>
@@ -264,7 +266,7 @@
     <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden>
       <div class="table-wrap surface" data-testid="history">
         <table>
-          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col" class="num">CU</th><th scope="col" class="num">Loss ratio</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
+          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col" class="num">CU</th><th scope="col" class="num">Held-out ratio</th><th scope="col" class="num">Own-stream ratio</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" hidden>No past sessions yet. When a learner's logs are merged, its session appears here.</p>

@@ -77,4 +77,24 @@ describe("buildSummary", () => {
     expect(buildSummary(dir).sessions[0]!.lossRatio).toBeNull()
     expect(JSON.parse(JSON.stringify(buildSummary(dir))).sessions[0].lossRatio).toBeNull()
   })
+  it("rows gain heldOutRatio: the latest curve point with a held-out score, loss / baseline; null without one", () => {
+    const v2 = (id: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => ({
+      ...log(id, seq), schemaVersion: 2, cu: 2 ** seq, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 },
+      curve: [{ cu: 2 ** seq, steps: 100 * (seq + 1), predLoss: 0.02, baselineLoss: 0.025 }], skippedUpdates: 0, restores: 0, lostCU: 0, ...over,
+    })
+    const p = (cu: number, steps: number, heldOut?: { loss: number; baseline: number }) => ({ cu, steps, predLoss: 0.01, baselineLoss: 0.04, ...(heldOut ? { heldOut } : {}) })
+    put(v2(A, 0, { curve: [p(1, 100, { loss: 0.5, baseline: 0.4 })] }))
+    put(v2(A, 1, { curve: [p(1.5, 150, { loss: 0.3, baseline: 0.4 }), p(2, 200)] })) // the newest point has none: the latest one that has
+    put(v2(B, 0, { curve: [p(1, 100, { loss: 0.2, baseline: 0.4 })] })); put(v2(B, 1, { curve: [] }))
+    const C = "lrn_cccccccccccccccc"
+    put(v2(C, 0)) // an older v2 learner: no held-out scores at all
+    const D = "lrn_dddddddddddddddd"
+    put(v2(D, 0, { curve: [p(1, 100, { loss: 0.2, baseline: 0 })] })) // a zero baseline
+    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    expect(rows[A]!.heldOutRatio).toBeCloseTo(0.75, 12)
+    expect(rows[A]!.lossRatio).toBeCloseTo(0.25, 12) // the own-stream ratio stays as it was
+    expect(rows[B]!.heldOutRatio).toBeCloseTo(0.5, 12)
+    expect(rows[C]!.heldOutRatio).toBeNull()
+    expect(rows[D]!.heldOutRatio).toBeNull()
+  })
 })

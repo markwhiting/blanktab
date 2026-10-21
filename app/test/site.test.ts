@@ -1,11 +1,18 @@
 import { describe, it, expect } from "vitest"
 import type { SessionRow } from "@blanktab/harness"
-import { buildLabel, historyRows, siteLinks } from "../src/site"
+import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "../src/site"
 
 const REPO = { owner: "markwhiting", name: "learner" } as const
 const row = (id: string, seen: number, over: Partial<SessionRow> = {}): SessionRow => ({
   learnerId: id, settings: { moveProbability: 0.123456 }, hostSig: { cores: 8, deviceMemoryGb: null, webgpu: true, tabsOnMachine: 1 },
   stepsTotal: 3000, final: true, codeSha: "a".repeat(40), knowledgeSha: "b".repeat(64), sessionsSeenAtBirth: seen, ...over,
+})
+
+describe("fmt", () => {
+  it("shows a small setting to 3 significant digits, not rounded to 3 decimals (lr 5e-4 is not 0.001)", () => {
+    expect(fmtSettings({ lr: 5e-4, headLrScale: 0.1, bufferSize: 500 })).toBe("lr = 0.0005, headLrScale = 0.1, bufferSize = 500")
+    expect([0.123456, 0.0012345, -0.00049, 0, 1024.4567, 1.04321, "x"].map(fmt)).toEqual(["0.123", "0.00123", "-0.00049", "0", "1024.457", "1.043", "x"])
+  })
 })
 
 describe("historyRows", () => {
@@ -27,14 +34,14 @@ describe("historyRows", () => {
     expect(r).toEqual({
       learnerId: "lrn_aaaaaaaaaaaaaaaa",
       href: "https://github.com/markwhiting/learner/tree/main/data/runs/lrn_aaaaaaaaaaaaaaaa",
-      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu", cu: "—", lossRatio: "—",
+      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu", cu: "—", lossRatio: "—", heldOutRatio: "—",
     })
     expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { settings: {} })] }, REPO)[0]).toMatchObject({ final: "yes", setting: "none", host: "8 cores · webgpu" })
   })
   it("shows a learner's compute lived and its last loss ratio (v2 logs), a dash for v1 learners", () => {
-    const [r] = historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: 1024.4567, lossRatio: 0.87654 })] }, REPO)
-    expect(r).toMatchObject({ cu: "1024.457", lossRatio: "0.877" })
-    expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: null, lossRatio: null })] }, REPO)[0]).toMatchObject({ cu: "—", lossRatio: "—" })
+    const [r] = historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: 1024.4567, lossRatio: 0.87654, heldOutRatio: 1.04321 })] }, REPO)
+    expect(r).toMatchObject({ cu: "1024.457", lossRatio: "0.877", heldOutRatio: "1.043" })
+    expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: null, lossRatio: null, heldOutRatio: null })] }, REPO)[0]).toMatchObject({ cu: "—", lossRatio: "—", heldOutRatio: "—" })
   })
 })
 

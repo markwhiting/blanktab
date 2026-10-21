@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Request } from "@playwright/test"
 import { fakeGithub } from "../../packages/harness/test/fakeGithub"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 
 const TOKEN = "test-token"
 const UP = "markwhiting/learner"
@@ -23,9 +24,9 @@ const SPACE = [
   { name: "maxStepsPerSec", min: 30, max: 30 }, { name: "moveProbability", min: 0.1, max: 1 },
 ]
 const KNOWLEDGE: Record<string, unknown> = {
-  "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123 }] },
+  "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123, heldOutRatio: 1.0456 }] },
   // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
-  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 1 },
+  "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
   "settings-space.json": { schemaVersion: 1, settings: SPACE },
 }
 
@@ -63,6 +64,20 @@ async function setup(page: Page, opts: { knowledge: "ok" | "unreachable"; token?
 
 const stepsLived = async (page: Page) => Number((await page.getByTestId("steps").textContent())?.match(/^(\d+)/)?.[1] ?? NaN)
 const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) (?:of |CU)/)?.[1] ?? NaN)
+/** The log files in this page's outbox for learner `id`, oldest first. */
+const outboxOf = (page: Page, id: string) => page.evaluate(i => new Promise<{ seq: number; final: boolean; stepsTotal: number; codeSha: string }[]>((res, rej) => {
+  const req = indexedDB.open("blanktab")
+  req.onerror = () => rej(req.error)
+  req.onsuccess = () => {
+    const all = req.result.transaction("outbox").objectStore("outbox").getAll()
+    all.onsuccess = () => {
+      req.result.close()
+      type F = { seq: number; final: boolean; stepsTotal: number; codeSha: string }
+      res((all.result as { learnerId: string; file: F }[]).filter(r => r.learnerId === i).map(r => r.file).sort((a, b) => a.seq - b.seq))
+    }
+    all.onerror = () => rej(all.error)
+  }
+}), id)
 const curvePoints = async (page: Page) => Number(await page.getByTestId("curve").getAttribute("data-points"))
 
 /** Writes rows straight into the page's IndexedDB (as an earlier page version or a crashed life would have left them). */
@@ -106,6 +121,9 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   await expect.poll(() => cuLived(page)).toBeGreaterThan(0)
   await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
   await expect(page.getByTestId("ratio")).toHaveText(/^\d+(\.\d+)? \(its guesses are/)
+  // The chart and the ratio are on the fixed held-out set (decision 0015 §3); the own-stream ratio is secondary text.
+  await expect(page.getByTestId("heldout-label")).toHaveText("on a fixed test it never trains on")
+  await expect(page.getByTestId("own-ratio")).toHaveText(/^On what it chose to look at \(which it also trains on\): \d+(\.\d+)?$/)
   await expect(page.getByTestId("rate")).toHaveText(/^[\d.]+ steps\/s$/)
   await expect(page.getByTestId("curve-legend")).toContainText("how wrong its guesses are")
   await expect(page.getByTestId("curve-legend")).toContainText("the lazy guess: nothing changes")
@@ -131,7 +149,7 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(gh.prFiles(gh.pulls[0]!)).toEqual([`data/runs/${id}/0.json`])
   expect(githubCalls().some(r => r.method === "PUT" || r.url.includes("/contents/") || (r.body ?? "").includes("heartbeat"))).toBe(false)
   await expect(page.getByTestId("change-token")).toBeVisible()
-  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; curve: { predLoss: number; baselineLoss: number }[]; settings: Record<string, number> }
+  const final = gh.file(UP, `run/${id}`, `data/runs/${id}/0.json`) as Record<string, unknown> & { cu: number; evalCU: number; curve: { steps: number; predLoss: number; baselineLoss: number; heldOut?: { loss: number; baseline: number } }[]; settings: Record<string, number> }
   expect(final).toMatchObject({
     schemaVersion: 2, seq: 0, final: true, sessionsSeenAtBirth: 2, knowledgeSha: "c".repeat(64), codeSha: "dev", condition: "A",
     widths: TINY, hostSig: { webgpu: false }, restores: 0, lostCU: 0,
@@ -139,6 +157,15 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   expect(final.cu).toBeGreaterThanOrEqual(LIFETIME_CU)
   expect(final.curve.length).toBeGreaterThan(0)
   for (const p of final.curve) expect(Number.isFinite(p.predLoss) && Number.isFinite(p.baselineLoss)).toBe(true)
+  // Every point at a sleep (every 5 steps) carries the held-out score, the end-of-life point none; its compute is
+  // billed apart from the life's.
+  const final_ = final.curve
+  expect(final_.some(p => p.heldOut)).toBe(true)
+  for (const p of final_) {
+    if (p.steps % 5 === 0) expect(p.heldOut!.baseline > 0 && Number.isFinite(p.heldOut!.loss)).toBe(true)
+    else expect(p.heldOut).toBeUndefined()
+  }
+  expect(final.evalCU).toBeGreaterThan(0)
   expect(final.settings).toMatchObject({ replayPerSleep: 16, bufferSize: 500, maxStepsPerSec: 10 })
   expect(final.settings).not.toHaveProperty("moveProbability")
 
@@ -255,6 +282,45 @@ test("the learner always runs: a worker error starts a newborn", async ({ page }
   await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
   const first = await stepsLived(page)
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(first)
+})
+
+test("a learner born on an older version (another learner state version): a plain notice, its life ended on the record, a newborn", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  const older = "lrn_01de01de01de01de"
+  const settings = { lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 500, replayPerSleep: 16, headLrScale: 0.1, exploreEpsilon: 0.1, residualDecay: 1e-3 }
+  // An older version's learner state: its birth facts read fine, but the learner cannot load it.
+  await seedDb(page, { checkpoints: [{ learnerId: older, savedAt: new Date().toISOString(), steps: 10, cu: 0.01, seq: 0, curveTail: [], restores: 0, lostCU: 0, lostSkips: 0,
+    codeSha: "a".repeat(40), learnerState: { version: LEARNER_STATE_VERSION - 1, seed: 5, widths: TINY, settings } }] })
+  await page.evaluate(id => sessionStorage.setItem("blanktab:learnerId", id), older)
+  await page.reload()
+  const life = page.getByTestId("life")
+  await expect(life).toHaveText("This learner was born on an older version; a newborn takes its place.")
+  await expect(life).not.toHaveClass(/error/)
+  await expect(page.getByTestId("learner-id")).not.toHaveText(older, { timeout: 10_000 })
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  // Its life is still ended on the record, under the code it was lived on.
+  const files = await outboxOf(page, older)
+  expect(files).toEqual([expect.objectContaining({ seq: 0, final: true, stepsTotal: 10, codeSha: "a".repeat(40) })])
+})
+
+test("the worker cannot load (its asset is gone after a deploy) and newer code is published: the page reloads, once per code", async ({ page }) => {
+  const NEW = "e".repeat(40)
+  await setup(page, { knowledge: "ok" })
+  // The deployed manifest now names other code; this build's worker asset no longer exists.
+  await page.route("**/knowledge/manifest.json", route => route.fulfill({ json: { ...(KNOWLEDGE["manifest.json"] as object), codeSha: NEW } }))
+  let loads = 0
+  page.on("load", () => { loads++ })
+  await page.route(/\/assets\/worker-[^/]*\.js/, route => route.fulfill({ status: 404, body: "" }))
+  await page.goto(LONG)
+  // It reloads for the new code (the guard allows two tries per code), then gives up and says why, instead of
+  // starting a newborn every 2 s forever.
+  await expect.poll(() => loads, { timeout: 30_000 }).toBe(3)
+  await expect(page.getByTestId("life")).toContainText("could not load", { timeout: 10_000 })
+  expect(JSON.parse((await page.evaluate(() => sessionStorage.getItem("blanktab:reloadTarget")))!)).toEqual({ codeSha: NEW, tries: 2 })
+  await page.waitForTimeout(3_000)
+  expect(loads).toBe(3)
 })
 
 test("a learner with logs but no checkpoint (e.g. the old flailer's) cannot be resumed: a newborn takes its place", async ({ page }) => {
@@ -470,9 +536,12 @@ test("tabs: LEARNER by default; HISTORY lists past sessions newest first; ABOUT 
   await expect(rows.nth(0)).toContainText("3000")
   await expect(rows.nth(0)).toContainText("moveProbability = 0.5")
   await expect(rows.nth(0)).toContainText("4 cores")
-  await expect(rows.nth(0)).toContainText("0.912") // its loss ratio
+  await expect(rows.nth(0)).toContainText("0.912") // its own-stream ratio
+  await expect(rows.nth(0)).toContainText("1.046") // its held-out ratio
+  await expect(rows.nth(1)).toContainText("—") // a learner from before the held-out check
   await expect(rows.nth(0)).toContainText("1024.5") // its CU
-  await expect(page.getByTestId("history").locator("thead")).toContainText(/loss ratio/i)
+  await expect(page.getByTestId("history").locator("thead")).toContainText(/held-out ratio/i)
+  await expect(page.getByTestId("history").locator("thead")).toContainText(/own-stream ratio/i)
   await expect(page.getByTestId("history").locator("thead")).toContainText(/CU/)
   await expect(footer).toBeVisible()
 

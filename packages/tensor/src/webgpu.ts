@@ -475,7 +475,7 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
       })
     },
 
-    adam(p, g, m, v, lr, b1, b2, eps, t) {
+    adam(p, g, m, v, lr, b1, b2, eps, t, decay = 0) {
       const pb = get(p)
       const gb = get(g)
       const mb = get(m)
@@ -486,7 +486,7 @@ function webGpuBackendOn(device: GPUDevice, adapterInfo: WebGpuAdapterInfo): Web
       if (new Set([p, g, m, v]).size !== 4) throw new ShapeError("adam: p, g, m, v must be distinct storages")
       const c1 = 1 - Math.pow(b1, t)
       const c2 = 1 - Math.pow(b2, t)
-      const fields = [u(p.length), ...[lr, b1, 1 - b1, b2, 1 - b2, eps, c1, c2].map(fl)]
+      const fields = [u(p.length), ...[lr, b1, 1 - b1, b2, 1 - b2, eps, c1, c2, 1 - decay].map(fl)]
       dispatch1d("adam", adamKernel, [pb, gb, mb, vb], fields, p.length)
       stats.flops += 10 * p.length
     },

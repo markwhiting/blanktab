@@ -276,3 +276,46 @@ describe("validateSessionPr", () => {
     })
   })
 })
+
+describe("validateSessionPr v2: the held-out check's optional fields (decision 0015 §3)", () => {
+  const ho = (loss: number, baseline: number) => ({ heldOut: { loss, baseline } })
+  const raw = (mut: (o: Record<string, any>) => void, seq = 0, over: Partial<LogFileV2> = {}): PrFile => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const o = JSON.parse(JSON.stringify(logV2(seq, over))); mut(o)
+    return { path: `data/runs/${ID}/${seq}.json`, content: JSON.stringify(o) }
+  }
+  const msg = (files: PrFile[], prev: LogFile[] = []) => errs(files, prev).errors.join("\n")
+  it("accepts curve points with heldOut and files with evalCU, and old v2 files without either", () => {
+    const f = logV2(0, { evalCU: 0.05, curve: [{ ...pt(0.75, 300), ...ho(0.02, 0.025) }, pt(1, 400)] })
+    expect(errs([file(f)])).toEqual({ ok: true, errors: [], kind: "log" })
+    expect(errs([file(logV2(0))]).ok).toBe(true)
+    expect(errs([file(logV2(1, { evalCU: 0 }))], [logV2(0)]).ok).toBe(true) // a file before the field existed
+  })
+  it("heldOut is strict when present: exactly { loss, baseline }, each finite and >= 0 (no upper bound: a diverged learner's result is kept)", () => {
+    const at = (h: unknown) => raw(o => { o.curve[0].heldOut = h })
+    expect(errs([at({ loss: 1e30, baseline: 3 })]).ok).toBe(true)
+    expect(errs([at({ loss: 0, baseline: 0 })]).ok).toBe(true)
+    expect(msg([at({ loss: 0.1, baseline: 0.1, extra: 1 })])).toContain('unknown key "extra" in curve[0].heldOut')
+    for (const bad of [{ loss: 0.1 }, { baseline: 0.1 }, { loss: -0.1, baseline: 0.1 }, { loss: 0.1, baseline: -0.1 },
+      { loss: "0.1", baseline: 0.1 }, { loss: null, baseline: 0.1 }, null, [], 0.1]) {
+      expect(msg([at(bad)]), JSON.stringify(bad)).toContain("curve[0].heldOut")
+    }
+    const f = file(logV2(0, { curve: [{ ...pt(1, 400), ...ho(0.123456, 0.2) }] }))
+    f.content = f.content.replace("0.123456", "1e999")
+    expect(msg([f])).toContain("curve[0].heldOut")
+  })
+  it("evalCU is finite and >= 0 when present, and never decreases across seq where both files have it", () => {
+    for (const bad of [-1, "1", null]) expect(msg([raw(o => { o.evalCU = bad })]), String(bad)).toContain("evalCU")
+    const f = file(logV2(0, { evalCU: 0.123456 }))
+    f.content = f.content.replace("0.123456", "1e999")
+    expect(msg([f])).toContain("evalCU")
+    expect(msg([file(logV2(0, { evalCU: 2 })), file(logV2(1, { evalCU: 1 }))])).toContain("evalCU decreased")
+    expect(msg([file(logV2(1, { evalCU: 1 }))], [logV2(0, { evalCU: 2 })])).toContain("evalCU decreased")
+    expect(errs([file(logV2(0, { evalCU: 1 })), file(logV2(1, { evalCU: 1 }))]).ok).toBe(true)
+  })
+  it("within one learner, a file without evalCU after one with it is rejected (never from a number back to absent)", () => {
+    expect(msg([file(logV2(0, { evalCU: 1 })), file(logV2(1))])).toContain("evalCU missing")
+    expect(msg([file(logV2(1))], [logV2(0, { evalCU: 1 })])).toContain("evalCU missing")
+    expect(errs([file(logV2(0)), file(logV2(1, { evalCU: 1 }))]).ok).toBe(true) // absent, then present: a newer page
+    expect(errs([file(logV2(1))], [logV2(0)]).ok).toBe(true)
+  })
+})

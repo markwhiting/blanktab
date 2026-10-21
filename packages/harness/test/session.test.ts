@@ -9,7 +9,8 @@ import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src
 import { createWorld } from "@blanktab/world"
 import { createCanvas } from "@napi-rs/canvas"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
-import { DEFAULT_CHECKPOINT_EVERY_MS, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
+import { buildHeldOut } from "../src/heldout"
+import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -62,10 +63,10 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void }) {
+function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number }) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
-    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 } }
+    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0, evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN } }
     const st: StubState = structuredClone(s0)
     const loss = () => {
       const n = st.stats.steps
@@ -81,7 +82,16 @@ function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number
         loss()
         return NOOP_ACTION
       },
-      sleep: async () => { st.stats.sleeps++; st.stats.cu += o.sleepCu ?? 0 },
+      sleep: async () => {
+        st.stats.sleeps++
+        st.stats.cu += o.sleepCu ?? 0
+        // With `evalCu`, a learner with a held-out set: each sleep scores it (a pure function of the step count), billed to evalCU.
+        if (o.evalCu !== undefined) {
+          st.stats.evalCU += o.evalCu
+          st.stats.heldOutLoss = o.heldOutLoss ? o.heldOutLoss(st.stats.steps) : 0.4 / (1 + st.stats.steps / 1000)
+          st.stats.heldOutBaseline = 0.4
+        }
+      },
       save: async () => { o.onSave?.(st.stats.steps); o.saves?.push(st.stats.consecutiveSkips); o.savedSteps?.push(st.stats.steps); return structuredClone(st) as unknown as LearnerState },
       stats: () => ({ ...st.stats }),
       dispose: () => {},
@@ -117,6 +127,106 @@ function expectContinuous(logs: LogFileV2[]) {
 }
 
 describe("session v2", { timeout: 60_000 }, () => {
+
+  describe("the held-out check (decision 0015 §3)", () => {
+    it("curvePoint: a sleep's point, with the held-out score when there is one; null while a loss is NaN", () => {
+      const st = { cu: 2, predLoss: 0.1, baselineLoss: 0.2, heldOutLoss: 0.3, heldOutBaseline: 0.4 }
+      expect(curvePoint(st, 50)).toEqual({ cu: 2, steps: 50, predLoss: 0.1, baselineLoss: 0.2, heldOut: { loss: 0.3, baseline: 0.4 } })
+      expect(curvePoint({ ...st, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN }, 50)).toEqual({ cu: 2, steps: 50, predLoss: 0.1, baselineLoss: 0.2 })
+      expect(curvePoint({ ...st, heldOutLoss: Number.POSITIVE_INFINITY }, 50)).toEqual({ cu: 2, steps: 50, predLoss: 0.1, baselineLoss: 0.2 })
+      expect(curvePoint({ ...st, predLoss: Number.NaN }, 50)).toBeNull()
+      expect(curvePoint({ ...st, baselineLoss: Number.NaN }, 50)).toBeNull()
+    })
+
+    it("each curve point carries the held-out score and each file its evalCU, which is not in cu", async () => {
+      const idb = new IDBFactory()
+      await runSession(cfgFor({ lifetimeCU: 64, sleepInterval: 50 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16, evalCu: 0.25 }) }))
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      expect(logs.map(f => f.cu)).toEqual([8, 16, 32, 64]) // as without the check
+      expect(logs.map(f => f.evalCU)).toEqual(logs.map(f => 0.25 * Math.floor(f.stepsTotal / 50)))
+      // Only a sleep's point carries a score (its own): the end-of-life point, between sleeps, has none.
+      for (const f of logs) for (const p of f.curve) {
+        if (p.steps % 50 === 0) expect(p.heldOut).toEqual({ loss: 0.4 / (1 + p.steps / 1000), baseline: 0.4 })
+        else expect("heldOut" in p, `point at step ${p.steps}`).toBe(false)
+      }
+      const end = logs.at(-1)!.curve.at(-1)!
+      expect(end.steps % 50).not.toBe(0) // this life ends between sleeps: the case above is exercised
+    })
+
+    it("a diverged learner's huge (finite) held-out loss is written and the file still parses: unfavourable results are kept", async () => {
+      const huge = { cu: 1, predLoss: 0.1, baselineLoss: 0.2, heldOutLoss: 1e30, heldOutBaseline: 2.5 }
+      expect(curvePoint(huge, 10)!.heldOut).toEqual({ loss: 1e30, baseline: 2.5 })
+      expect(curvePoint({ ...huge, heldOutLoss: -1 }, 10)!.heldOut).toBeUndefined() // never a value the parser refuses
+      expect(curvePoint({ ...huge, predLoss: -1 }, 10)).toBeNull()
+      const idb = new IDBFactory()
+      await runSession(cfgFor({ lifetimeCU: 16, sleepInterval: 50 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16, evalCu: 0.25, heldOutLoss: n => 1e6 * n }) }))
+      const logs = await logsOf(idb)
+      expectContinuous(logs) // every file parses
+      expect(logs.flatMap(f => f.curve).some(p => (p.heldOut?.loss ?? 0) > 1e8)).toBe(true)
+    })
+
+    it("a failed life whose checkpoint has no evalCU keeps the previous file's (never from a number to absent)", async () => {
+      const idb = new IDBFactory()
+      const cfg = cfgFor({ lifetimeCU: 128, sleepInterval: 10 })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, evalCu: 0.5 }), onTick: ({ steps }) => { if (steps === 25) throw new Error("reload") } }))).rejects.toThrow("reload")
+      const cp = (await loadCheckpoint(idb, ID))!
+      const prevEval = (await logsOf(idb)).at(-1)!.evalCU!
+      expect(prevEval).toBeGreaterThan(0)
+      const st = structuredClone(cp.learnerState) as unknown as { stats: Record<string, unknown> }
+      delete st.stats.evalCU // a checkpoint whose learner state has none (an older or stub state)
+      await saveCheckpoint(idb, { ...cp, learnerState: st })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, throwAt: { steps: cp.steps + 3, error: new Error("boom") } }) }))).rejects.toThrow("boom")
+      const last = (await logsOf(idb)).at(-1)!
+      expect(last.final).toBe(true)
+      expect(last.evalCU).toBe(prevEval)
+    })
+
+    it("a learner without a held-out set writes points without heldOut and evalCU 0", async () => {
+      const idb = new IDBFactory()
+      await runSession(cfgFor({ lifetimeCU: 16, sleepInterval: 50 }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 16 }) }))
+      const logs = await logsOf(idb)
+      expect(logs.map(f => f.evalCU)).toEqual([0, 0])
+      for (const f of logs) for (const p of f.curve) expect("heldOut" in p).toBe(false)
+    })
+
+    it("a failed life's final file keeps the evalCU of the checkpoint it is built from (never below the last file's)", async () => {
+      const idb = new IDBFactory()
+      const cfg = cfgFor({ lifetimeCU: 128, sleepInterval: 10 })
+      await expect(runSession(cfg, depsFor(idb, { createLearner: stubFactory({ cuPerStep: 1 / 2, evalCu: 0.5, throwAt: { steps: 60, error: new Error("boom") } }) }))).rejects.toThrow("boom")
+      const logs = await logsOf(idb)
+      expectContinuous(logs)
+      const last = logs.at(-1)!
+      expect(last.final).toBe(true)
+      expect(last.evalCU).toBe(0.5 * Math.floor(last.stepsTotal / 10))
+      expect(last.evalCU!).toBeGreaterThanOrEqual(logs.at(-2)!.evalCU!)
+    })
+
+    it("a real CPU learner with the real held-out set: points carry heldOut, files evalCU, all valid; cu excludes the scoring", async () => {
+      const run = async (withSet: boolean) => {
+        const idb = new IDBFactory()
+        const make = (init: LearnerInit) => createLearner({
+          backend: createCpuBackend(), ...init, ...(withSet && !("state" in init) ? { heldOut: buildHeldOut(init.seed, createCanvas(WORLD.width, WORLD.height)) } : {}),
+        })
+        const world = createWorld({ seed: 7, canvas: createCanvas(WORLD.width, WORLD.height) })
+        await runSession(cfgFor({ lifetimeCU: 0.2, sleepInterval: 10 }), depsFor(idb, { createLearner: make, world }))
+        return logsOf(idb)
+      }
+      const [withSet, without] = [await run(true), await run(false)]
+      expectContinuous(withSet)
+      const f = withSet.at(-1)!
+      expect(f.curve.length).toBeGreaterThan(2)
+      for (const p of f.curve) {
+        if (p.steps % 10 !== 0) { expect("heldOut" in p).toBe(false); continue } // the end of the life, between sleeps
+        expect(p.heldOut!.baseline).toBeGreaterThan(0)
+        expect(Number.isFinite(p.heldOut!.loss)).toBe(true)
+      }
+      expect(f.evalCU!).toBeGreaterThan(0)
+      // The scoring is not billed to training: the same life in steps and CU as without the check.
+      expect(withSet.map(x => [x.stepsTotal, x.cu])).toEqual(without.map(x => [x.stepsTotal, x.cu]))
+      expect(without.at(-1)!.evalCU).toBe(0)
+    })
+  })
   it("the log schedule: 8 ... 512 by doubling, then every 1024, forever", () => {
     expect(FIRST_LOG_CU).toBe(8)
     const first: number[] = []
@@ -770,6 +880,41 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(logs.map(f => [f.restores, f.lostCU, f.skippedUpdates])).toEqual([[0, 0, 0], [0, 0, 0], [0, 0, 0], [1, 39 / 2, 20], [1, 39 / 2, 20]])
       for (const f of logs) expect(f.cu).toBe(f.stepsTotal / 2) // cu is the life the learner lived, lostCU is extra
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("every checkpoint records the code that saved it; a life that fails on other code is ended under the checkpoint's codeSha", async () => {
+      const OLD = "a".repeat(40), NEW = "b".repeat(40)
+      const idb = new IDBFactory()
+      await expect(runSession(cfgFor({ codeSha: OLD, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+        createLearner: stubFactory({ cuPerStep: 1 / 2 }), onTick: ({ steps }) => { if (steps === 25) throw new Error("reload") },
+      }))).rejects.toThrow("reload")
+      const cp = (await loadCheckpoint(idb, ID))!
+      expect(cp.codeSha).toBe(OLD)
+      // New code that cannot resume it (e.g. another learner state version): the final log is the old code's life.
+      await expect(runSession(cfgFor({ codeSha: NEW, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+        createLearner: async () => { throw new RangeError("LearnerState: version 1, expected 2") },
+      }))).rejects.toThrow("version 1")
+      const last = (await logsOf(idb)).at(-1)!
+      expect(last).toMatchObject({ final: true, codeSha: OLD, stepsTotal: cp.steps })
+    })
+
+    it("a checkpoint from before codeSha was recorded falls back to the latest file's, then the config's", async () => {
+      const OLD = "a".repeat(40), NEW = "b".repeat(40)
+      for (const withFile of [true, false]) {
+        const idb = new IDBFactory()
+        await expect(runSession(cfgFor({ codeSha: OLD, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+          createLearner: stubFactory({ cuPerStep: withFile ? 1 / 2 : 1 / 16 }), onTick: ({ steps }) => { if (steps === 25) throw new Error("reload") },
+        }))).rejects.toThrow("reload")
+        const cp = (await loadCheckpoint(idb, ID))!
+        const { codeSha: _c, ...old } = cp
+        void _c
+        await saveCheckpoint(idb, old as typeof cp)
+        expect((await logsOf(idb)).length > 0).toBe(withFile)
+        await expect(runSession(cfgFor({ codeSha: NEW, lifetimeCU: 128, sleepInterval: 10 }), depsFor(idb, {
+          createLearner: async () => { throw new RangeError("no") },
+        }))).rejects.toThrow("no")
+        expect((await logsOf(idb)).at(-1)!.codeSha, `with a file: ${withFile}`).toBe(withFile ? OLD : NEW)
+      }
     })
 
     it("a reload right after a restore still has the restore on the record", async () => {

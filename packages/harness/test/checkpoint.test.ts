@@ -17,6 +17,16 @@ const cp = (learnerId: string, steps: number): Checkpoint<{ w: Float32Array }> =
 })
 
 describe("checkpoints", () => {
+  it("codeSha is optional (older checkpoints have none) and, when present, 40 lowercase hex chars or \"dev\"", async () => {
+    const idb = new IDBFactory()
+    for (const ok of ["a".repeat(40), "dev", undefined]) {
+      await saveCheckpoint(idb, { ...cp(A, 1), ...(ok !== undefined ? { codeSha: ok } : {}) })
+      expect((await loadCheckpoint(idb, A))!.codeSha).toBe(ok)
+    }
+    await saveCheckpoint(idb, { ...cp(A, 1), codeSha: "nope" })
+    await expect(loadCheckpoint(idb, A)).rejects.toThrow(/codeSha/)
+  })
+
   it("hasCheckpoint says whether a learner has one, without reading it", async () => {
     const idb = new IDBFactory()
     expect(await hasCheckpoint(idb, A)).toBe(false)
@@ -249,6 +259,28 @@ describe("checkpoint frames (write volume)", { timeout: 60_000 }, () => {
     expect(back).toEqual(state)
     for (let i = 1; i < back.replay.length; i++) expect(back.replay[i]!.obs).toBe(back.replay[i - 1]!.next)
     expect(back.last!.obs).toBe(back.replay.at(-1)!.next)
+  })
+
+  it("packs the held-out set's frames with the replay's and restores it exactly", async () => {
+    const world = stream()
+    const heldOut = { obs: [world.observe()], actions: [] as Action[] }
+    for (let i = 0; i < 8; i++) { const a = { move: (i * 5) % 25, button: 0, scroll: 0, key: 0 }; world.act(a); heldOut.actions.push(a); heldOut.obs.push(world.observe()) }
+    const l = await createLearner({ backend: createCpuBackend(), seed: 3, widths: TINY, settings: { ...DEFAULT_SETTINGS, bufferSize: 100, replayPerSleep: 4 }, heldOut })
+    for (let i = 0; i < 30; i++) world.act(await l.step(world.observe()))
+    await l.sleep()
+    const state = await l.save()
+    l.dispose()
+    expect(state.heldOut).not.toBeNull()
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, learnerCp(state))
+    const stored = (await rawRecord(idb, A))!.learnerState
+    expect((stored.frames as { count: number }).count).toBe(state.replay.length + 1 + heldOut.obs.length)
+    expect(JSON.stringify(Object.keys(stored.heldOut as object))).toBe('["obs","actions"]')
+    expect((stored.heldOut as { obs: unknown[] }).obs.every(i => Number.isInteger(i))).toBe(true) // indices, not frames
+    const back = (await loadCheckpoint(idb, A))!.learnerState
+    expect(back).toEqual(state)
+    const again = await createLearner({ backend: createCpuBackend(), state: back as LearnerState })
+    again.dispose()
   })
 
   it("a learner resumed from a stored (packed) checkpoint goes on bit-identically to one resumed from its unstored state", async () => {

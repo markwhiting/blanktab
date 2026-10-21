@@ -25,6 +25,35 @@ export const RELOAD_TARGET_KEY = "blanktab:reloadTarget"
 export const STALE_BACKOFF_POLLS = 2
 const MAX_RELOADS_PER_CODE = 2
 
+/** The reloads this tab already made for `codeSha` (RELOAD_TARGET_KEY) and still came back on the old code. */
+function reloadsFor(storage: Storage, codeSha: string): number {
+  try {
+    const t = JSON.parse(storage.getItem(RELOAD_TARGET_KEY) ?? "null") as { codeSha?: unknown; tries?: unknown } | null
+    return t?.codeSha === codeSha && Number.isInteger(t.tries) ? (t.tries as number) : 0
+  } catch {
+    return 0
+  }
+}
+
+/** Shown when the learner's code cannot load and reloading for the newer code did not help: the tab stops trying. */
+export const WORKER_LOAD_MESSAGE = "The learner could not load: this page's code was replaced by a newer version. Reload later."
+
+/**
+ * The learner's worker failed to load. After a deploy this page's hashed assets are gone, so every newborn would fail
+ * the same way: if the deployed manifest names other code, reload onto it (no learner is running, so there is nothing
+ * to save; its checkpoint resumes there), under the same guard as code updates (MAX_RELOADS_PER_CODE per code, in
+ * RELOAD_TARGET_KEY). "gave-up": the guard is spent (the page stops trying); "same-code": not a deploy (or no manifest).
+ */
+export async function onWorkerLoadFailure(d: Pick<UpdatesDeps, "codeSha" | "storage" | "loadManifest" | "reload">): Promise<"reloaded" | "gave-up" | "same-code"> {
+  const m = await d.loadManifest().catch(() => null)
+  if (!m || m.codeSha === d.codeSha) return "same-code"
+  const tries = reloadsFor(d.storage, m.codeSha)
+  if (tries >= MAX_RELOADS_PER_CODE) return "gave-up"
+  d.storage.setItem(RELOAD_TARGET_KEY, JSON.stringify({ codeSha: m.codeSha, tries: tries + 1 }))
+  d.reload()
+  return "reloaded"
+}
+
 export interface Timers { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void }
 export interface Visibility { hidden(): boolean; onChange(fn: () => void): () => void }
 /** `now`: milliseconds, on the same clock as `timers`. */
@@ -157,15 +186,6 @@ export function startUpdates(d: UpdatesDeps): { stop(): void; halted(): void } {
     }
     reloadNow()
   }
-  /** The reloads this tab already made for `codeSha` and still came back on the old code. */
-  const reloadsFor = (codeSha: string): number => {
-    try {
-      const t = JSON.parse(d.storage.getItem(RELOAD_TARGET_KEY) ?? "null") as { codeSha?: unknown; tries?: unknown } | null
-      return t?.codeSha === codeSha && Number.isInteger(t.tries) ? (t.tries as number) : 0
-    } catch {
-      return 0
-    }
-  }
   let staleSightings = 0
 
   const manifest = createPoller(async () => {
@@ -178,7 +198,7 @@ export function startUpdates(d: UpdatesDeps): { stop(): void; halted(): void } {
       d.notice(INCOMPATIBLE_MESSAGE)
       return
     }
-    const tries = reloadsFor(m.codeSha)
+    const tries = reloadsFor(d.storage, m.codeSha)
     if (tries >= MAX_RELOADS_PER_CODE) {
       manifest.stop()
       d.notice(STALE_MESSAGE)

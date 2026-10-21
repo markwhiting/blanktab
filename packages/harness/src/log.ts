@@ -15,8 +15,20 @@ export interface LogFileV1 {
   final: boolean
 }
 
-/** One point of the loss curve: the learner's running prediction loss vs the copy-last baseline, at a sleep. */
-export interface CurvePoint { cu: number; steps: number; predLoss: number; baselineLoss: number }
+/**
+ * One point of the loss curve, at a sleep: the learner's running prediction loss on its own stream vs the copy-last
+ * baseline, and (optional: learners from Plan 04a.2 on) its score on its fixed held-out set, which it never trains on
+ * (decision 0015 §3): the mean loss there and copy-last's on the same transitions.
+ */
+export interface CurvePoint { cu: number; steps: number; predLoss: number; baselineLoss: number; heldOut?: HeldOutScore }
+export interface HeldOutScore { loss: number; baseline: number }
+
+/**
+ * What a curve point's losses must be (predLoss, baselineLoss, heldOut.loss, heldOut.baseline): a finite number >= 0.
+ * The one rule, shared by the writer (session curvePoint) and the parser, so a file the tab writes always parses. No
+ * upper bound: a diverged learner's result is kept on the record (AGENTS.md invariant 7).
+ */
+export const isCurveLoss = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0
 
 /** At most this many curve points per log file (the points since the previous file, thinned if need be). */
 export const MAX_CURVE_POINTS = 64
@@ -40,6 +52,11 @@ export interface LogFileV2 extends Omit<LogFileV1, "schemaVersion"> {
   restores: number
   /** CU spent after a restored checkpoint and thrown away by the restore (not in `cu`). Never decreases. */
   lostCU: number
+  /**
+   * Compute units spent scoring the held-out set (decision 0015 §3), cumulative, not in `cu`. Optional (files written
+   * before it existed have none); finite, >= 0, and never decreasing across seq when present.
+   */
+  evalCU?: number
 }
 
 /** Bound on LogFileV2.restores. */
@@ -63,6 +80,11 @@ export interface SessionRow {
   cu?: number | null
   /** The last curve point's predLoss ÷ baselineLoss (v2 logs), or null without one. Absent in older summaries. */
   lossRatio?: number | null
+  /**
+   * The held-out ratio (decision 0015 §3): heldOut.loss ÷ heldOut.baseline at the latest curve point that has one, or
+   * null without one. Absent in older summaries.
+   */
+  heldOutRatio?: number | null
 }
 
 /** knowledge/summary.json, what the next tab reads. */
@@ -88,13 +110,14 @@ export function parseSessionRow(v: unknown): SessionRow | null {
   if (!isObj(v) || typeof v.learnerId !== "string" || !LEARNER_ID_RE.test(v.learnerId)) return null
   if (!isObj(v.settings) || !isObj(v.hostSig) || !isNum(v.hostSig.cores) || typeof v.hostSig.webgpu !== "boolean") return null
   if (!isNum(v.stepsTotal) || !isNum(v.sessionsSeenAtBirth) || typeof v.final !== "boolean") return null
-  const { lastWrittenAt, cu, lossRatio, ...rest } = v
+  const { lastWrittenAt, cu, lossRatio, heldOutRatio, ...rest } = v
   return {
     ...(rest as unknown as SessionRow),
     ...(isIso(lastWrittenAt) ? { lastWrittenAt } : {}),
     // Numbers or null: anything else (absent, a string, NaN as null) reads as null.
     cu: isNum(cu) && cu >= 0 ? cu : null,
     lossRatio: isNum(lossRatio) && lossRatio >= 0 ? lossRatio : null,
+    heldOutRatio: isNum(heldOutRatio) && heldOutRatio >= 0 ? heldOutRatio : null,
   }
 }
 
@@ -104,10 +127,11 @@ const MAX_SETTING_KEYS = 50
 const MAX_WIDTH = 65_536
 export const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS_V1 = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
-const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates", "restores", "lostCU"]
+const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates", "restores", "lostCU", "evalCU"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
-const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss"]
+const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss", "heldOut"]
+const HELD_OUT_KEYS = ["loss", "baseline"]
 const unknownKey = (o: Record<string, unknown>, allowed: readonly string[], where: string): string | null => {
   const k = Object.keys(o).find(key => !allowed.includes(key))
   return k === undefined ? null : `unknown key ${JSON.stringify(k.slice(0, 80))} in ${where}`
@@ -181,17 +205,27 @@ export function parseLogFile(json: unknown): ParseResult {
     if (!isObj(p)) return fail(`curve[${i}] must be an object`)
     const pk = unknownKey(p, CURVE_KEYS, `curve[${i}]`)
     if (pk) return fail(pk)
-    if (!isNonNeg(p.cu) || !isNonNegInt(p.steps) || !isNonNeg(p.predLoss) || !isNonNeg(p.baselineLoss)) {
+    if (!isNonNeg(p.cu) || !isNonNegInt(p.steps) || !isCurveLoss(p.predLoss) || !isCurveLoss(p.baselineLoss)) {
       return fail(`curve[${i}]: cu, predLoss and baselineLoss must be finite numbers >= 0 and steps a non-negative integer`)
     }
     const prev = curve[i - 1]
     if (prev && (p.cu < prev.cu || p.steps < prev.steps)) return fail(`curve[${i}] goes back in cu or steps`)
     if (p.cu > cu || p.steps > json.stepsTotal) return fail(`curve[${i}] is ahead of the file's cu or stepsTotal`)
-    curve.push({ cu: p.cu, steps: p.steps, predLoss: p.predLoss, baselineLoss: p.baselineLoss })
+    let heldOut: HeldOutScore | undefined
+    if ("heldOut" in p) {
+      const h = p.heldOut
+      if (!isObj(h)) return fail(`curve[${i}].heldOut must be an object`)
+      const hk = unknownKey(h, HELD_OUT_KEYS, `curve[${i}].heldOut`)
+      if (hk) return fail(hk)
+      if (!(isCurveLoss(h.loss) && isCurveLoss(h.baseline))) return fail(`curve[${i}].heldOut: loss and baseline must be finite numbers >= 0`)
+      heldOut = { loss: h.loss, baseline: h.baseline }
+    }
+    curve.push({ cu: p.cu, steps: p.steps, predLoss: p.predLoss, baselineLoss: p.baselineLoss, ...(heldOut ? { heldOut } : {}) })
   }
   if (!isNonNegInt(json.skippedUpdates)) return fail("skippedUpdates must be a non-negative finite integer")
   if (!(isNonNegInt(json.restores) && json.restores <= MAX_RESTORES)) return fail(`restores must be an integer in [0, ${MAX_RESTORES}]`)
   if (!isNonNeg(json.lostCU)) return fail("lostCU must be a finite number >= 0")
+  if ("evalCU" in json && !isNonNeg(json.evalCU)) return fail("evalCU must be a finite number >= 0")
   return {
     ok: true,
     value: {
@@ -204,6 +238,7 @@ export function parseLogFile(json: unknown): ParseResult {
       skippedUpdates: json.skippedUpdates,
       restores: json.restores,
       lostCU: json.lostCU,
+      ...("evalCU" in json ? { evalCU: json.evalCU as number } : {}),
     },
   }
 }

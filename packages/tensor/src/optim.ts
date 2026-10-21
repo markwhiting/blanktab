@@ -7,6 +7,13 @@ export interface AdamOptions {
   beta1?: number
   beta2?: number
   eps?: number
+  /**
+   * Decoupled weight decay (AdamW-style, on the parameter, not the gradient): each update of a decayed parameter is
+   * p ← (1 − weightDecay)·p − Adam step. A per-update rate, not scaled by lr. In [0, 1); default 0 (plain Adam, bit-exact).
+   */
+  weightDecay?: number
+  /** The parameters weightDecay applies to (a subset of the optimized ones); default all of them. */
+  decayed?: readonly Tensor[]
 }
 
 /** One parameter's optimizer state, in the order the parameters were passed to the constructor. */
@@ -25,6 +32,8 @@ interface Slot {
   v: Storage
   /** Per-parameter step count, so a parameter skipped (null grad) keeps correct bias correction. */
   t: number
+  /** Decoupled weight decay for this parameter (0: none). */
+  readonly decay: number
 }
 
 const checkLr = (lr: number) => {
@@ -50,6 +59,10 @@ export class Adam {
     }
     if (!(this.eps > 0)) throw new RangeError(`Adam: eps must be > 0, got ${this.eps}`)
     if (new Set(params).size !== params.length) throw new Error("Adam: the same parameter was passed more than once")
+    const wd = opts.weightDecay ?? 0
+    if (!(wd >= 0 && wd < 1)) throw new RangeError(`Adam: weightDecay must be in [0, 1), got ${wd}`)
+    const decayed = new Set(opts.decayed ?? params)
+    for (const d of decayed) if (!params.includes(d)) throw new RangeError("Adam: a decayed tensor is not one of the optimized parameters")
     // A refused allocation part-way frees the moments already made, so a failed constructor leaks nothing.
     const made: Storage[] = []
     const alloc = (p: Tensor) => {
@@ -58,7 +71,7 @@ export class Adam {
       return st
     }
     try {
-      this.slots = params.map((p) => ({ p, m: alloc(p), v: alloc(p), t: 0 }))
+      this.slots = params.map((p) => ({ p, m: alloc(p), v: alloc(p), t: 0, decay: decayed.has(p) ? wd : 0 }))
     } catch (e) {
       made.forEach((st, j) => params[j >> 1]!.backend.dispose(st))
       throw e
@@ -72,7 +85,7 @@ export class Adam {
       if (!g) continue
       if (g.size !== s.p.size) throw new ShapeError(`Adam: grad size ${g.size} does not match parameter size ${s.p.size}`)
       s.t++
-      s.p.backend.adam(s.p.storage, g.storage, s.m, s.v, this.lr, this.beta1, this.beta2, this.eps, s.t)
+      s.p.backend.adam(s.p.storage, g.storage, s.m, s.v, this.lr, this.beta1, this.beta2, this.eps, s.t, s.decay)
     }
   }
 

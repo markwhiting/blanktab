@@ -11,7 +11,8 @@
 // Held-out evaluation (--eval K, default 400): the learner's own stream depends on its curiosity-driven policy
 // (it can park the cursor where nothing changes, or where change is easy), so every --log steps the current
 // weights are also scored, without learning, on a fixed trajectory of K transitions in the same world (a second
-// instance) driven by uniformly random actions, the same for every run of a seed.
+// instance seeded hashSeed(seed, "heldout"), so a different layout from the training world, as the live held-out
+// set does) driven by uniformly random actions, the same for every run of a seed.
 import { createCanvas } from "@napi-rs/canvas"
 import { PRED_FOVEA, PRED_PERIPHERY, decodeMove, type Action, type Observation } from "@blanktab/interface"
 import {
@@ -19,7 +20,7 @@ import {
   type LearnerSettings, type Targets, type UpdateInfo, type Widths,
 } from "@blanktab/learner"
 import { add, backward, composite, createCpuBackend, disposeGraph, linear, mse, noGrad, scale, tensor, type Tensor } from "@blanktab/tensor"
-import { createWorld } from "@blanktab/world"
+import { createWorld, hashSeed } from "@blanktab/world"
 import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS } from "@blanktab/interface"
 
 const args = new Map<string, string>()
@@ -33,7 +34,7 @@ const NO_SLEEP = args.get("sleep") === "off"
 const SHADOW_EVERY = num("shadowEvery", 1) // shadow split measurement every k steps (1 = every step)
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
 const widths: Widths = { cpu: CPU_WIDTHS, gpu: GPU_WIDTHS, tiny: TINY }[args.get("widths") ?? "cpu"]!
-const LIVE: LearnerSettings = { lr: 0.002, headLrScale: 0.086, entropyWeight: 0.025, curiosityWeight: 1.32, bufferSize: 1491, replayPerSleep: 48 }
+const LIVE: LearnerSettings = { lr: 0.002, headLrScale: 0.086, entropyWeight: 0.025, curiosityWeight: 1.32, bufferSize: 1491, replayPerSleep: 48, exploreEpsilon: 0, residualDecay: 0 }
 const settings: LearnerSettings = { ...(args.get("settings") === "default" ? DEFAULT_SETTINGS : LIVE) }
 for (const k of Object.keys(settings) as (keyof LearnerSettings)[]) if (args.has(k)) settings[k] = Number(args.get(k))
 const JSON_OUT = args.get("json")
@@ -72,9 +73,9 @@ function shiftedFovea(prevNative: Uint8Array, dxPx: number, dyPx: number): Float
   return out
 }
 
-/** K+1 observations and the K uniformly random actions between them, in the world of `seed` (a fresh instance). */
+/** K+1 observations and the K uniformly random actions between them, in a fresh world seeded hashSeed(seed, "heldout"). */
 function heldOut(seed: number, k: number): { obs: Observation[]; actions: Action[] } {
-  const w = createWorld({ seed, canvas: createCanvas(320, 200) })
+  const w = createWorld({ seed: hashSeed(seed, "heldout"), canvas: createCanvas(320, 200) })
   let st = (seed * 2654435761 + 12345) >>> 0
   const rnd = () => { st = (st + 0x6d2b79f5) >>> 0; let t = st; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
   const pick = (n: number) => Math.min(n - 1, Math.floor(rnd() * n))
@@ -137,6 +138,7 @@ async function main() {
   const rows: Record<string, number>[] = []
   const moveHist = new Map<string, number>()
   let maxCheckErr = 0
+  const movedLog: number[] = [] // per transition: did the cursor move
   let prevObs: Observation | null = null
   let prevAction: Action | null = null
   let prevTargets: Targets | null = null
@@ -159,6 +161,7 @@ async function main() {
       const realDx = Math.round((obs.cursor.x - prevObs.cursor.x) * 320), realDy = Math.round((obs.cursor.y - prevObs.cursor.y) * 200)
       const shF = sq(shiftedFovea(prevObs.fovea, realDx, realDy), y.fovea)
       win.n++; all.n++
+      movedLog.push(realDx !== 0 || realDy !== 0 ? 1 : 0)
       for (const a of [win, all]) {
         a.add("clP", clP); a.add("clF", clF); a.add("cl", W_P * clP + W_F * clF)
         a.add("shF", shF); a.add("shiftOracle", W_P * clP + W_F * shF)
@@ -187,7 +190,8 @@ async function main() {
         const aT = T(actionOneHot(tr.action), [1, 76])
         const hNow = m.core(it, hT)
         const p = m.predict(hNow, aT, bT)
-        // The predictor's hidden layer z = relu(linear(h) + linear(a)): how many units are alive on this transition.
+        // The predictor's hidden layer z = leakyRelu(linear(h) + linear(a)): how many units are alive (pre-activation > 0,
+        // the regime where a unit passes gradient at full strength) on this transition.
         const q = m.params.length
         const zPre = noGrad(() => composite(() => add(linear(hNow, m.params[q - 8]!, m.params[q - 7]!), linear(aT, m.params[q - 6]!, m.params[q - 5]!))))
         const zv = await zPre.read()
@@ -198,9 +202,14 @@ async function main() {
         const loss = add(scale(lP, W_P), scale(lF, W_F))
         const [vP, vF, vL] = await Promise.all([lP.read(), lF.read(), loss.read()])
         backward(loss)
-        const [gPw, , gFw] = await Promise.all(m.outputParams.map((q) => (q.grad ? q.grad.read() : Promise.resolve(new Float32Array(1)))))
+        const gOut = await Promise.all(m.outputParams.map((q) => (q.grad ? q.grad.read() : Promise.resolve(new Float32Array(q.size)))))
+        const [gPw, , gFw] = gOut
+        // The gradient bar (Task 1, controller rulings): mean |∂L/∂W| over the residual output layers' WEIGHT tensors
+        // (headP.w, headF.w; not the biases, which keep moving even when z is dead).
+        const meanAbs = (gs: Float32Array[]) => { let a = 0, n = 0; for (const g of gs) { for (let k = 0; k < g.length; k++) a += Math.abs(g[k]!); n += g.length } return a / n }
+        const gOutW = meanAbs([gPw!, gFw!])
         const predHw = m.params[m.params.length - 8]!
-        const gH = predHw.grad ? await predHw.grad.read() : new Float32Array(1)
+        const gH = predHw.grad ? await predHw.grad.read() : new Float32Array(predHw.size)
         const lb = lastInfo()?.lossBefore ?? NaN
         maxCheckErr = Math.max(maxCheckErr, Math.abs(vL[0]! - lb) / Math.max(1e-12, lb))
         const nP = m.params.length
@@ -209,7 +218,7 @@ async function main() {
           a.add("lP", vP[0]!); a.add("lF", vF[0]!); a.add("l", vL[0]!)
           a.add("clPs", clP); a.add("clFs", clF)
           a.add("zAlive", alive / zv.length)
-          a.add("gHeadP", norm(gPw!)); a.add("gHeadF", norm(gFw!)); a.add("gPredH", norm(gH))
+          a.add("gHeadP", norm(gPw!)); a.add("gHeadF", norm(gFw!)); a.add("gPredH", norm(gH)); a.add("gOutWMeanAbs", gOutW); a.add("gPredHMeanAbs", meanAbs([gH]))
         }
         win.s.wHeadP = norm(pre[nP - 4]!); win.s.wHeadF = norm(pre[nP - 2]!)
         win.s.bHeadP = norm(pre[nP - 3]!); win.s.bHeadF = norm(pre[nP - 1]!)
@@ -234,7 +243,7 @@ async function main() {
         lF: r("lF"), clF: r("clFs"), ratioF: r("lF") / r("clFs"),
         shiftOracleRatio: win.mean("shiftOracle") / win.mean("cl"),
         chP: win.mean("chP"), chF: win.mean("chF"), moved: win.mean("moved"), move0: win.mean("move0"), btn: win.mean("btn"), key: win.mean("key"),
-        zAlive: r("zAlive"), gHeadP: r("gHeadP"), gHeadF: r("gHeadF"), gPredH: r("gPredH"),
+        zAlive: r("zAlive"), gOutWMeanAbs: r("gOutWMeanAbs"), gPredHMeanAbs: r("gPredHMeanAbs"), gHeadP: r("gHeadP"), gHeadF: r("gHeadF"), gPredH: r("gPredH"),
         wHeadP: win.s.wHeadP ?? NaN, wHeadF: win.s.wHeadF ?? NaN, bHeadP: win.s.bHeadP ?? NaN, bHeadF: win.s.bHeadF ?? NaN,
         sps: step / ((Date.now() - t0) / 1000),
       }
@@ -244,7 +253,7 @@ async function main() {
         `step ${step} cu ${f(row.cu, 1)} | heldout ${f(row.evalRatio, 5)} (P ${f(row.evalRatioP, 4)} F ${f(row.evalRatioF, 4)}) | ema ${f(row.emaRatio, 5)} win ${f(row.winRatio, 5)} | P ${f(row.lP, 6)}/${f(row.clP, 6)}=${f(row.ratioP, 5)}`
         + ` F ${f(row.lF, 6)}/${f(row.clF, 6)}=${f(row.ratioF, 5)} | shiftOracle ${f(row.shiftOracleRatio, 4)}`
         + ` | chP ${f(row.chP, 2)} chF ${f(row.chF, 2)} moved ${f(row.moved, 2)} m0 ${f(row.move0, 2)} btn ${f(row.btn, 2)} key ${f(row.key, 2)}`
-        + ` | zAlive ${f(row.zAlive, 3)} | |g| P ${f(row.gHeadP)} F ${f(row.gHeadF)} predH ${f(row.gPredH)} | |W| P ${f(row.wHeadP)} F ${f(row.wHeadF)} b ${f(row.bHeadP)}/${f(row.bHeadF)} | ${f(row.sps, 1)} st/s`,
+        + ` | zAlive ${f(row.zAlive, 3)} gOutW ${f(row.gOutWMeanAbs)} gPredH ${f(row.gPredHMeanAbs)} | |g| P ${f(row.gHeadP)} F ${f(row.gHeadF)} predH ${f(row.gPredH)} | |W| P ${f(row.wHeadP)} F ${f(row.wHeadF)} b ${f(row.bHeadP)}/${f(row.bHeadF)} | ${f(row.sps, 1)} st/s`,
       )
       win = new Acc()
     }
@@ -259,6 +268,9 @@ async function main() {
     shareOfCopyLastFromFovea: (W_F * all.mean("clF")) / all.mean("cl"),
     shiftOracleRatio: all.mean("shiftOracle") / all.mean("cl"),
     chP: all.mean("chP"), chF: all.mean("chF"), moved: all.mean("moved"),
+    movedLast1k: movedLog.slice(-1000).reduce((a, v) => a + v, 0) / Math.max(1, Math.min(1000, movedLog.length)),
+    gOutWMeanAbsFinal: rows.at(-1)?.gOutWMeanAbs ?? NaN,
+    gPredHMeanAbsFinal: rows.at(-1)?.gPredHMeanAbs ?? NaN,
     moveMagnitudes: Object.fromEntries(moveHist), maxShadowCheckRelErr: maxCheckErr, shadowSamples: sn,
     heldOut: rows.map((r) => [r.step, r.evalRatio]),
   }

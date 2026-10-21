@@ -40,4 +40,5 @@ export type FromWorker =
   | { type: "halted" }
   /** The answer to CheckpointNowMessage `id`: saved, or not (skipped updates outstanding, or the life ended): ask again later. */
   | { type: "checkpointed"; id: number; saved: boolean }
-  | { type: "error"; message: string }
+  /** `olderVersion`: its checkpoint is from an older learner state version (LearnerStateVersionError.older). */
+  | { type: "error"; message: string; olderVersion?: boolean }

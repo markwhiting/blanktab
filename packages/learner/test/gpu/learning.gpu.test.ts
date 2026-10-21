@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { createCpuBackend, createWebGpuBackend, isSoftwareAdapter } from "@blanktab/tensor"
 import type { Backend } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, createLearner } from "../../src/learner"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, type Action } from "@blanktab/interface"
+import { createRng } from "@blanktab/tensor"
+import { DEFAULT_SETTINGS, createLearner, type HeldOutSet } from "../../src/learner"
 import type { Widths } from "../../src/model"
 import { createSyntheticStream } from "../synthetic"
 
@@ -13,8 +15,22 @@ const STEPS = 300
 const SEED = 1
 const allowSoftware = (import.meta as ImportMeta & { env: Record<string, string | undefined> }).env.GPU_ALLOW_SOFTWARE === "1"
 
+/** A held-out trajectory of the synthetic stream under uniformly random actions (decision 0015 §3). */
+function heldOutSet(): HeldOutSet {
+  const w = createSyntheticStream({ start: { x: 60, y: 60 } })
+  const rnd = createRng(5)
+  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
+  const obs = [w.observe()]
+  const actions: Action[] = []
+  for (let i = 0; i < 16; i++) {
+    const a = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+    w.act(a); actions.push(a); obs.push(w.observe())
+  }
+  return { obs, actions }
+}
+
 async function live(backend: Backend) {
-  const learner = await createLearner({ backend, seed: SEED, widths: TINY, settings: { ...DEFAULT_SETTINGS } })
+  const learner = await createLearner({ backend, seed: SEED, widths: TINY, settings: { ...DEFAULT_SETTINGS }, heldOut: heldOutSet() })
   const world = createSyntheticStream()
   const moves: number[] = []
   for (let i = 0; i < STEPS; i++) {
@@ -22,7 +38,10 @@ async function live(backend: Backend) {
     moves.push(a.move)
     world.act(a)
   }
-  const stats = learner.stats()
+  // Training is identical with or without the held-out set; the sleep scores it (after its replay).
+  const beforeSleep = learner.stats()
+  await learner.sleep()
+  const stats = { ...beforeSleep, heldOutLoss: learner.stats().heldOutLoss, heldOutBaseline: learner.stats().heldOutBaseline, evalCU: learner.stats().evalCU }
   const params = await learner.readParams()
   learner.dispose()
   return { stats, moves, outputs: params.slice(-4) }
@@ -43,11 +62,17 @@ describe("the learner on WebGPU", () => {
     console.log(JSON.stringify({
       adapter: gpu.adapterInfo, cpu: { predLoss: cpu.stats.predLoss, baselineLoss: cpu.stats.baselineLoss, cu: cpu.stats.cu },
       gpu: { predLoss: onGpu.stats.predLoss, baselineLoss: onGpu.stats.baselineLoss, cu: onGpu.stats.cu, skipped: onGpu.stats.skippedUpdates },
+      heldOut: { cpu: [cpu.stats.heldOutLoss, cpu.stats.heldOutBaseline, cpu.stats.evalCU], gpu: [onGpu.stats.heldOutLoss, onGpu.stats.heldOutBaseline, onGpu.stats.evalCU] },
       relPredLoss: rel, sameMoves: `${sameMoves}/${STEPS}`, gpuOutputMaxAbs: outMax, cpuOutputMaxAbs: cpu.outputs.map(maxAbs),
     }))
     expect(Number.isFinite(onGpu.stats.predLoss)).toBe(true)
     expect(onGpu.stats.skippedUpdates).toBe(0)
     expect(rel).toBeLessThanOrEqual(0.02)
     for (const m of outMax) expect(m).toBeGreaterThan(0)
+    // The held-out score on WebGPU matches the CPU's (same weights up to float error), billed the same evalCU.
+    expect(Math.abs(onGpu.stats.heldOutLoss - cpu.stats.heldOutLoss) / cpu.stats.heldOutLoss).toBeLessThanOrEqual(0.02)
+    expect(onGpu.stats.heldOutBaseline).toBe(cpu.stats.heldOutBaseline)
+    expect(onGpu.stats.evalCU).toBeCloseTo(cpu.stats.evalCU, 12)
+    expect(onGpu.stats.evalCU).toBeGreaterThan(0)
   })
 })

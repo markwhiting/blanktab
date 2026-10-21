@@ -23,9 +23,29 @@ export interface LearnerSettings {
   replayPerSleep: number
   /** The predictor's residual output layers train at lr × headLrScale (everything else at lr). */
   headLrScale: number
+  /**
+   * ε-uniform exploration: with this probability, each action factor is drawn uniformly (from the learner's RNG)
+   * instead of from the policy. The actor-critic update uses the action actually taken, with its log-probability
+   * under the policy as before and no importance weighting: at ε ≤ 0.5 the behaviour policy stays close to π and
+   * the bias is accepted for v1 (controller ruling, Plan 04a.2 Task 1). Clamped into EXPLORE_EPSILON_RANGE.
+   */
+  exploreEpsilon: number
+  /**
+   * Decoupled weight decay toward zero (AdamW-style, on the parameter) on Model.residualParams only — the shift gate
+   * and the residual output layers, which express "deviation from copy-last" and should return to it without
+   * continuing evidence. Per update of those parameters: p ← (1 − residualDecay)·p − Adam step (not scaled by lr).
+   * Ceiling: Adam moves a parameter by at most about its lr per update, so at equilibrium |p| ≲ lr_eff / residualDecay
+   * — for the shift gate lr / λ (0.5 at the defaults), for the output layers lr·headLrScale / λ (0.05 at the
+   * defaults). A residual must keep being re-earned by the gradient to stay near that ceiling.
+   * 0 is off and bit-exact to the learner without it. Clamped into RESIDUAL_DECAY_RANGE.
+   */
+  residualDecay: number
 }
 export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({
-  lr: 1e-3, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1,
+  // lr 5e-4 and residualDecay 1e-3: Plan 04a.2 Task 1 sweep (held-out ≤ 0.95 at 5k steps on 5 of 6 seeds; see the
+  // task-1 report). exploreEpsilon 0.1: controller ruling.
+  lr: 5e-4, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, exploreEpsilon: 0.1,
+  residualDecay: 1e-3,
 })
 export interface LearnerStats {
   steps: number
@@ -37,7 +57,26 @@ export interface LearnerStats {
   /** Skipped updates since the last applied one (reset by any applied update): the harness restores the last checkpoint after N. */
   consecutiveSkips: number
   sleeps: number
+  /**
+   * Compute units spent scoring the held-out set (decision 0015 §3): FLOP deltas on the learner's backend around the
+   * scoring only, never included in `cu`.
+   */
+  evalCU: number
+  /** Mean prediction loss on the held-out set at the last sleep (forward only, from the zero state); NaN until then or without a set. */
+  heldOutLoss: number
+  /** Copy-last's mean loss on the same transitions (the same size weighting); NaN until the first scoring or without a set. */
+  heldOutBaseline: number
 }
+
+/**
+ * A fixed held-out trajectory (decision 0015 §3): `obs.length === actions.length + 1`, transition i being
+ * (obs[i], actions[i]) → obs[i+1]. Recorded at birth by the caller (the learner cannot see the world): in the tab, 64
+ * transitions of a separate world seeded hashSeed(learnerSeed, "heldout") under uniformly random actions. It is only
+ * ever scored, never trained on, and is kept for the learner's whole life (saved and restored with it).
+ */
+export interface HeldOutSet { obs: Observation[]; actions: Action[] }
+/** Bounds on a held-out set's transitions (a hostile or corrupt checkpoint cannot make a sleep arbitrarily expensive). */
+export const HELD_OUT_MAX = 1024
 
 /**
  * Everything a learner carries between steps, as plain typed arrays and JSON (structured-clone friendly, for
@@ -63,6 +102,8 @@ export interface LearnerState {
   /** The replay buffer, oldest first. */
   replay: Transition[]
   stats: LearnerStats
+  /** The learner's held-out set (fixed at birth), or null for a learner born without one. */
+  heldOut: HeldOutSet | null
 }
 
 /** What one online update did, for instrumentation and tests (not part of the learner's inputs). */
@@ -85,6 +126,8 @@ export interface TrainableLearner extends Learner {
    * Consolidation condition A: replayPerSleep prediction updates, each on one transition sampled uniformly from
    * the replay buffer with the learner's RNG (core from the stored h_{t-2} and obs, predict with the stored action
    * against the next frame; size-weighted MSE, Adam). Counts one sleep, even on an empty buffer (no updates).
+   * Then, if the learner has a held-out set, scores it (no update, no RNG draw): stats heldOutLoss and
+   * heldOutBaseline, its FLOPs billed to evalCU, not cu.
    */
   sleep(): Promise<void>
   /** A snapshot of the whole learner (independent of it: later steps do not change it, nor it them). */
@@ -101,10 +144,27 @@ export interface TrainableLearner extends Learner {
   dispose(): void
 }
 
+/**
+ * A checkpoint's learner state is of another LEARNER_STATE_VERSION than this code's: this code cannot resume it.
+ * `older`: it is from an older version (the learner was born on older code). A RangeError like any bad checkpoint.
+ */
+export class LearnerStateVersionError extends RangeError {
+  readonly older: boolean
+  constructor(readonly found: unknown) {
+    super(`LearnerState: version ${String(found)}, expected ${LEARNER_STATE_VERSION}`)
+    this.name = "LearnerStateVersionError"
+    this.older = typeof found === "number" && found < LEARNER_STATE_VERSION
+  }
+}
+
 /** The learning rate is clamped into this range (Review Focus 5). */
 export const LR_RANGE = [1e-5, 1e-2] as const
 /** headLrScale is clamped into this range. */
 export const HEAD_LR_SCALE_RANGE = [0.01, 1] as const
+/** exploreEpsilon is clamped into this range. */
+export const EXPLORE_EPSILON_RANGE = [0, 0.5] as const
+/** residualDecay is clamped into this range. */
+export const RESIDUAL_DECAY_RANGE = [0, 1e-2] as const
 /** TD discount. */
 export const GAMMA = 0.9
 /** Smoothing of the predLoss / baselineLoss moving averages. */
@@ -123,7 +183,7 @@ const FACTOR_ROWS = FACTORS.map((n, f) => Int32Array.from({ length: n }, (_, k) 
 const isPosInt = (v: number) => Number.isInteger(v) && v >= 1
 const isNonNeg = (v: number) => Number.isFinite(v) && v >= 0
 
-/** Validates settings and clamps lr into LR_RANGE. Throws RangeError for values that cannot be clamped. */
+/** Validates settings and clamps lr, headLrScale, exploreEpsilon and residualDecay into their ranges. Throws RangeError for values that cannot be clamped. */
 export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.lr)) throw new RangeError(`lr must be finite, got ${s.lr}`)
   if (!isNonNeg(s.entropyWeight)) throw new RangeError(`entropyWeight must be finite and >= 0, got ${s.entropyWeight}`)
@@ -131,8 +191,13 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!isPosInt(s.bufferSize)) throw new RangeError(`bufferSize must be an integer >= 1, got ${s.bufferSize}`)
   if (!isPosInt(s.replayPerSleep)) throw new RangeError(`replayPerSleep must be an integer >= 1, got ${s.replayPerSleep}`)
   if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
+  if (!Number.isFinite(s.exploreEpsilon)) throw new RangeError(`exploreEpsilon must be finite, got ${s.exploreEpsilon}`)
+  if (!Number.isFinite(s.residualDecay)) throw new RangeError(`residualDecay must be finite, got ${s.residualDecay}`)
   const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
-  return { ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE) }
+  return {
+    ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE),
+    exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE), residualDecay: clamp(s.residualDecay, RESIDUAL_DECAY_RANGE),
+  }
 }
 
 /** Floor of the curiosity scale, so progress on a near-zero loss cannot blow up. */
@@ -171,6 +236,20 @@ function sampleFactor(logits: Float32Array, off: number, n: number, rng: () => n
   return n - 1
 }
 
+/**
+ * a_t from the policy logits [76], one factor at a time (move, button, scroll, key). With probability
+ * `exploreEpsilon` a factor is drawn uniformly instead of from softmax(logits). At ε = 0 no extra RNG draw is made,
+ * so the learner is bit-identical to one without exploration.
+ */
+export function sampleAction(logits: Float32Array, exploreEpsilon: number, rng: () => number): Action {
+  const factor = (f: number) => {
+    const n = FACTORS[f]!
+    if (exploreEpsilon > 0 && rng() < exploreEpsilon) return Math.min(n - 1, Math.floor(rng() * n))
+    return sampleFactor(logits, OFFSETS[f]!, n, rng)
+  }
+  return { move: factor(0), button: factor(1), scroll: factor(2), key: factor(3) }
+}
+
 const isUint32 = (v: unknown) => Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 32
 const PERIPHERY_LEN = PERIPHERY.width * PERIPHERY.height * PERIPHERY.channels
 const FOVEA_LEN = FOVEA.width * FOVEA.height * FOVEA.channels
@@ -196,11 +275,29 @@ const allFinite = (a: Float32Array) => {
   for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i]!)) return false
   return true
 }
-const STATE_KEYS = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats"] as const
+const STATE_KEYS = ["version", "seed", "widths", "settings", "params", "adam", "rng", "h", "last", "replay", "stats", "heldOut"] as const
+
+/** Throws RangeError unless `h` is a well-formed held-out set (see HeldOutSet). */
+function checkHeldOut(h: unknown, where: string): asserts h is HeldOutSet {
+  const fail = (what: string) => { throw new RangeError(`${where}: ${what}`) }
+  if (!isRecord(h) || !Array.isArray(h.obs) || !Array.isArray(h.actions)) return fail("must be { obs, actions } arrays")
+  const n = h.actions.length
+  if (!(n >= 1 && n <= HELD_OUT_MAX)) fail(`must have 1 to ${HELD_OUT_MAX} transitions, has ${n}`)
+  if (h.obs.length !== n + 1) fail(`needs ${n + 1} observations for ${n} transitions, has ${h.obs.length}`)
+  h.obs.forEach((o: unknown, i) => {
+    if (!(isRecord(o) && o.periphery instanceof Uint8Array && o.fovea instanceof Uint8Array && isRecord(o.cursor)
+      && typeof o.cursor.x === "number" && typeof o.cursor.y === "number" && typeof o.buttonHeld === "boolean")) fail(`obs[${i}] is malformed`)
+    const ob = o as Observation
+    if (ob.periphery.length !== PERIPHERY_LEN || ob.fovea.length !== FOVEA_LEN) fail(`obs[${i}]: malformed frame`)
+  })
+  h.actions.forEach((a: unknown, i) => { if (!isRecord(a) || !isValidAction(a as unknown as Action)) fail(`actions[${i}] is not a valid action`) })
+}
 
 function checkState(s: LearnerState): void {
   const fail = (what: string) => { throw new RangeError(`LearnerState: ${what}`) }
   if (!isRecord(s)) fail("not an object")
+  // First: a state of another version is told apart from a corrupt one, whatever else it holds.
+  if ("version" in s && s.version !== LEARNER_STATE_VERSION) throw new LearnerStateVersionError(s.version)
   for (const k of STATE_KEYS) if (!(k in s)) fail(`missing ${k}`)
   const isF32 = (v: unknown) => v instanceof Float32Array
   if (!isRecord(s.widths) || !isRecord(s.settings) || !isRecord(s.stats)) fail("widths, settings and stats must be objects")
@@ -213,7 +310,6 @@ function checkState(s: LearnerState): void {
   if (!Array.isArray(s.replay) || !s.replay.every(tr => isRecord(tr) && isRecord(tr.obs) && isRecord(tr.next) && isRecord(tr.action) && isF32(tr.hIn))) {
     fail("replay is malformed")
   }
-  if (s.version !== LEARNER_STATE_VERSION) fail(`version ${String(s.version)}, expected ${LEARNER_STATE_VERSION}`)
   if (!isUint32(s.seed)) fail(`seed must be a uint32, got ${s.seed}`)
   for (const k of ["conv1", "conv2", "enc", "hidden"] as const) if (!isPosInt(s.widths[k])) fail(`widths.${k} must be an integer >= 1`)
   const clamped = clampSettings(s.settings)
@@ -261,6 +357,13 @@ function checkState(s: LearnerState): void {
     if (!(Number.isInteger(s.stats[k]) && s.stats[k] >= 0)) fail(`stats.${k} = ${s.stats[k]}`)
   }
   if (!(Number.isFinite(s.stats.cu) && s.stats.cu >= 0)) fail(`stats.cu = ${s.stats.cu}`)
+  if (!(Number.isFinite(s.stats.evalCU) && s.stats.evalCU >= 0)) fail(`stats.evalCU = ${s.stats.evalCU}`)
+  for (const k of ["heldOutLoss", "heldOutBaseline"] as const) {
+    const v = s.stats[k]
+    // NaN (not scored yet, or no set) or a finite loss: a scoring never stores anything else.
+    if (!(typeof v === "number" && (Number.isNaN(v) || (Number.isFinite(v) && v >= 0)))) fail(`stats.${k} = ${v}`)
+  }
+  if (s.heldOut !== null) checkHeldOut(s.heldOut, "LearnerState: heldOut")
   if ((s.last === null) !== (s.stats.steps === 0)) fail("last must be null exactly when no step has been taken")
 }
 
@@ -291,7 +394,7 @@ interface Last {
  *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA before this step, 1e-6), −1, 1), L_after
  *     being the same loss with the new weights;
  *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float read (logits, V(h_t)); a_t is sampled
- *     per factor with the learner's seeded RNG;
+ *     per factor with the learner's seeded RNG, uniformly with probability exploreEpsilon (sampleAction);
  *  4. updates the actor-critic on a_{t-1}: A = curiosityWeight·r + γ·V(h_t) − V(h_{t-1}),
  *     loss = −logπ(a_{t-1})·stopgrad(A) + A² − entropyWeight·H(π), one Adam step;
  *  5. stores (obs_{t-1}, h_{t-2}, a_{t-1}, obs_t) in the FIFO replay buffer and carries h ← h_t (detached).
@@ -312,11 +415,22 @@ interface Last {
 export async function createLearner(opts: {
   backend: Backend
   onUpdate?: (u: UpdateInfo) => void
-} & ({ seed: number; widths: Widths; settings: LearnerSettings; state?: undefined } | { state: LearnerState })): Promise<TrainableLearner> {
+} & (
+  | { seed: number; widths: Widths; settings: LearnerSettings; heldOut?: HeldOutSet; state?: undefined }
+  | { state: LearnerState }
+)): Promise<TrainableLearner> {
   const { backend } = opts
   // The learner owns its copy. Any state given (even a falsy one) is a checkpoint and is validated.
   const saved = opts.state !== undefined ? structuredClone(opts.state) : null
   if (opts.state !== undefined) validateState(saved as LearnerState)
+  const bornWith: unknown = opts.state === undefined ? opts.heldOut : undefined
+  if (bornWith !== undefined) checkHeldOut(bornWith, "heldOut")
+  /** The held-out set, the learner's own copy, fixed for its life. */
+  const heldOut: HeldOutSet | null = saved ? saved.heldOut : bornWith !== undefined ? structuredClone(bornWith) : null
+  /** Copy-last on the held-out set: a constant of the set, computed on the host once. */
+  const heldOutCopyLast = heldOut
+    ? heldOut.actions.reduce((acc, _, i) => acc + copyLastBaseline(targetsFromObs(heldOut.obs[i]!), targetsFromObs(heldOut.obs[i + 1]!)), 0) / heldOut.actions.length
+    : Number.NaN
   const seed = saved ? saved.seed : (opts as { seed: number }).seed
   const widths: Widths = saved ? saved.widths : (opts as { widths: Widths }).widths
   const settings = saved ? saved.settings : clampSettings((opts as { settings: LearnerSettings }).settings)
@@ -333,7 +447,10 @@ export async function createLearner(opts: {
   // Action sampling has its own stream, independent of the initializer's.
   const rng = createRng((seed ^ 0x9e3779b9) >>> 0)
   const replay = new ReplayBuffer(settings.bufferSize)
-  const stats: LearnerStats = { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0 }
+  const stats: LearnerStats = {
+    steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0,
+    evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN,
+  }
 
   // Every tensor made by `t` while the learner is being constructed is registered (see `owned` below).
   let constructing: ((x: Tensor) => void) | null = null
@@ -381,8 +498,11 @@ export async function createLearner(opts: {
   let selL: Tensor
   let selV: Tensor
   try {
-    opts_.push(own(new Adam(model.params.filter((p) => !outputSet.has(p)), { lr: settings.lr })))
-    opts_.push(own(new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale })))
+    // residualDecay acts on Model.residualParams only: the shift gate (main optimizer) and the output layers.
+    const main = model.params.filter((p) => !outputSet.has(p))
+    const decay = { weightDecay: settings.residualDecay }
+    opts_.push(own(new Adam(main, { lr: settings.lr, ...decay, decayed: model.residualParams.filter((p) => !outputSet.has(p)) })))
+    opts_.push(own(new Adam([...model.outputParams], { lr: settings.lr * settings.headLrScale, ...decay })))
     const selLogits = new Float32Array(ACTION_DIM * (ACTION_DIM + 1))
     for (let k = 0; k < ACTION_DIM; k++) selLogits[k * (ACTION_DIM + 1) + k] = 1
     const selValue = new Float32Array(ACTION_DIM + 1)
@@ -426,10 +546,12 @@ export async function createLearner(opts: {
    * Size-weighted MSE of predict(core(inputs, hIn), action, base) against y. `base` is the targets of the frame
    * `inputs` came from (residual predictor). Builds a graph unless under noGrad.
    */
-  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) => {
-    const p = model.predict(model.core(inputs, hIn), action, base)
-    return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
-  }
+  const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) =>
+    // A composite: if building it fails part-way, everything it made is freed (nothing unreachable is left).
+    composite(() => {
+      const p = model.predict(model.core(inputs, hIn), action, base)
+      return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
+    })
 
   /** −logπ(a)·A + (target − V)² − β·H(π) on the heads at the detached h. `adv` is stopgrad(target − V). */
   const actorCriticLoss = (hPrev: Tensor, action: Action, target: number) => {
@@ -454,13 +576,26 @@ export async function createLearner(opts: {
 
   /** Builds the replay of one transition: its prediction loss (a graph unless under noGrad) and the constants it used. */
   const replayed = (tr: Transition) => {
-    const inputs = upload(obsToInputs(tr.obs))
-    const base = targetTensors(targetsFromObs(tr.obs))
-    const y = targetTensors(targetsFromObs(tr.next))
-    const hT = hTensor(tr.hIn)
-    const aT = t(actionOneHot(tr.action), [1, ACTION_DIM])
-    const free = () => { for (const x of [inputs.periphery, inputs.fovea, inputs.proprio, base.periphery, base.fovea, y.periphery, y.fovea, hT, aT]) x.dispose() }
-    return { loss: () => predictionLoss(inputs, hT, aT, base, y), free }
+    // Every constant is freed by `free`, and all of them if an upload fails part-way (nothing is left half-made).
+    const made: Tensor[] = []
+    const free = () => { for (const x of made.splice(0)) x.dispose() }
+    const T = (d: Float32Array, shape: number[]) => { const x = t(d, shape); made.push(x); return x }
+    try {
+      const ins = obsToInputs(tr.obs), b = targetsFromObs(tr.obs), n = targetsFromObs(tr.next)
+      const inputs: InputTensors = {
+        periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
+        fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
+        proprio: T(ins.proprio, [1, 3]),
+      }
+      const base = { periphery: T(b.periphery, [1, PRED_P]), fovea: T(b.fovea, [1, PRED_F]) }
+      const y = { periphery: T(n.periphery, [1, PRED_P]), fovea: T(n.fovea, [1, PRED_F]) }
+      const hT = T(tr.hIn, [1, widths.hidden])
+      const aT = T(actionOneHot(tr.action), [1, ACTION_DIM])
+      return { loss: () => predictionLoss(inputs, hT, aT, base, y), free }
+    } catch (e) {
+      free()
+      throw e
+    }
   }
 
   async function sleepNow(): Promise<void> {
@@ -468,30 +603,96 @@ export async function createLearner(opts: {
     for (let k = 0; k < settings.replayPerSleep && replay.size > 0; k++) {
       const tr = replay.at(Math.min(replay.size - 1, Math.floor(rng() * replay.size)))
       const r = replayed(tr)
-      const loss = r.loss()
-      const l = await scalar(loss)
-      const ok = Number.isFinite(l)
-      if (ok) {
-        backward(loss)
-        opt.step()
-        opt.zeroGrad()
+      let loss: Tensor | null = null
+      try {
+        loss = r.loss()
+        const l = await scalar(loss)
+        const ok = Number.isFinite(l)
+        if (ok) {
+          backward(loss)
+          opt.step()
+        }
+        countUpdate(ok)
+      } finally {
+        opt.zeroGrad() // also after a failure part-way through backward: no parameter keeps a stray gradient
+        if (loss) disposeGraph(loss, [])
+        r.free()
       }
-      disposeGraph(loss, [])
-      r.free()
-      countUpdate(ok)
     }
     stats.sleeps++
     stats.cu += (backend.stats.flops - flops0) / 1e9
+    await scoreHeldOut()
+  }
+
+  /**
+   * The held-out check (decision 0015 §3): the current weights on the fixed held-out trajectory, forward only (noGrad,
+   * no update, no RNG draw), the core run along it from the zero recurrent state. One read. Its FLOPs go to evalCU.
+   */
+  async function scoreHeldOut(): Promise<void> {
+    if (!heldOut) return
+    const flops0 = backend.stats.flops
+    const n = heldOut.actions.length
+    /** Every tensor this scoring holds right now (freed at the end, or on any failure: nothing leaks). */
+    const held = new Set<Tensor>()
+    const keep = <T extends Tensor>(x: T): T => { held.add(x); return x }
+    const drop = (...xs: Tensor[]) => { for (const x of xs) { held.delete(x); x.dispose() } }
+    const T = (d: Float32Array, shape: number[]) => keep(t(d, shape))
+    const targetsOf = (o: Observation): TargetTensors => {
+      const y = targetsFromObs(o)
+      return { periphery: T(y.periphery, [1, PRED_P]), fovea: T(y.fovea, [1, PRED_F]) }
+    }
+    try {
+      let hh = keep(model.zeroState())
+      let total: Tensor | null = null
+      let base = targetsOf(heldOut.obs[0]!)
+      for (let i = 0; i < n; i++) {
+        const ins = obsToInputs(heldOut.obs[i]!)
+        const inputs: InputTensors = {
+          periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
+          fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
+          proprio: T(ins.proprio, [1, 3]),
+        }
+        const y = targetsOf(heldOut.obs[i + 1]!)
+        const aT = T(actionOneHot(heldOut.actions[i]!), [1, ACTION_DIM])
+        const h0 = hh
+        const hNext = keep(noGrad(() => composite(() => model.core(inputs, h0))))
+        drop(h0)
+        hh = hNext
+        const b = base
+        const li = keep(noGrad(() => composite(() => {
+          const p = model.predict(hNext, aT, b)
+          return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
+        })))
+        const prev: Tensor | null = total
+        total = prev ? keep(noGrad(() => composite(() => add(prev, li)))) : li
+        if (prev) drop(prev, li) // li is held until it is merged into the running total
+        // This step's constants are done with, except y: it is the next transition's base.
+        drop(b.periphery, b.fovea, inputs.periphery, inputs.fovea, inputs.proprio, aT)
+        base = y
+      }
+      const loss = (await scalar(total!)) / n
+      stats.heldOutLoss = Number.isFinite(loss) ? loss : Number.NaN
+      stats.heldOutBaseline = heldOutCopyLast
+    } finally {
+      for (const x of held) x.dispose()
+      stats.evalCU += (backend.stats.flops - flops0) / 1e9
+    }
   }
 
   async function replayLossNow(): Promise<number> {
     let total = 0
     for (const tr of replay.toArray()) {
       const r = replayed(tr)
-      const loss = noGrad(() => composite(r.loss))
-      total += await scalar(loss)
-      loss.dispose()
-      r.free()
+      try {
+        const loss = noGrad(() => composite(r.loss))
+        try {
+          total += await scalar(loss)
+        } finally {
+          loss.dispose()
+        }
+      } finally {
+        r.free()
+      }
     }
     return replay.size > 0 ? total / replay.size : Number.NaN
   }
@@ -512,6 +713,7 @@ export async function createLearner(opts: {
       last: last && { obs: last.obs, action: last.action, hIn: hInData },
       replay: replay.toArray(),
       stats: { ...stats },
+      heldOut,
     } satisfies LearnerState)
   }
 
@@ -579,12 +781,7 @@ export async function createLearner(opts: {
     const [headsOut, hNextData] = await Promise.all([headsT.read(), hNext.read()])
     const logits = headsOut.subarray(0, ACTION_DIM)
     const valueNext = headsOut[ACTION_DIM]!
-    const action: Action = {
-      move: sampleFactor(logits, OFFSETS[0]!, FACTORS[0], rng),
-      button: sampleFactor(logits, OFFSETS[1]!, FACTORS[1], rng),
-      scroll: sampleFactor(logits, OFFSETS[2]!, FACTORS[2], rng),
-      key: sampleFactor(logits, OFFSETS[3]!, FACTORS[3], rng),
-    }
+    const action = sampleAction(logits, settings.exploreEpsilon, rng)
 
     // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
     if (last && info && Number.isFinite(info.lossAfter)) {

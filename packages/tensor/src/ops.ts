@@ -37,6 +37,9 @@ function record(out: Tensor, parents: Tensor[], backward: GradNode["backward"]):
  * except through the result. Tensors with a graph node that escape stay owned by the graph
  * (freed by `disposeGraph`). Wrap acting/inference code (under noGrad or on constants) in a
  * composite so its temporaries are freed and only the result is left for the caller to dispose.
+ *
+ * If `fn` throws (e.g. the device refuses an allocation part-way), nothing it made is reachable: every tensor it
+ * created is freed (graph nodes included; never a view of an outside tensor's storage) and the error is rethrown.
  */
 export function composite(fn: () => Tensor): Tensor {
   const recorded: Recorded[] = []
@@ -44,9 +47,12 @@ export function composite(fn: () => Tensor): Tensor {
   let result: Tensor
   try {
     result = fn()
-  } finally {
+  } catch (e) {
     compositeScopes.pop()
+    freeAll(recorded)
+    throw e
   }
+  compositeScopes.pop()
   const created = new Set(recorded.map((r) => r.out))
   const referenced = new Set<Tensor>()
   for (const { out } of recorded) for (const p of out._node?.parents ?? []) referenced.add(p)
@@ -73,6 +79,21 @@ export function composite(fn: () => Tensor): Tensor {
   return result
 }
 
+/** Frees every tensor a failed scope created, once per storage, sparing views of tensors from outside it. */
+function freeAll(recorded: Recorded[]): void {
+  const created = new Set(recorded.map((r) => r.out))
+  const foreign = new Set<Storage>()
+  for (const { out, parents } of recorded) {
+    if (parents.some((p) => p.storage === out.storage && !created.has(p))) foreign.add(out.storage)
+  }
+  const freed = new Set<Storage>()
+  for (const { out } of recorded) {
+    if (foreign.has(out.storage) || freed.has(out.storage)) continue
+    freed.add(out.storage)
+    out.dispose()
+  }
+}
+
 // ---- backward helpers (storage-level; never record) ----
 
 /**
@@ -81,7 +102,13 @@ export function composite(fn: () => Tensor): Tensor {
  */
 function scoped<T extends (Tensor | null)[]>(fn: (tmp: (t: Tensor) => Tensor) => T): T {
   const temps: Tensor[] = []
-  const out = fn((t) => (temps.push(t), t))
+  let out: T
+  try {
+    out = fn((t) => (temps.push(t), t))
+  } catch (e) {
+    for (const t of new Set(temps)) t.dispose() // a failed backward rule leaves no temporaries
+    throw e
+  }
   const kept = new Set(out.map((t) => t?.storage))
   for (const t of temps) if (!kept.has(t.storage)) t.dispose()
   return out

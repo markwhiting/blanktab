@@ -4,7 +4,7 @@ import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CURVE_POINTS, MAX_RESTORES, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MAX_RESTORES, isCurveLoss, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
 
 export const DEFAULT_SLEEP_INTERVAL = 250
@@ -194,6 +194,22 @@ class Interrupted {
   constructor(readonly error: unknown) {}
 }
 
+/**
+ * The curve point at `steps`, from the learner's stats: its own-stream losses and, at a sleep (`atSleep`, the default),
+ * the held-out score that sleep just made, if the learner has one (decision 0015 §3). A point between sleeps (the end
+ * of a life) carries no score: it would only repeat the last one. Null unless both own-stream losses pass isCurveLoss,
+ * and the score is left out unless both of its values do: the same rule the parser applies, so every point written
+ * parses. The one place a point is made (the session's log and the page's live curve).
+ */
+export function curvePoint(
+  st: Pick<LearnerStats, "cu" | "predLoss" | "baselineLoss" | "heldOutLoss" | "heldOutBaseline">, steps: number, atSleep = true,
+): CurvePoint | null {
+  const { cu, predLoss, baselineLoss, heldOutLoss, heldOutBaseline } = st
+  if (!isCurveLoss(predLoss) || !isCurveLoss(baselineLoss)) return null
+  const scored = atSleep && isCurveLoss(heldOutLoss) && isCurveLoss(heldOutBaseline)
+  return { cu, steps, predLoss, baselineLoss, ...(scored ? { heldOut: { loss: heldOutLoss, baseline: heldOutBaseline } } : {}) }
+}
+
 /** Keeps every other point, always the newest, until at most MAX_CURVE_POINTS remain. */
 function thin(curve: CurvePoint[]): CurvePoint[] {
   let c = curve
@@ -291,7 +307,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   let birth: Birth | undefined
   let knowledgeSha = cfg.knowledgeSha
   let sessionsSeenAtBirth = cfg.sessionsSeenAtBirth
-  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates"> }) | undefined
+  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates" | "evalCU"> }) | undefined
 
   /** The final log file of a life that failed (see runSession), or null if there is nothing to put on the record. */
   const failedLog = async (): Promise<LogFileV2 | null> => {
@@ -306,8 +322,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     // A life that took no step and wrote no log file has nothing to put on the record.
     if (!last && !(Math.max(cp?.steps ?? 0, lived?.steps ?? 0) > 0)) return null
+    // Labelled with the code the life was lived on: its checkpoint's (it may have been saved by other code than this
+    // page's, e.g. before a reload onto code that cannot resume it), else its latest file's, else this page's.
     const base = {
-      schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
+      schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cp?.codeSha ?? prior?.codeSha ?? cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
       final: true, condition: "A" as const,
     }
     const birthFields = (b: Birth) => ({ settings: { ...b.settings, maxStepsPerSec, seed: b.seed }, widths: { ...b.widths }, knowledgeSha, sessionsSeenAtBirth })
@@ -315,11 +333,17 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const atLeast = (f: LogFileV2): LogFileV2 => !prior ? f : {
       ...f, stepsTotal: Math.max(f.stepsTotal, prior.stepsTotal), cu: Math.max(f.cu, prior.cu), restores: Math.max(f.restores, prior.restores),
       lostCU: Math.max(f.lostCU, prior.lostCU), skippedUpdates: Math.max(f.skippedUpdates, prior.skippedUpdates),
+      // Never from a number back to absent: a checkpoint without evalCU (an older or stub state) keeps the last file's.
+      ...(f.evalCU !== undefined || prior.evalCU !== undefined ? { evalCU: Math.max(f.evalCU ?? 0, prior.evalCU ?? 0) } : {}),
     }
+    /** evalCU, when the stats have it (a learner state from before the held-out check, or a stub, may not). */
+    const evalOf = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? { evalCU: v } : {})
     if (cp && birth && cp.seq === nextSeq) {
       const st = (cp.learnerState as { stats?: Partial<LearnerStats> } | null)?.stats
       const savedSkips = typeof st?.skippedUpdates === "number" ? st.skippedUpdates : 0
+      // The scoring done since the checkpoint is thrown away with the life (it is not training: not in lostCU).
       return atLeast({
+        ...evalOf(st?.evalCU),
         ...base, ...birthFields(birth), stepsTotal: cp.steps, cu: cp.cu, curve: thin([...cp.curveTail]), restores: cp.restores,
         // The CU lived since the checkpoint is thrown away with the life: on the record, as a restore's is.
         lostCU: cp.lostCU + Math.max(0, (lived?.stats.cu ?? cp.cu) - cp.cu),
@@ -331,6 +355,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     if (!last && birth && lived && lived.steps > 0) {
       return {
+        ...evalOf(lived.stats.evalCU),
         ...base, ...birthFields(birth), stepsTotal: lived.steps, cu: lived.stats.cu, curve: thin([...lived.curve]), restores: lived.restores,
         lostCU: lived.lostCU, skippedUpdates: lived.stats.skippedUpdates + lived.lostSkips,
       }
@@ -404,7 +429,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
 
       const checkpointNow = async (): Promise<Checkpoint> => ({
         learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
-        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, learnerState: await learner.save(),
+        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha, learnerState: await learner.save(),
       })
       const logFile = (final: boolean): LogFileV2 => {
         const st = learner.stats()
@@ -412,14 +437,13 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
           stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed }, hostSig: { ...cfg.hostSig },
           sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
-          skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU,
+          skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU, evalCU: st.evalCU,
         }
       }
-      const addPoint = () => {
-        const { cu, predLoss, baselineLoss } = learner.stats()
-        if (!Number.isFinite(predLoss) || !Number.isFinite(baselineLoss)) return // never NaN in a log
-        if (curve.at(-1)?.steps === steps) return
-        curve = thin([...curve, { cu, steps, predLoss, baselineLoss }])
+      const addPoint = (atSleep: boolean) => {
+        const p = curvePoint(learner.stats(), steps, atSleep)
+        if (!p || curve.at(-1)?.steps === steps) return
+        curve = thin([...curve, p])
       }
       /** After any save of the learner's current state. */
       const saved = () => {
@@ -452,7 +476,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         let checkpointDue = false
         if (steps % sleepInterval === 0) {
           await learner.sleep()
-          addPoint()
+          addPoint(true)
           checkpointDue = true
         }
         const st = learner.stats()
@@ -525,7 +549,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: true }
       }
 
-      addPoint()
+      addPoint(false) // the end of the life: no sleep here, so no held-out score of its own
       const end = logFile(true)
       await queue.put(end, { remove: id })
       cp = undefined // the life is over: nothing left to fail

@@ -1,7 +1,10 @@
 import { FOVEA, PERIPHERY, PRED_FOVEA, PRED_PERIPHERY } from "@blanktab/interface"
-import { add, conv2d, createRng, gruCell, linear, relu, reshape, tanh, tensor, zeros } from "@blanktab/tensor"
+import { add, conv2d, createRng, gruCell, leakyRelu, linear, relu, reshape, tanh, tensor, zeros } from "@blanktab/tensor"
 import type { Backend, GruParams, Tensor } from "@blanktab/tensor"
 import { ACTION_DIM } from "./encode"
+import { SHIFT_TAPS, createFoveaShift } from "./shift"
+
+export { SHIFT_TAPS }
 
 export interface Widths { conv1: number; conv2: number; enc: number; hidden: number }
 /** WebGPU widths (spec §5.5). */
@@ -22,6 +25,11 @@ export interface Model {
   readonly params: readonly Tensor[]
   /** The predictor's zero-initialised residual output layers (headP w/b, headF w/b): the last four of `params`. */
   readonly outputParams: readonly Tensor[]
+  /**
+   * Every parameter that starts at zero and expresses deviation from copy-last: the shift gate, then outputParams.
+   * The learner's residualDecay pulls these back toward zero.
+   */
+  readonly residualParams: readonly Tensor[]
   readonly paramCount: number
   readonly widths: Widths
   /**
@@ -33,9 +41,10 @@ export interface Model {
   heads(h: Tensor): { logits: Tensor; value: Tensor }
   /**
    * Residual next-frame prediction conditioned on the chosen action one-hot [1,76]: for each output,
-   * base + tanh(linear(z)), where `base` is the current frame's targets (targetsFromObs of the observation
-   * the core just saw): periphery [1,3000], fovea [1,768] (HWC, 0..1). The two output layers start at zero,
-   * so a fresh model predicts exactly copy-last (no change) and learns only the change.
+   * base + tanh(linear(z)) with z = leakyRelu(linear(h) + linear(action)), where `base` is the current frame's
+   * targets (targetsFromObs of the observation the core just saw): periphery [1,3000], fovea [1,768] (HWC, 0..1). The fovea also gets an action-conditioned
+   * translation of its base: + g(a)·(shift(base; kx(a) ⊗ ky(a)) − base), see ./shift.ts. The output layers and the gate
+   * g start at zero, so a fresh model predicts exactly copy-last (no change) and learns only the change.
    */
   predict(h: Tensor, action: Tensor, base: { periphery: Tensor; fovea: Tensor }): { periphery: Tensor; fovea: Tensor }
   /** [1,hidden] zeros, caller-owned. */
@@ -56,12 +65,15 @@ const PRED_F = PRED_FOVEA.width * PRED_FOVEA.height * PRED_FOVEA.channels
  */
 export function createModel(backend: Backend, seed: number, widths: Widths, initial?: readonly Float32Array[]): Model {
   const params: Tensor[] = []
+  let model: Model | undefined
   try {
-    const model = buildModel(backend, seed, widths, initial, params)
+    model = buildModel(backend, seed, widths, initial, params)
     if (initial && initial.length !== params.length) throw new RangeError(`createModel: ${initial.length} saved parameters, the model has ${params.length}`)
     return model
   } catch (e) {
-    for (const t of params) t.dispose()
+    // A built model owns constants as well as params: dispose it whole. A partial build owns only params so far.
+    if (model) model.dispose()
+    else for (const t of params) t.dispose()
     throw e
   }
 }
@@ -114,15 +126,24 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
   const gru: GruParams = { wz: gz.w, uz: gz.u, bz: gz.b, wr: gr.w, ur: gr.u, br: gr.b, wh: gh.w, uh: gh.u, bh: gh.b }
   const headPolicy = dense(hidden, ACTION_DIM)
   const headValue = dense(hidden, 1)
+  // The fovea-shift prior (./shift.ts): action -> kernel logits per axis and gate, all zero-initialised.
+  const shiftX = p0([ACTION_DIM, SHIFT_TAPS])
+  const shiftY = p0([ACTION_DIM, SHIFT_TAPS])
+  const shiftGate = p0([ACTION_DIM, 1])
   const predH = dense(hidden, enc)
   const predA = dense(ACTION_DIM, enc)
   // Residual output layers, zero-initialised (weights and biases): the predictor starts at copy-last.
   const headP = { w: p0([enc, PRED_P]), b: p0([PRED_P]) }
   const headF = { w: p0([enc, PRED_F]), b: p0([PRED_F]) }
 
+  // The fovea-shift operator's constants (caller-owned): freed in dispose, or by createModel if this build fails later.
+  const shift = createFoveaShift(backend)
+  const shiftParams = { x: shiftX, y: shiftY, gate: shiftGate }
+
   return {
     params,
     outputParams: [headP.w, headP.b, headF.w, headF.b],
+    residualParams: [shiftGate, headP.w, headP.b, headF.w, headF.b],
     paramCount: params.reduce((a, t) => a + t.size, 0),
     widths,
 
@@ -142,10 +163,12 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
     },
 
     predict(h, action, base) {
-      const z = relu(add(linear(h, predH.w, predH.b), linear(action, predA.w, predA.b)))
+      // Leaky (decision 0015 §2): with plain ReLU every z unit died once there was nothing for it to learn, and the
+      // gradient into the output layers stayed exactly 0 for the rest of the life.
+      const z = leakyRelu(add(linear(h, predH.w, predH.b), linear(action, predA.w, predA.b)))
       return {
         periphery: add(base.periphery, tanh(linear(z, headP.w, headP.b))),
-        fovea: add(base.fovea, tanh(linear(z, headF.w, headF.b))),
+        fovea: add(add(base.fovea, shift.term(action, base.fovea, shiftParams)), tanh(linear(z, headF.w, headF.b))),
       }
     },
 
@@ -154,6 +177,7 @@ function buildModel(backend: Backend, seed: number, widths: Widths, initial: rea
     },
 
     dispose() {
+      shift.dispose()
       for (const t of params) {
         t.grad?.dispose()
         t.grad = null

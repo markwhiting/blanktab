@@ -3,12 +3,13 @@
 // It never sees the token.
 import { WORLD } from "@blanktab/interface"
 import { createWorld } from "@blanktab/world"
-import { createLearner } from "@blanktab/learner"
+import { buildHeldOut } from "@blanktab/harness/heldout"
+import { LearnerStateVersionError, createLearner } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
 import type { Manifest } from "@blanktab/harness/knowledge"
 import type { CurvePoint } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
-import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, runSession, type SessionLearner } from "@blanktab/harness/session"
+import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, curvePoint, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
 import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
@@ -59,7 +60,12 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
       ...(adopted !== undefined ? { checkpointRecord: adopted } : {}),
       world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen), inbox,
       createLearner: async (init): Promise<SessionLearner> => {
-        const l = await createLearner({ backend: chosen.backend, ...init })
+        // A newborn's held-out set (decision 0015 §3) is recorded here, at birth, from a world of its own; a resumed
+        // learner carries its own in its state. The learner sees it only as data.
+        const l = await createLearner({
+          backend: chosen.backend, ...init,
+          ...("state" in init ? {} : { heldOut: buildHeldOut(init.seed, new OffscreenCanvas(WORLD.width, WORLD.height)) }),
+        })
         const birth = "state" in init ? init.state : init
         post({ type: "learner", settings: { ...birth.settings, maxStepsPerSec: c.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC, seed: birth.seed }, widths: { ...birth.widths } })
         if (!("state" in init)) post({ type: "curve", points: [], reset: true })
@@ -70,10 +76,8 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
           onKnowledge: k => takesKnowledge.onKnowledge?.(k),
           async sleep() {
             await l.sleep()
-            const s = l.stats()
-            if (Number.isFinite(s.predLoss) && Number.isFinite(s.baselineLoss)) {
-              post({ type: "curve", points: [{ cu: s.cu, steps, predLoss: s.predLoss, baselineLoss: s.baselineLoss }], reset: false })
-            }
+            const p = curvePoint(l.stats(), steps)
+            if (p) post({ type: "curve", points: [p], reset: false })
           },
         }
       },
@@ -120,5 +124,8 @@ scope.onmessage = e => {
   if (m.type === "checkpointNow") { void inbox.checkpointNow({ halt: m.halt }).then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
   if (m.type !== "start" || started) return
   started = true
-  start(m).catch((err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }))
+  start(m).catch((err: unknown) => post({
+    type: "error", message: err instanceof Error ? err.message : String(err),
+    ...(err instanceof LearnerStateVersionError && err.older ? { olderVersion: true } : {}),
+  }))
 }

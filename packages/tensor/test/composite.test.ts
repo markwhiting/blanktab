@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
-  backward, conv2d, createCpuBackend, createRng, disposeGraph, gradCheck, gruCell, initGru, layerNorm, linear, mse, noGrad, param,
+  backward, conv2d, createCpuBackend, createRng, disposeGraph, gradCheck, gruCell, initGru, layerNorm, leakyRelu, linear, mse, noGrad, param,
   composite, matmul, relu, reshape, sum, tensor,
 } from "../src/index"
 import type { Tensor } from "../src/index"
@@ -98,6 +98,30 @@ describe("layerNorm", () => {
   })
 })
 
+describe("leakyRelu", () => {
+  it("is x for x > 0 and slope·x otherwise (default slope 0.01), propagating NaN and ±Infinity", async () => {
+    const out = await leakyRelu(tensor([-2, -0.5, 0, 0.75, 3, Number.NaN, Infinity, -Infinity], [8])).read()
+    expect(Array.from(out.slice(0, 5))).toEqual([Math.fround(-0.02), Math.fround(-0.005), 0, 0.75, 3])
+    expect(Number.isNaN(out[5])).toBe(true)
+    expect([out[6], out[7]]).toEqual([Infinity, -Infinity])
+    expect(Array.from(await leakyRelu(tensor([-2, 2], [2]), 0.25).read())).toEqual([-0.5, 2])
+  })
+  it("has gradient 1 for x > 0 and slope for x < 0: never exactly zero (a unit cannot die)", async () => {
+    const x = tensor([-3, -0.4, 0.4, 3], [4], { requiresGrad: true })
+    const loss = sum(leakyRelu(x))
+    backward(loss)
+    expect(Array.from(await x.grad!.read())).toEqual([Math.fround(0.01), Math.fround(0.01), 1, 1])
+    disposeGraph(loss, [])
+  })
+  it("gradCheck", () => {
+    expect(gradCheck((x) => leakyRelu(x), [rand([3, 5])])).toBeLessThan(1e-3)
+    expect(gradCheck((x) => leakyRelu(x, 0.3), [rand([3, 5])])).toBeLessThan(1e-3)
+  })
+  it("rejects a slope outside [0, 1]", () => {
+    for (const s of [-0.1, 1.5, Number.NaN]) expect(() => leakyRelu(tensor([1], [1]), s)).toThrow(RangeError)
+  })
+})
+
 describe("mse", () => {
   it("is the mean squared difference", async () => {
     const out = mse(tensor([1, 2, 3, 4], [2, 2]), tensor([1, 1, 1, 1], [2, 2]))
@@ -134,6 +158,15 @@ describe("composites leave no unreachable intermediates (non-grad inputs)", () =
   it("conv2d on a constant input", () => {
     const w = p([4, 27]), b = p([4, 1]), x = c([3, 8, 8])
     expect(leaked([w, b], () => sum(relu(conv2d(x, w, b, { kh: 3, kw: 3, stride: 2, pad: 1 }))))).toBe(0)
+  })
+
+  it("leakyRelu on a constant input (inference: only its result survives)", () => {
+    const w = p([5, 4]), x = c([3, 5])
+    expect(leaked([w], () => sum(leakyRelu(matmul(x, w))))).toBe(0)
+    const before = be.stats.liveBuffers
+    const y = noGrad(() => leakyRelu(x))
+    expect(be.stats.liveBuffers).toBe(before + 1)
+    y.dispose()
   })
 
   it("layerNorm on a constant input", () => {
@@ -184,5 +217,22 @@ describe("composites leave no unreachable intermediates (non-grad inputs)", () =
     expect(n).toBe(0)
     expect((await x.read()).length).toBe(12)
     x.dispose()
+  })
+})
+
+describe("a composite that throws part-way leaves nothing behind", () => {
+  it("frees what it made (graph nodes and constants alike, never an outside tensor), and so does a nested one", async () => {
+    const w = param(Float32Array.of(1, 2, 3, 4), [2, 2])
+    const x = tensor(Float32Array.of(1, 1, 1, 1), [2, 2])
+    const be = x.backend
+    const live = be.stats.liveBuffers
+    const boom = () => { throw new Error("device lost") }
+    expect(() => composite(() => { const y = relu(matmul(x, w)); reshape(y, [4]); return boom() })).toThrow("device lost")
+    expect(be.stats.liveBuffers).toBe(live)
+    expect(() => noGrad(() => composite(() => { matmul(x, x); return composite(() => { relu(x); return boom() }) }))).toThrow("device lost")
+    expect(be.stats.liveBuffers).toBe(live)
+    expect(() => composite(() => { reshape(x, [4]); return boom() })).toThrow("device lost") // a view of x: x survives
+    expect(be.stats.liveBuffers).toBe(live)
+    expect([...await x.read()]).toEqual([1, 1, 1, 1])
   })
 })

@@ -10,7 +10,8 @@
     "./queue": "./src/queue.ts",
     "./checkpoint": "./src/checkpoint.ts",
     "./session": "./src/session.ts",
-    "./knowledge": "./src/knowledge.ts"
+    "./knowledge": "./src/knowledge.ts",
+    "./heldout": "./src/heldout.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

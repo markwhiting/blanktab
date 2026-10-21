@@ -1,7 +1,7 @@
 // Plain DOM rendering. No framework: three tabs, a handful of labelled fields, three canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
 import { REPO, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
-import { appendPoints, ratioText, sparkline } from "./curve"
+import { appendPoints, ownStreamText, ratioText, sparkline } from "./curve"
 import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
@@ -26,7 +26,10 @@ function painter(canvas: HTMLCanvasElement, w: number, h: number): (rgb: Uint8Ar
 /** Compute units as shown: three decimals below 10 CU, one above. */
 const fmtCU = (cu: number) => (cu < 10 ? cu.toFixed(3) : cu.toFixed(1))
 
-/** The loss curve: both series on one scale, the learner's guesses solid, the lazy guess dashed over them. */
+/**
+ * The loss curve on the held-out set (decision 0015 §3): both series on one scale, the learner's guesses solid, the
+ * lazy guess dashed over them. data-points counts the points drawn (those with a held-out score).
+ */
 function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): void {
   const ctx = canvas.getContext("2d")
   if (!ctx) return
@@ -54,7 +57,7 @@ function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): vo
   // The lazy guess goes on top, dashed: where the learner is no better than it, the two lines coincide and both still show.
   line(pred, css.getPropertyValue("--curve-pred").trim() || "teal", [])
   line(base, css.getPropertyValue("--curve-base").trim() || "orange", [5, 4])
-  canvas.dataset.points = String(points.length)
+  canvas.dataset.points = String(pred.length)
 }
 
 /** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. */
@@ -101,11 +104,12 @@ function renderHistory(k: Knowledge): void {
     const a = document.createElement("a")
     a.href = r.href; a.textContent = r.learnerId; a.target = "_blank"; a.rel = "noopener noreferrer"
     const cells: [string, string | Node][] = [
-      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Loss ratio", r.lossRatio], ["Final", r.final], ["Setting", r.setting], ["Host", r.host],
+      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Held-out ratio", r.heldOutRatio], ["Own-stream ratio", r.lossRatio], ["Final", r.final],
+      ["Setting", r.setting], ["Host", r.host],
     ]
     for (const [i, [label, c]] of cells.entries()) {
       const td = document.createElement("td")
-      if (i >= 1 && i <= 3) td.className = "num"
+      if (i >= 1 && i <= 4) td.className = "num"
       td.dataset.label = label // the stacked mobile layout shows it
       td.append(c)
       tr.append(td)
@@ -192,6 +196,7 @@ export function createUi(): Ui {
       curve = appendPoints(reset ? [] : curve, points)
       drawCurve(curveCanvas, curve)
       byTest("ratio").textContent = ratioText(curve)
+      byTest("own-ratio").textContent = ownStreamText(curve)
     },
     status(message) {
       byTest("status").textContent = message

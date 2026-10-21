@@ -3,7 +3,7 @@ import { Adam, add, backward, readSyncCpu, createCpuBackend, createRng, detach, 
 import type { Tensor } from "@blanktab/tensor"
 import { PERIPHERY, FOVEA } from "@blanktab/interface"
 import { ACTION_DIM } from "../src/encode"
-import { CPU_WIDTHS, GPU_WIDTHS, createModel } from "../src/model"
+import { CPU_WIDTHS, GPU_WIDTHS, SHIFT_TAPS, createModel } from "../src/model"
 import type { Widths } from "../src/model"
 
 const rand = (n: number, seed: number) => {
@@ -55,7 +55,7 @@ describe("model", () => {
     // The brief's 10% bound is unreachable with the specified predictor (enc -> 3000/768 heads, versus
     // hidden -> 3768 in the benchmark): the spec architecture has 2,183,109 params, 16.7% below. Bound at 20%.
     const m = createModel(createCpuBackend(), 1, GPU_WIDTHS)
-    expect(m.paramCount).toBe(2183109)
+    expect(m.paramCount).toBe(2185769)
     expect(Math.abs(m.paramCount - 2.62e6) / 2.62e6).toBeLessThan(0.2)
   })
 
@@ -76,6 +76,16 @@ describe("model", () => {
     m.dispose()
   })
 
+  it("residualParams are the shift gate then the four output layers: every parameter that starts at zero and expresses deviation from copy-last", async () => {
+    const m = createModel(createCpuBackend(), 3, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const n = m.params.length
+    expect(m.residualParams.length).toBe(5)
+    expect(m.residualParams[0]).toBe(m.params[n - 9]) // shiftGate
+    m.outputParams.forEach((t, i) => expect(m.residualParams[1 + i]).toBe(t))
+    for (const t of m.residualParams) expect((await t.read()).every((v) => v === 0)).toBe(true)
+    m.dispose()
+  })
+
   it("can be built from saved parameter values (checkpoint restore) and rejects ones that do not fit", async () => {
     const w: Widths = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
     const be = createCpuBackend()
@@ -90,6 +100,7 @@ describe("model", () => {
     const live = be.stats.liveBuffers
     expect(() => createModel(be, 5, w, saved.slice(1))).toThrow(RangeError)
     expect(() => createModel(be, 5, w, [new Float32Array(3), ...saved.slice(1)])).toThrow(RangeError)
+    expect(() => createModel(be, 5, w, [...saved, new Float32Array(3)])).toThrow(RangeError) // one too many: built, then rejected
     expect(be.stats.liveBuffers).toBe(live) // nothing leaked by a rejected restore
     a.dispose()
     b.dispose()
@@ -104,12 +115,79 @@ describe("model", () => {
     expect(await p.fovea.read()).toEqual(await b.fovea.read())
   })
 
+  it("a newborn at CPU_WIDTHS predicts exactly copy-last for any state and action: shift gate and output layers start at zero", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 7, CPU_WIDTHS)
+    const n = m.params.length
+    // params: ..., shiftX, shiftY, shiftGate, predH (w, b), predA (w, b), headP (w, b), headF (w, b)
+    for (const t of [m.params[n - 9]!, ...m.outputParams]) expect((await t.read()).every((v) => v === 0)).toBe(true)
+    const b = base(be)
+    const h = m.core(inputs(be), m.zeroState()) // a real, non-zero recurrent state
+    expect((await h.read()).some((v) => v !== 0)).toBe(true)
+    for (const comps of [[0, 25, 28, 40], [12, 26, 30, 75], [24, 27, 32, 41]]) {
+      const a = new Float32Array(ACTION_DIM)
+      for (const i of comps) a[i] = 1
+      const p = m.predict(h, tensor(a, [1, ACTION_DIM], { backend: be }), b)
+      expect(await p.periphery.read()).toEqual(await b.periphery.read())
+      expect(await p.fovea.read()).toEqual(await b.fovea.read())
+    }
+  })
+
+  it("its predictor units cannot die: with every z unit pushed negative, gradient still reaches the predictor's input layers", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 4, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const n = m.params.length
+    const [predHw, predAb] = [m.params[n - 8]!, m.params[n - 5]!]
+    poke(predAb, () => -50) // z's pre-activation is far below 0 on every input: a ReLU here would pass exactly 0
+    const r0 = createRng(3)
+    for (const t of m.outputParams) poke(t, () => r0() - 0.5)
+    const h = tensor(rand(4, 8), [1, 4], { backend: be })
+    const p = m.predict(h, oneHot(be), base(be))
+    const loss = add(mean(p.periphery), mean(p.fovea))
+    backward(loss)
+    const g = await predHw.grad!.read()
+    expect(g.some((v) => v !== 0)).toBe(true)
+    disposeGraph(loss, [])
+  })
+
+  it("translates the fovea by the action's learned kernel (the fovea-translation term)", async () => {
+    const be = createCpuBackend()
+    const m = createModel(be, 2, { conv1: 2, conv2: 2, enc: 4, hidden: 4 })
+    const n = m.params.length
+    // params: ..., shiftX, shiftY, shiftGate, predH (w, b), predA (w, b), headP (w, b), headF (w, b)
+    const [shiftX, shiftY, gate] = [m.params[n - 11]!, m.params[n - 10]!, m.params[n - 9]!]
+    expect([shiftX.shape, shiftY.shape, gate.shape]).toEqual([[ACTION_DIM, SHIFT_TAPS], [ACTION_DIM, SHIFT_TAPS], [ACTION_DIM, 1]])
+    const k = 5 // one action component; its kernel picks x + 3 and y − 2, fully gated in
+    const R = (SHIFT_TAPS - 1) / 2
+    poke(shiftX, (i) => (i === k * SHIFT_TAPS + R + 3 ? 40 : 0))
+    poke(shiftY, (i) => (i === k * SHIFT_TAPS + R - 2 ? 40 : 0))
+    poke(gate, (i) => (i === k ? 1 : 0))
+    const a = new Float32Array(ACTION_DIM)
+    a[k] = 1
+    const b = base(be)
+    const fovea = await m.predict(m.zeroState(), tensor(a, [1, ACTION_DIM], { backend: be }), b).fovea.read()
+    const src = await b.fovea.read()
+    let worst = 0
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) for (let c = 0; c < 3; c++) {
+      const ys = y - 2, xs = x + 3
+      const want = ys >= 0 && xs < 16 ? src[(ys * 16 + xs) * 3 + c]! : 0
+      worst = Math.max(worst, Math.abs(fovea[(y * 16 + x) * 3 + c]! - want))
+    }
+    expect(worst).toBeLessThan(1e-5)
+    // Another action leaves the fovea at copy-last (its gate is still zero).
+    const other = new Float32Array(ACTION_DIM)
+    other[k + 1] = 1
+    expect(await m.predict(m.zeroState(), tensor(other, [1, ACTION_DIM], { backend: be }), b).fovea.read()).toEqual(src)
+  })
+
   it("passes gradCheck on predict with tiny widths (output layers made non-zero)", () => {
     const w: Widths = { conv1: 2, conv2: 2, enc: 4, hidden: 4 }
     const m = createModel(getDefaultBackend(), 3, w)
     // The residual output layers start at zero (gradient to h and the action would be trivially 0): randomise them.
     const r0 = createRng(12)
     for (const t of m.params.slice(-4)) poke(t, () => (r0() < 0.5 ? -1 : 1) * (0.2 + 0.4 * r0()))
+    // Likewise the fovea-translation kernels and gate (shiftX, shiftY, shiftGate), so its path is checked too.
+    for (const t of m.params.slice(-11, -8)) poke(t, () => (r0() < 0.5 ? -1 : 1) * (0.2 + 0.4 * r0()))
     const r = createRng(11)
     const h = Float32Array.from({ length: 4 }, () => (r() < 0.5 ? -1 : 1) * (0.3 + 0.5 * r()))
     const a = Float32Array.from({ length: ACTION_DIM }, () => (r() < 0.5 ? -1 : 1) * (0.3 + 0.5 * r()))

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import type { Knowledge, Manifest } from "@blanktab/harness"
 import {
   CHECKPOINT_RETRY_MS, INCOMPATIBLE_MESSAGE, STALE_MESSAGE, KNOWLEDGE_POLL, MANIFEST_POLL, RELOAD_JITTER_MS, RELOAD_TARGET_KEY, createPoller, jittered,
-  startUpdates, type UpdatesDeps,
+  onWorkerLoadFailure, startUpdates, type UpdatesDeps,
 } from "../src/updates"
 import { stubStorage } from "../../packages/harness/test/helpers"
 
@@ -368,5 +368,39 @@ describe("startUpdates", () => {
     s.u.stop()
     await s.clock.advance(60 * MIN)
     expect(s.log).toEqual([])
+  })
+})
+
+describe("onWorkerLoadFailure (the worker's asset is gone: replaced by a deploy)", () => {
+  const OLD = "a".repeat(40), NEW = "b".repeat(40)
+  const deps = (manifest: Manifest | null, storage = stubStorage()) => {
+    const reloads: number[] = []
+    return {
+      reloads, storage,
+      d: { codeSha: OLD, storage, loadManifest: async () => manifest, reload: () => { reloads.push(1) } },
+    }
+  }
+  const m = (codeSha: string): Manifest => ({ knowledgeSha: "c".repeat(64), codeSha, learnerStateVersion: 2 })
+  it("newer code published: reloads onto it, recording the try (the same guard as code updates)", async () => {
+    const { d, reloads, storage } = deps(m(NEW))
+    expect(await onWorkerLoadFailure(d)).toBe("reloaded")
+    expect(reloads).toHaveLength(1)
+    expect(JSON.parse(storage.getItem(RELOAD_TARGET_KEY)!)).toEqual({ codeSha: NEW, tries: 1 })
+    expect(await onWorkerLoadFailure(d)).toBe("reloaded") // the reload brought the old code back once more
+    expect(JSON.parse(storage.getItem(RELOAD_TARGET_KEY)!)).toEqual({ codeSha: NEW, tries: 2 })
+  })
+  it("after two reloads for that code it gives up (no reload loop)", async () => {
+    const { d, reloads } = deps(m(NEW), stubStorage({ [RELOAD_TARGET_KEY]: JSON.stringify({ codeSha: NEW, tries: 2 }) }))
+    expect(await onWorkerLoadFailure(d)).toBe("gave-up")
+    expect(reloads).toHaveLength(0)
+  })
+  it("the same code (or no manifest): not a deploy, nothing to reload onto", async () => {
+    for (const manifest of [m(OLD), null]) {
+      const { d, reloads } = deps(manifest)
+      expect(await onWorkerLoadFailure(d)).toBe("same-code")
+      expect(reloads).toHaveLength(0)
+    }
+    const { d } = deps(null)
+    expect(await onWorkerLoadFailure({ ...d, loadManifest: async () => { throw new Error("offline") } })).toBe("same-code")
   })
 })

@@ -44,6 +44,42 @@ describe("Adam", () => {
     expect(Array.from(await b.read())).toEqual([1])
   })
 
+  it("decoupled weight decay: p ← (1 − decay)·p − Adam step, only on the `decayed` params that have a gradient", async () => {
+    const a = param(new Float32Array([1]), [1])
+    const b = param(new Float32Array([1]), [1])
+    const c = param(new Float32Array([2]), [1])
+    const opt = new Adam([a, b, c], { lr: 0.1, weightDecay: 0.25, decayed: [a, c] })
+    backward(add(mean(square(a)), mean(square(b)))) // c gets no gradient
+    opt.step()
+    expect((await a.read())[0]).toBeCloseTo(0.75 - 0.1, 5) // decayed on the parameter, not through the gradient
+    expect((await b.read())[0]).toBeCloseTo(0.9, 5) // not in `decayed`
+    expect(Array.from(await c.read())).toEqual([2]) // skipped: no gradient, no decay
+  })
+
+  it("weightDecay 0 is bit-identical to no decay", async () => {
+    const run = async (o: { weightDecay?: number }) => {
+      const be = createCpuBackend()
+      const w = tensor(Float32Array.from([0.3, -1.2, 0.7]), [3], { requiresGrad: true, backend: be })
+      const x = tensor(Float32Array.from([0.5, 2, -1]), [3], { backend: be })
+      const opt = new Adam([w], { lr: 0.01, ...o })
+      for (let i = 0; i < 5; i++) {
+        const loss = mean(square(mul(w, x)))
+        backward(loss)
+        opt.step()
+        opt.zeroGrad()
+        disposeGraph(loss, [])
+      }
+      return w.read()
+    }
+    expect(await run({ weightDecay: 0 })).toEqual(await run({}))
+  })
+
+  it("rejects a weightDecay outside [0, 1) and a decayed tensor it does not optimize", () => {
+    const a = param(new Float32Array([1]), [1])
+    for (const d of [-0.1, 1, Number.NaN]) expect(() => new Adam([a], { lr: 0.1, weightDecay: d })).toThrow(RangeError)
+    expect(() => new Adam([a], { lr: 0.1, weightDecay: 0.1, decayed: [param(new Float32Array([1]), [1])] })).toThrow(RangeError)
+  })
+
   it("setLr changes the step size", async () => {
     const a = param(new Float32Array([1]), [1])
     const opt = new Adam([a], { lr: 0.1 })
