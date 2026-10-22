@@ -18,9 +18,11 @@ jobs:
       # pull_request a PR that edits this workflow file runs its own version of it: this check proves nothing
       # about a PR that touches code, and humans must not trust it there. The enforcement is the gate, which
       # runs from main on a schedule and re-validates every PR itself before merging.
+      # Full history: the PR's files are the diff from its merge base with main (github.ts loadPrViaGit).
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22

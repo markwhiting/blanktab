@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url"
 import { parseLogFile, type LogFile } from "@blanktab/harness/log"
 import { validateSessionPr, type PrFile } from "./validate.ts"
 import { readLearnerLogs } from "./summary.ts"
-import { boundAuthor, closePr, labelNeedsHuman, listOpenPrs, loadPr, mergePr } from "./github.ts"
+import { boundAuthor, closePr, gh, ghCalls, git, gitBuf, isShallow, labelNeedsHuman, listOpenPrs, loadPrViaGit, mergePr, type Git } from "./github.ts"
 
 export interface OpenPr {
   number: number
@@ -122,19 +122,36 @@ export function memoBound(lookup: (learnerId: string) => string | null): (learne
   }
 }
 
-function main(): void {
-  const repo = process.env.REPO
-  if (!repo) throw new Error("REPO env var is required (owner/name)")
-  const runsDir = process.argv[2] ?? "data/runs"
+/** What runGate talks to: gh and git (in the checkout of main), and where it reports. Injected in tests. */
+export interface GateDeps {
+  gh: (args: string[]) => Buffer
+  git: (args: string[]) => string
+  gitBuf: Git
+  log(message: string): void
+  error(message: string): void
+}
+
+/**
+ * One gate run over the open `run: ` PRs; resolves to the number merged. Aborts before deciding anything if the
+ * checkout of main is shallow (who owns a learner needs main's full history). A PR that cannot be decided safely
+ * (no head commit or author, a head that moved since it was read, an owner lookup or load that failed) is logged and
+ * left open for the next run.
+ */
+export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
+  if (isShallow(deps.git)) throw new Error("the checkout of main is shallow: who owns a learner cannot be told (gate.yml needs fetch-depth 0)")
+  let calls = 0
+  const ghFn = (args: string[]) => { calls++; return deps.gh(args) }
   const prs: (OpenPr & { learnerId: string | null })[] = []
-  const ownerOf = memoBound(id => boundAuthor(repo, id))
+  const ownerOf = memoBound(id => boundAuthor(repo, id, deps.git, ghFn))
   // Oldest first (decide and act sort again): the earliest PR for an unbound learner is the one that can claim it.
-  for (const listed of [...listOpenPrs(repo)].sort((a, b) => a.number - b.number)) {
+  for (const listed of [...listOpenPrs(repo, ghFn)].sort((a, b) => a.number - b.number)) {
     if (!listed.title.startsWith("run: ")) continue // not a session PR: leave alone
+    const before = calls
     try {
-      const loaded = loadPr(repo, listed.number)
-      if (loaded.headSha === undefined) { console.error(`PR #${listed.number}: GitHub gave no head commit; leaving it for the next run`); continue }
-      if (loaded.author === undefined) { console.error(`PR #${listed.number}: GitHub gave no author; leaving it for the next run`); continue }
+      const loaded = loadPrViaGit(repo, listed.number, ghFn, deps.gitBuf)
+      if (loaded.headSha === undefined) { deps.error(`PR #${listed.number}: GitHub gave no head commit; leaving it for the next run`); continue }
+      if (loaded.moved) { deps.log(`PR #${listed.number}: its head moved since it was read; leaving it for the next run`); continue }
+      if (loaded.author === undefined) { deps.error(`PR #${listed.number}: GitHub gave no author; leaving it for the next run`); continue }
       const ids = learnersIn(loaded.files)
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })
       let bound: string | null = null
@@ -142,28 +159,34 @@ function main(): void {
         try {
           bound = ownerOf(ids[0]!)
         } catch (e) {
-          console.error(`PR #${listed.number}: who learner ${ids[0]} belongs to could not be found (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+          deps.error(`PR #${listed.number}: who learner ${ids[0]} belongs to could not be found (${e instanceof Error ? e.message : e}); leaving it for the next run`)
           continue
         }
-        // Logs on main but no commit for them: the history is incomplete (a shallow checkout). Never decide blind.
-        if (bound === null && previous.length > 0) { console.error(`PR #${listed.number}: learner ${ids[0]} has logs on main but no commit found for them; leaving it for the next run`); continue }
       }
       prs.push({
         number: listed.number, title: listed.title, headRef: loaded.headRef, baseRef: loaded.baseRef, files: loaded.files, previous,
         loadErrors: loaded.loadErrors, headSha: loaded.headSha, author: loaded.author, boundAuthor: bound, learnerId: ids.length === 1 ? ids[0]! : null,
       })
     } catch (e) {
-      console.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+      deps.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+    } finally {
+      deps.log(`PR #${listed.number}: ${calls - before} gh calls`)
     }
   }
-  const merged = act(decide(prs), prs, {
-    close: (n, reason) => closePr(repo, n, reason),
-    label: n => labelNeedsHuman(repo, n),
-    merge: (n, sha) => mergePr(repo, n, sha),
-    log: m => console.log(m),
-    error: m => console.error(m),
+  return act(decide(prs), prs, {
+    close: (n, reason) => closePr(repo, n, reason, ghFn),
+    label: n => labelNeedsHuman(repo, n, ghFn),
+    merge: (n, sha) => mergePr(repo, n, sha, ghFn),
+    log: deps.log,
+    error: deps.error,
   })
-  console.log(`merged ${merged}`)
+}
+
+function main(): void {
+  const repo = process.env.REPO
+  if (!repo) throw new Error("REPO env var is required (owner/name)")
+  const merged = runGate(repo, process.argv[2] ?? "data/runs", { gh, git, gitBuf, log: m => console.log(m), error: m => console.error(m) })
+  console.log(`merged ${merged} (${ghCalls()} gh calls in all)`)
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `merged=${merged}\n`)
 }
 

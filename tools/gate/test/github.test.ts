@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest"
+import { afterEach, beforeEach, describe, it, expect } from "vitest"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { boundAuthor, bytesToContent, statusErrors, listOpenPrs, loadFile, loadPr, mergePr, MAX_PR_FILES } from "../github.ts"
+import { boundAuthor, bytesToContent, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_FILES } from "../github.ts"
+import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -30,64 +31,12 @@ describe("bytesToContent", () => {
   })
 })
 
-describe("loadFile", () => {
-  const big = JSON.stringify({ type: "file", size: 5_000_000 })
-  it("never downloads a file whose metadata size exceeds 1 MB", () => {
-    const calls: string[][] = []
-    const r = loadFile(a => { calls.push(a); if (a.join(" ").includes("raw")) throw new Error("must not download"); return Buffer.from(big) }, "o/r", "data/runs/x/0.json", "sha")
-    expect(r).toEqual({ error: "file exceeds 1 MB" })
-    expect(calls).toHaveLength(1)
-  })
-  it("downloads raw when within the limit and rejects non-files", () => {
-    const g = (a: string[]) => a.join(" ").includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
-    expect(loadFile(g, "o/r", "a b.json", "sha")).toEqual({ content: "{}" })
-    expect(loadFile(() => Buffer.from(JSON.stringify({ type: "symlink", size: 1 })), "o/r", "l", "sha")).toHaveProperty("error")
-  })
-})
-
-describe("loadPr budget", () => {
-  const prJson = (changed_files: number) => JSON.stringify({ base: { ref: "main" }, head: { sha: "s", ref: "run/x", repo: { full_name: "o/r" } }, changed_files })
-  it("caps a session PR at 16 files", () => expect(MAX_PR_FILES).toBe(16))
-  it("more than 16 changed files: a load error from the PR object alone; files are never listed or fetched", () => {
-    const calls: string[] = []
-    const r = loadPr("o/r", 7, a => { calls.push(a.join(" ")); if (a.join(" ").includes("/files") || a.join(" ").includes("contents")) throw new Error("must not list"); return Buffer.from(prJson(17)) })
-    expect(r.loadErrors).toEqual(["PR changes 17 files (limit 16)"])
-    expect(r.files).toEqual([])
-    expect(calls).toEqual(["api repos/o/r/pulls/7"])
-  })
-  it("16 changed files are listed and fetched", () => {
-    const changed = Array.from({ length: 16 }, (_, i) => ({ filename: `data/runs/lrn_0123456789abcdef/${i}.json`, status: "added" }))
-    const r = loadPr("o/r", 7, a => {
-      const j = a.join(" ")
-      if (j.endsWith("pulls/7")) return Buffer.from(prJson(16))
-      if (j.includes("/files")) return Buffer.from(JSON.stringify([changed]))
-      return j.includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
-    })
-    expect(r.loadErrors).toEqual([])
-    expect(r.files).toHaveLength(16)
-  })
-})
-
 describe("listOpenPrs", () => {
   it("asks only for the fields the gate uses", () => {
     const calls: string[][] = []
     const listed = listOpenPrs("o/r", a => { calls.push(a); return Buffer.from(JSON.stringify([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])) })
     expect(calls).toEqual([["pr", "list", "--repo", "o/r", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]])
     expect(listed).toEqual([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])
-  })
-})
-
-describe("loadPr head commit", () => {
-  const files = (a: string[]) => {
-    const j = a.join(" ")
-    if (j.includes("/files")) return Buffer.from(JSON.stringify([[{ filename: "data/runs/lrn_0123456789abcdef/0.json", status: "added" }]]))
-    return j.includes("raw") ? Buffer.from("{}") : Buffer.from(JSON.stringify({ type: "file", size: 2 }))
-  }
-  it("a PR object without a head sha loads with headSha undefined (the gate then never merges it)", () => {
-    for (const head of [{ ref: "run/x", repo: { full_name: "o/r" } }, { sha: 42, ref: "run/x", repo: { full_name: "o/r" } }, { sha: "", ref: "run/x", repo: { full_name: "o/r" } }]) {
-      const r = loadPr("o/r", 7, a => (a.join(" ").endsWith("pulls/7") ? Buffer.from(JSON.stringify({ base: { ref: "main" }, head, changed_files: 1 })) : files(a)))
-      expect(r.headSha).toBeUndefined()
-    }
   })
 })
 
@@ -114,18 +63,6 @@ describe("mergePr", () => {
   })
 })
 
-describe("loadPr author", () => {
-  const prWith = (user: unknown) => (a: string[]) => {
-    const j = a.join(" ")
-    if (j.endsWith("pulls/7")) return Buffer.from(JSON.stringify({ base: { ref: "main" }, head: { sha: "s", ref: "run/x", repo: { full_name: "o/r" } }, changed_files: 0, user }))
-    return Buffer.from(JSON.stringify([[]]))
-  }
-  it("is the PR's user.login; anything else is undefined", () => {
-    expect(loadPr("o/r", 7, prWith({ login: "ann" })).author).toBe("ann")
-    for (const u of [undefined, null, {}, { login: 5 }, { login: "" }]) expect(loadPr("o/r", 7, prWith(u)).author).toBeUndefined()
-  })
-})
-
 const LRN = "lrn_0123456789abcdef"
 describe("boundAuthor (fake gh)", () => {
   const git = (out: string) => () => out
@@ -141,11 +78,36 @@ describe("boundAuthor (fake gh)", () => {
   it("nothing of the learner on main: null, and GitHub is not asked", () => {
     expect(boundAuthor("o/r", LRN, git(""), () => { throw new Error("must not ask") })).toBeNull()
   })
-  it("throws when the lookup fails: no merged PR, no login, a gh error, a malformed answer", () => {
-    for (const body of [[], [{ merged_at: null, user: { login: "x" } }], [{ merged_at: "t", user: {} }], { not: "a list" }]) {
-      expect(() => boundAuthor("o/r", LRN, git(`${"a".repeat(40)}\n`), () => Buffer.from(JSON.stringify(body)))).toThrow()
+  const sha = (c: string) => c.repeat(40)
+  it("boundAuthor skips direct-push commits and returns the first merged PR's author", () => {
+    const calls: string[] = []
+    const answers: Record<string, unknown> = { [sha("a")]: [], [sha("b")]: [{ merged_at: null, user: { login: "eve" } }], [sha("c")]: [{ merged_at: "t", user: { login: "bob" } }], [sha("d")]: [{ merged_at: "t", user: { login: "ann" } }] }
+    const gh = (a: string[]) => { calls.push(a[1]!); return Buffer.from(JSON.stringify(answers[a[1]!.split("/")[4]!])) }
+    expect(boundAuthor("o/r", LRN, git(["a", "b", "c", "d"].map(sha).join("\n") + "\n"), gh)).toBe("bob")
+    expect(calls).toEqual(["a", "b", "c"].map(c => `repos/o/r/commits/${sha(c)}/pulls`))
+  })
+  it("boundAuthor: only direct pushes → null (unbound)", () => {
+    for (const body of [[], [{ merged_at: null, user: { login: "x" } }], [{ merged_at: "", user: { login: "x" } }]]) {
+      expect(boundAuthor("o/r", LRN, git(`${sha("a")}\n${sha("b")}\n`), () => Buffer.from(JSON.stringify(body)))).toBeNull()
     }
-    expect(() => boundAuthor("o/r", LRN, git(`${"a".repeat(40)}\n`), () => { throw new Error("HTTP 502") })).toThrow()
+  })
+  it("boundAuthor: a gh error or a malformed answer still throws", () => {
+    for (const body of [[{ merged_at: "t", user: {} }], [{ merged_at: "t", user: null }], { not: "a list" }]) {
+      expect(() => boundAuthor("o/r", LRN, git(`${sha("a")}\n`), () => Buffer.from(JSON.stringify(body)))).toThrow()
+    }
+    expect(() => boundAuthor("o/r", LRN, git(`${sha("a")}\n`), () => Buffer.from("not json"))).toThrow()
+    expect(() => boundAuthor("o/r", LRN, git(`${sha("a")}\n`), () => { throw new Error("HTTP 502") })).toThrow("HTTP 502")
+    // A failure after a direct push still throws: a skipped commit never turns an error into "unbound".
+    let n = 0
+    expect(() => boundAuthor("o/r", LRN, git(`${sha("a")}\n${sha("b")}\n`), () => { if (n++ === 0) return Buffer.from("[]"); throw new Error("HTTP 502") })).toThrow("HTTP 502")
+  })
+  it("boundAuthor walks at most MAX_OWNER_WALK commits", () => {
+    expect(MAX_OWNER_WALK).toBe(20)
+    const shas = Array.from({ length: MAX_OWNER_WALK + 5 }, (_, i) => i.toString(16).padStart(40, "0"))
+    const asked: string[] = []
+    const gh = (a: string[]) => { asked.push(a[1]!); return Buffer.from(JSON.stringify(asked.length > MAX_OWNER_WALK ? [{ merged_at: "t", user: { login: "late" } }] : [])) }
+    expect(boundAuthor("o/r", LRN, git(shas.join("\n") + "\n"), gh)).toBeNull()
+    expect(asked).toEqual(shas.slice(0, MAX_OWNER_WALK).map(s => `repos/o/r/commits/${s}/pulls`)) // oldest first
   })
   it("git output that is not a commit sha is a failed lookup", () => {
     expect(() => boundAuthor("o/r", LRN, git("fatal: bad\n"), () => Buffer.from("[]"))).toThrow("no commit")
@@ -182,5 +144,130 @@ describe("boundAuthor (git, in a temporary repository)", { timeout: 60_000 }, ()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () => {
+  let fx: Fixture
+  beforeEach(() => { fx = makeFixture() })
+  afterEach(() => fx.cleanup())
+  const D = `data/runs/${LRN}`
+  /** A fake gh that answers pulls/<n> only, and records every call. */
+  const ghFor = (n: number, head: string, over: Record<string, unknown> = {}) => {
+    const calls: string[] = []
+    const fn = (a: string[]) => {
+      calls.push(a.join(" "))
+      if (a.join(" ") === `api repos/o/r/pulls/${n}`) return prObject(n, head, over)
+      throw new Error(`unexpected gh call: ${a.join(" ")}`)
+    }
+    return { fn, calls }
+  }
+  const missing = (oid: string) => { try { fx.git(["cat-file", "-e", oid], { GIT_NO_LAZY_FETCH: "1" }); return false } catch { return true } }
+
+  it("loadPrViaGit: added and modified files with exact bytes; one gh call", () => {
+    fx.commitMain({ [`${D}/0.json`]: "{\"seq\":0}\n" })
+    const head = fx.pr(3, { [`${D}/0.json`]: "{\"seq\":0,\"é\":1}\n", [`${D}/1.json`]: "{\"seq\":1}\n" })
+    const gh = ghFor(3, head, { changed_files: 2 })
+    const r = loadPrViaGit("o/r", 3, gh.fn, fx.git)
+    expect(r.loadErrors).toEqual([])
+    expect(r.moved).toBeUndefined()
+    expect(r.headSha).toBe(head)
+    expect(r.author).toBe("ann")
+    expect(r.baseRef).toBe("main")
+    expect(r.files).toEqual([{ path: `${D}/0.json`, content: "{\"seq\":0,\"é\":1}\n" }, { path: `${D}/1.json`, content: "{\"seq\":1}\n" }])
+    expect(gh.calls).toEqual(["api repos/o/r/pulls/3"])
+  })
+
+  it("files are the PR's own changes: commits main gained after the PR branched are not in it", () => {
+    const head = fx.pr(3, { [`${D}/0.json`]: "a" })
+    fx.commitMain({ "other/file.txt": "main moved on" })
+    const r = loadPrViaGit("o/r", 3, ghFor(3, head).fn, fx.git)
+    expect(r.loadErrors).toEqual([])
+    expect(r.files.map(f => f.path)).toEqual([`${D}/0.json`])
+  })
+
+  it("a deleted, renamed or type-changed file, a symlink or a submodule: the same load errors as before", () => {
+    const sub = fx.commitMain({ [`${D}/0.json`]: "a", [`${D}/1.json`]: "b", [`${D}/2.json`]: "c" })
+    const head = fx.pr(4, {
+      [`${D}/3.json`]: "b", // with 1.json removed: a rename to git with renames on, here an add plus a delete
+      [`${D}/2.json`]: { symlink: "0.json" }, // type change
+      [`${D}/link.json`]: { symlink: "../../../README.md" },
+      [`${D}/sub`]: { submodule: sub },
+    }, [`${D}/1.json`])
+    const r = loadPrViaGit("o/r", 4, ghFor(4, head, { changed_files: 5 }).fn, fx.git)
+    expect(r.loadErrors.sort()).toEqual([
+      `${D}/1.json: file status "removed" is not allowed (only added or modified)`,
+      `${D}/2.json: file status "changed" is not allowed (only added or modified)`,
+      `${D}/link.json: not a regular file`,
+      `${D}/sub: not a regular file`,
+    ].sort())
+    expect(r.files).toEqual([{ path: `${D}/3.json`, content: "b" }])
+    expect(statusErrors([{ filename: `${D}/1.json`, status: "removed" }])).toEqual([`${D}/1.json: file status "removed" is not allowed (only added or modified)`])
+  })
+
+  it("a 2 MB blob is never downloaded (git cat-file -e fails without lazy fetch) and reads as 'file exceeds 1 MB'", () => {
+    const head = fx.pr(5, { [`${D}/0.json`]: Buffer.alloc(2 * 1_048_576, 0x61), [`${D}/1.json`]: Buffer.alloc(1_048_576, 0x62) })
+    const r = loadPrViaGit("o/r", 5, ghFor(5, head, { changed_files: 2 }).fn, fx.git)
+    expect(r.loadErrors).toEqual([`${D}/0.json: file exceeds 1 MB`])
+    // Exactly 1 MiB is within the limit (the validator's rule is "> 1 MB"), so it is fetched and read.
+    expect(r.files.map(f => [f.path, f.content.length])).toEqual([[`${D}/1.json`, 1_048_576]])
+    const big = fx.git(["rev-parse", `${head}:${D}/0.json`]).toString().trim()
+    expect(missing(big)).toBe(true)
+  })
+
+  it("invalid UTF-8 is a load error", () => {
+    const head = fx.pr(6, { [`${D}/0.json`]: Buffer.from([0x7b, 0xff, 0xfe, 0x7d]) })
+    const r = loadPrViaGit("o/r", 6, ghFor(6, head).fn, fx.git)
+    expect(r.loadErrors).toEqual([`${D}/0.json: file is not valid UTF-8`])
+    expect(r.files).toEqual([])
+  })
+
+  it("a head that moved since pulls/N: moved, no files", () => {
+    fx.pr(7, { [`${D}/0.json`]: "a" })
+    const r = loadPrViaGit("o/r", 7, ghFor(7, "f".repeat(40)).fn, fx.git)
+    expect(r.moved).toBe(true)
+    expect(r.files).toEqual([])
+    expect(r.loadErrors).toEqual([])
+  })
+
+  it("more than 16 changed files: rejected from the PR object; nothing is fetched", () => {
+    const gitCalls: string[][] = []
+    const r = loadPrViaGit("o/r", 8, ghFor(8, "a".repeat(40), { changed_files: MAX_PR_FILES + 1 }).fn, a => { gitCalls.push(a); throw new Error("must not run git") })
+    expect(r.loadErrors).toEqual([`PR changes ${MAX_PR_FILES + 1} files (limit ${MAX_PR_FILES})`])
+    expect(r.files).toEqual([])
+    expect(gitCalls).toEqual([])
+    expect(MAX_PR_FILES).toBe(16)
+  })
+
+  it("more than 16 files in the diff itself (the PR object undercounted): a load error, no file is read", () => {
+    const files = Object.fromEntries(Array.from({ length: MAX_PR_FILES + 1 }, (_, i) => [`${D}/${i}.json`, "x"]))
+    const head = fx.pr(9, files)
+    const r = loadPrViaGit("o/r", 9, ghFor(9, head, { changed_files: 1 }).fn, fx.git)
+    expect(r.loadErrors).toEqual([`PR changes ${MAX_PR_FILES + 1} files (limit ${MAX_PR_FILES})`])
+    expect(r.files).toEqual([])
+  })
+
+  it("a PR object without a usable head sha or file count: nothing is fetched", () => {
+    const never = () => { throw new Error("must not run git") }
+    for (const sha of [undefined, 42, "", "s", "A".repeat(40)]) {
+      const r = loadPrViaGit("o/r", 7, ghFor(7, sha as string).fn, never)
+      expect(r.headSha).toBeUndefined()
+      expect(r.loadErrors).toEqual(["head commit is unavailable"])
+    }
+    expect(loadPrViaGit("o/r", 7, ghFor(7, "a".repeat(40), { changed_files: "2" }).fn, never).loadErrors).toEqual(["PR file count is unavailable"])
+  })
+
+  it("the author is the PR's user.login; anything else is undefined", () => {
+    const never = () => { throw new Error("must not run git") }
+    expect(loadPrViaGit("o/r", 7, ghFor(7, "", { user: { login: "ann" } }).fn, never).author).toBe("ann")
+    for (const u of [undefined, null, {}, { login: 5 }, { login: "" }]) expect(loadPrViaGit("o/r", 7, ghFor(7, "", { user: u }).fn, never).author).toBeUndefined()
+  })
+})
+
+describe("isShallow", () => {
+  it("reads git rev-parse --is-shallow-repository; anything else throws", () => {
+    expect(isShallow(a => { expect(a).toEqual(["rev-parse", "--is-shallow-repository"]); return "true\n" })).toBe(true)
+    expect(isShallow(() => "false\n")).toBe(false)
+    expect(() => isShallow(() => "")).toThrow()
   })
 })

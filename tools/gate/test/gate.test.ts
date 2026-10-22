@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest"
-import { act, decide, memoBound, type GateOps, type OpenPr } from "../gate.ts"
+import { afterEach, beforeEach, describe, it, expect } from "vitest"
+import { execFileSync } from "node:child_process"
+import { join } from "node:path"
+import { act, decide, memoBound, runGate, type GateDeps, type GateOps, type OpenPr } from "../gate.ts"
+import { MAX_PR_FILES } from "../github.ts"
+import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import type { PrFile } from "../validate.ts"
 import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
 
@@ -152,5 +156,85 @@ describe("memoBound: one owner lookup per learner per run", () => {
     expect(() => bound("lrn_2222222222222222")).toThrow("gh down")
     expect(() => bound("lrn_2222222222222222")).toThrow("gh down")
     expect(asked).toEqual([ID, "lrn_1111111111111111", "lrn_2222222222222222"])
+  })
+})
+
+describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }, () => {
+  let fx: Fixture
+  beforeEach(() => { fx = makeFixture() })
+  afterEach(() => fx.cleanup())
+  const D = `data/runs/${ID}`
+  const json = (l: LogFile) => JSON.stringify(l)
+  /**
+   * A fake gh: lists the given PRs, answers pulls/<n> with `heads[n]` (and `over`), commits/<sha>/pulls from `owners`
+   * (a commit not in it was a direct push: []), and records ready/merge/close/label calls.
+   */
+  const deps = (heads: Record<number, string>, owners: Record<string, string> = {}, over: Record<string, unknown> = {}, workDir = fx.work) => {
+    const calls: string[] = [], logs: string[] = []
+    const d: GateDeps = {
+      gh: a => {
+        const j = a.join(" ")
+        calls.push(j)
+        if (a[0] === "pr" && a[1] === "list") return Buffer.from(JSON.stringify(Object.keys(heads).map(n => ({ number: Number(n), title: `run: ${ID}`, headRefName: `run/${n}`, baseRefName: "main" }))))
+        let m = /^api repos\/o\/r\/pulls\/(\d+)$/.exec(j)
+        if (m) return prObject(Number(m[1]), heads[Number(m[1])]!, over)
+        m = /^api repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls$/.exec(j)
+        if (m) return Buffer.from(JSON.stringify(owners[m[1]!] ? [{ merged_at: "t", user: { login: owners[m[1]!] } }] : []))
+        if (a[0] === "pr" || a[0] === "label") return Buffer.from("")
+        throw new Error(`unexpected gh call: ${j}`)
+      },
+      git: a => execFileSync("git", a, { cwd: workDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+      gitBuf: (a, env) => execFileSync("git", a, { cwd: workDir, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }),
+      log: m => void logs.push(m), error: m => void logs.push(`error ${m}`),
+    }
+    return { d, calls, logs }
+  }
+
+  it("a learner whose oldest commit was a direct push is decided (merged when valid)", () => {
+    fx.commitMain({ [`${D}/0.json`]: json(log(0)) }) // a direct push: no PR
+    const head = fx.pr(1, { [`${D}/1.json`]: json(log(1)) })
+    const { d, calls } = deps({ 1: head })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(1)
+    expect(calls).toContain(`pr merge 1 --repo o/r --squash --delete-branch --match-head-commit ${head}`)
+  })
+
+  it("an owned learner: another author's PR is closed (the owner comes from the first merged PR)", () => {
+    const direct = fx.commitMain({ [`${D}/0.json`]: json(log(0)) })
+    const viaPr = fx.commitMain({ [`${D}/1.json`]: json(log(1)) })
+    const head = fx.pr(2, { [`${D}/2.json`]: json(log(2)) })
+    const { d, calls } = deps({ 2: head }, { [viaPr]: "bob" })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(0)
+    expect(calls.some(c => c.startsWith("pr close 2") && c.includes(`belongs to @bob`))).toBe(true)
+    expect(calls).toContain(`api repos/o/r/commits/${direct}/pulls`)
+  })
+
+  it("a head that moved since pulls/N: gate main leaves the PR open", () => {
+    fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
+    const { d, calls, logs } = deps({ 1: "f".repeat(40) })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(0)
+    expect(calls.filter(c => c.startsWith("pr ") && !c.startsWith("pr list"))).toEqual([]) // no close, no merge
+    expect(logs.some(l => l.includes("PR #1") && l.includes("moved") && l.includes("next run"))).toBe(true)
+  })
+
+  it("a shallow checkout aborts the run before deciding anything", () => {
+    const head = fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
+    const origin = fx.git(["remote", "get-url", "origin"]).toString().trim()
+    const shallow = join(fx.work, "..", "shallow")
+    execFileSync("git", ["clone", "-q", "--depth", "1", origin, shallow], { stdio: "ignore" })
+    const { d, calls } = deps({ 1: head }, {}, {}, shallow)
+    expect(() => runGate("o/r", join(shallow, "data/runs"), d)).toThrow("shallow")
+    expect(calls).toEqual([])
+  })
+
+  it("at the 16-file cap, gh calls per PR ≤ 3 before the merge", () => {
+    const first = fx.commitMain({ [`${D}/0.json`]: json(log(0)) })
+    const files = Object.fromEntries(Array.from({ length: MAX_PR_FILES }, (_, i) => [`${D}/${i + 1}.json`, json(log(i + 1))]))
+    const head = fx.pr(1, files)
+    const { d, calls, logs } = deps({ 1: head }, { [first]: "ann" }, { changed_files: MAX_PR_FILES })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(1)
+    const before = calls.slice(1, calls.findIndex(c => c.startsWith("pr ready")))
+    expect(before).toEqual(["api repos/o/r/pulls/1", `api repos/o/r/commits/${first}/pulls`])
+    expect(before.length).toBeLessThanOrEqual(3)
+    expect(logs).toContain("PR #1: 2 gh calls")
   })
 })
