@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest"
-import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
 import { MAX_CHECKUPS_PER_FILE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 
@@ -90,19 +88,6 @@ describe("parseLogFile: checkups, milestoneSuiteVersion, caregiver", () => {
     if (r.ok) expect(Object.keys(r.value)).not.toContain("checkups")
     expect(ok(mkFile(ID, 0))).toBe(true)
     expect(ok({ ...mkFile(ID, 0), checkups: [] })).toBe(false) // v1 has no such field
-  })
-  it("every committed log under data/runs still parses", () => {
-    const root = join(__dirname, "../../../data/runs")
-    let n = 0
-    for (const d of readdirSync(root).filter(d => d.startsWith("lrn_"))) {
-      for (const f of readdirSync(join(root, d))) {
-        if (!/^\d+\.json$/.test(f)) continue
-        const r = parseLogFile(JSON.parse(readFileSync(join(root, d, f), "utf8")))
-        expect(r.ok, `${d}/${f}: ${r.ok ? "" : r.error}`).toBe(true)
-        n++
-      }
-    }
-    expect(n).toBeGreaterThan(0)
   })
 })
 

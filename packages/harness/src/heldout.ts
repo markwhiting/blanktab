@@ -8,6 +8,12 @@ import { createWorld, hashSeed, type CanvasLike } from "@blanktab/world"
 /** Transitions in a held-out set. */
 export const HELD_OUT_TRANSITIONS = 64
 
+/** An action drawn uniformly per factor (move, button, scroll, key, in that order) from `rnd`. */
+export function uniformAction(rnd: () => number): Action {
+  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
+  return { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+}
+
 /**
  * A learner's held-out set: `n` transitions (n + 1 observations) of a fresh world seeded hashSeed(learnerSeed,
  * "heldout") — so a different layout from the world it lives in — driven by actions drawn uniformly per factor from
@@ -17,11 +23,10 @@ export const HELD_OUT_TRANSITIONS = 64
 export function buildHeldOut(learnerSeed: number, canvas: CanvasLike, n = HELD_OUT_TRANSITIONS): HeldOutSet {
   const world = createWorld({ seed: hashSeed(learnerSeed, "heldout"), canvas })
   const rnd = createRng(hashSeed(learnerSeed, "heldout-actions"))
-  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
   const obs: Observation[] = [world.observe()]
   const actions: Action[] = []
   for (let i = 0; i < n; i++) {
-    const a: Action = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+    const a = uniformAction(rnd)
     world.act(a)
     world.drainTrace()
     actions.push(a)

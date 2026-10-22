@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest"
+import { readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { validateSessionPr, type PrFile } from "../validate.ts"
-import type { CurvePoint, LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
+import { parseLogFile, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
 const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
@@ -332,5 +334,22 @@ describe("validateSessionPr v2: checkups (decision 0016)", () => {
     expect(msg(errs([file(withCk(1, [64]))], [withCk(0, [64])]))).toContain("checkup level 64 is not above 64")
     expect(msg(errs([file(withCk(0, [64])), file(withCk(1, [64]))]))).toContain("checkup level 64 is not above 64")
     expect(msg(errs([file(withCk(1, [32]))], [withCk(0, [64])]))).toContain("checkup level 32 is not above 64")
+  })
+})
+
+// Node-only (reads the repo), so it lives here under the root tsconfig, not in packages/harness (browser-typed).
+describe("committed logs", () => {
+  it("every committed log under data/runs still parses", () => {
+    const root = join(__dirname, "../../../data/runs")
+    let n = 0
+    for (const d of readdirSync(root).filter(d => d.startsWith("lrn_"))) {
+      for (const f of readdirSync(join(root, d))) {
+        if (!/^\d+\.json$/.test(f)) continue
+        const r = parseLogFile(JSON.parse(readFileSync(join(root, d, f), "utf8")))
+        expect(r.ok, `${d}/${f}: ${r.ok ? "" : r.error}`).toBe(true)
+        n++
+      }
+    }
+    expect(n).toBeGreaterThan(0)
   })
 })

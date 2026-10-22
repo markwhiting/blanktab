@@ -11,7 +11,8 @@
     "./checkpoint": "./src/checkpoint.ts",
     "./session": "./src/session.ts",
     "./knowledge": "./src/knowledge.ts",
-    "./heldout": "./src/heldout.ts"
+    "./heldout": "./src/heldout.ts",
+    "./milestones": "./src/milestones/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
