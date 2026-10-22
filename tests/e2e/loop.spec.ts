@@ -28,6 +28,8 @@ const KNOWLEDGE: Record<string, unknown> = {
   // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
   "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
   "settings-space.json": { schemaVersion: 1, settings: SPACE },
+  // As deployed (knowledge/caregiver-prior.json): the caregiver's settings for newborns.
+  "caregiver-prior.json": { schemaVersion: 1, settings: { caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000 } },
 }
 
 const CORS = {
@@ -552,7 +554,9 @@ test("tabs: LEARNER by default; HISTORY lists past sessions newest first; ABOUT 
   await expect(about).toContainText(/only pixels/i)
   await expect(about).toContainText(/api\.github\.com/)
   await expect(about).toContainText(/learns to predict what it sees/i)
-  await expect(about).toContainText(/doesn't yet move between rooms by itself/i)
+  await expect(about).not.toContainText(/doesn't yet move between rooms by itself/i)
+  await expect(about).toContainText(/caregiver/i)
+  await expect(about).toContainText(/checkup/i)
   await expect(about).not.toContainText(/flails/i)
   expect(await about.getByRole("link").evaluateAll(as => as.map(a => (a as HTMLAnchorElement).href))).toEqual(expected)
   await expect(footer).toBeVisible()
@@ -562,6 +566,25 @@ test("tabs: LEARNER by default; HISTORY lists past sessions newest first; ABOUT 
   await tab("Learner").click()
   await expect(page.getByTestId("learner-id")).toBeVisible()
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(before)
+})
+
+test("growing up: a 'Has it grown up?' panel with no checkup yet, a caregiver line, and a Milestones column in HISTORY", async ({ page }) => {
+  const errors: string[] = []
+  page.on("console", m => { if (m.type() === "error") errors.push(m.text()) })
+  page.on("pageerror", e => errors.push(e.message))
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect(page.getByRole("heading", { name: "Has it grown up?" })).toBeVisible()
+  await expect(page.getByTestId("milestone-text")).toHaveText("no checkup yet (the first is at 8 CU)")
+  await expect(page.getByTestId("milestones")).toHaveAttribute("data-bars", "0")
+  await expect(page.getByTestId("caregiver")).toHaveText(/^has (not carried it yet|carried it (once|\d+ times))/)
+  await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
+  await page.getByRole("tab", { name: "History" }).click()
+  const head = page.getByTestId("history").locator("thead th")
+  const names = await head.allTextContents()
+  expect(names.indexOf("Milestones")).toBe(names.indexOf("Own-stream ratio") + 1)
+  await expect(page.getByTestId("history").locator("tbody tr").nth(0)).toContainText("—")
+  expect(errors).toEqual([])
 })
 
 test("HISTORY says so when there are no past sessions", async ({ page }) => {

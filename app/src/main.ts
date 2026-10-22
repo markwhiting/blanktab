@@ -1,12 +1,13 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clearToken,
+  DB_BLOCKED_MESSAGE, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clampCaregiverSettings, clearToken,
   createContributor, getToken, hasCheckpoint, loadKnowledge, loadManifest, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 import { seedsOf, type LifeConfig } from "./life"
+import { caregiverText } from "./milestones"
 import type { FromWorker, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
 import { flushPolicy } from "./schedule"
@@ -59,13 +60,15 @@ async function hostSig(): Promise<LifeConfig["hostSig"]> {
 /**
  * Birth facts are fixed for a learner's whole life. A resumed learner's seed, widths, learner settings, knowledgeSha
  * and sessionsSeenAtBirth come from its checkpoint (the session prefers them to these); its speed cap from its latest log.
+ * The caregiver's settings are the knowledge's prior (clamped); a resumed life keeps its checkpoint's caregiver.
  */
-function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConfig, "knowledgeSha" | "sessionsSeenAtBirth" | "learnerSettings" | "maxStepsPerSec"> {
+function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConfig, "knowledgeSha" | "sessionsSeenAtBirth" | "learnerSettings" | "maxStepsPerSec" | "caregiver"> {
   const fresh = birthSettings(chooseSettings(knowledge, Math.random))
-  if (!latest) return { ...fresh, knowledgeSha: knowledge.manifest.knowledgeSha, sessionsSeenAtBirth: knowledge.summary.sessions.length }
+  const caregiver = clampCaregiverSettings(knowledge.caregiverPrior)
+  if (!latest) return { ...fresh, caregiver, knowledgeSha: knowledge.manifest.knowledgeSha, sessionsSeenAtBirth: knowledge.summary.sessions.length }
   const cap = latest.settings.maxStepsPerSec
   return {
-    learnerSettings: fresh.learnerSettings,
+    learnerSettings: fresh.learnerSettings, caregiver,
     maxStepsPerSec: typeof cap === "number" && cap > 0 ? cap : fresh.maxStepsPerSec,
     knowledgeSha: latest.knowledgeSha, sessionsSeenAtBirth: latest.sessionsSeenAtBirth,
   }
@@ -188,6 +191,8 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "learner") ui.settings(m.settings)
     else if (m.type === "curve") ui.curve(m.points, m.reset)
     else if (m.type === "status") ui.status(m.message)
+    else if (m.type === "checkups") ui.checkups(m.results, m.reset)
+    else if (m.type === "carried") ui.caregiver(caregiverText(m))
     else if (m.type === "queued") {
       ui.progress(m.steps, m.cu)
       // Without a token (or for a local-only learner) nothing is ever sent: keep each learner's unsent files bounded.

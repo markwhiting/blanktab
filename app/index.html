@@ -102,6 +102,8 @@
     #periphery { width: 560px; height: 350px; }
     #fovea { width: 160px; height: 160px; }
     #curve { width: 100%; height: 96px; background: transparent; image-rendering: auto; border: 0; border-radius: 0; }
+    #milestones { width: 100%; height: 64px; background: transparent; image-rendering: auto; border: 0; border-radius: 0; }
+    .swatch.bar { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--accent-green); }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0 0; padding: 0; list-style: none; font-size: 11px; color: var(--muted); }
     .legend li { display: flex; align-items: center; gap: 6px; }
     .swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--curve-pred); }
@@ -217,6 +219,7 @@
             <dt>Compute lived</dt><dd data-testid="cu">…</dd>
             <dt>Speed</dt><dd data-testid="rate">…</dd>
             <dt>Status</dt><dd data-testid="status">…</dd>
+            <dt>Caregiver</dt><dd data-testid="caregiver">…</dd>
             <dt>Sessions</dt><dd data-testid="sessions">loading…</dd>
             <dt>Setting</dt><dd data-testid="setting">…</dd>
             <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
@@ -244,6 +247,19 @@
             <p class="muted" data-testid="own-ratio" style="margin: 6px 0 0"></p>
           </section>
 
+          <section class="panel surface" aria-labelledby="grown-title">
+            <h2 id="grown-title">Has it grown up?</h2>
+            <p class="muted">At 8, 16, 32 … CU, then every 1,024 CU, it gets a checkup: six short tests in fresh rooms it has
+              never seen, with its learning paused. Each bar is how many it passed.</p>
+            <canvas id="milestones" data-testid="milestones" data-bars="0" width="360" height="64" role="img"
+              aria-label="Milestone checkups: one bar per checkup, its height how many of the six tests it passed"></canvas>
+            <div class="axis" aria-hidden="true"><span>first checkup</span><span>latest →</span></div>
+            <ul class="legend">
+              <li><span class="swatch bar"></span>tests passed (the dashed line is all six)</li>
+            </ul>
+            <p data-testid="milestone-text" style="margin: 8px 0 0; font-family: var(--mono); font-size: 12px; font-weight: 600">no checkup yet (the first is at 8 CU)</p>
+          </section>
+
           <section class="panel surface" data-testid="token-panel" aria-labelledby="token-title" hidden>
             <h2 id="token-title">Share this learner's logs</h2>
             <p>The learner runs either way. Without a GitHub token its logs wait in this browser; with one, they are sent to
@@ -266,7 +282,7 @@
     <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden>
       <div class="table-wrap surface" data-testid="history">
         <table>
-          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col" class="num">CU</th><th scope="col" class="num">Held-out ratio</th><th scope="col" class="num">Own-stream ratio</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
+          <thead><tr><th scope="col">Learner</th><th scope="col" class="num">Steps</th><th scope="col" class="num">CU</th><th scope="col" class="num">Held-out ratio</th><th scope="col" class="num">Own-stream ratio</th><th scope="col">Milestones</th><th scope="col">Final</th><th scope="col">Setting</th><th scope="col">Host</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty" hidden>No past sessions yet. When a learner's logs are merged, its session appears here.</p>
@@ -280,7 +296,8 @@
           can start from what earlier ones found and, over time, do better.</p>
         <p>It learns to predict what it sees: at every step it guesses its next view of the screen, and it learns from how
           wrong the guess was. It seeks out what it can learn, moving where its guesses are getting better.
-          It doesn't yet move between rooms by itself. Its life is measured in compute (1 CU is a billion arithmetic operations), and the
+          A caregiver carries it between rooms, toward where it is learning fastest, until it uses the taskbar
+          itself; now and then it gets a checkup in rooms it has never seen. Its life is measured in compute (1 CU is a billion arithmetic operations), and the
           LEARNER tab shows its guesses against the lazy guess that nothing changes.</p>
         <p>It runs on this machine's GPU through WebGPU when there is one, otherwise on the CPU at half the size. A reload
           resumes it from its last checkpoint, saved in this browser.</p>

@@ -1,7 +1,8 @@
-// Plain DOM rendering. No framework: three tabs, a handful of labelled fields, three canvases and a table.
+// Plain DOM rendering. No framework: three tabs, a handful of labelled fields, four canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
-import { REPO, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
+import { REPO, type CheckupResult, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
 import { appendPoints, ownStreamText, ratioText, sparkline } from "./curve"
+import { appendCheckups, milestoneBars, milestoneText } from "./milestones"
 import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
@@ -60,6 +61,39 @@ function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): vo
   canvas.dataset.points = String(pred.length)
 }
 
+/**
+ * The milestone curve: one bar per checkup, its height the share of the six tests passed; a dashed line at the top is
+ * all six. data-bars counts the bars drawn.
+ */
+function drawMilestones(canvas: HTMLCanvasElement, results: readonly CheckupResult[]): void {
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return
+  const dpr = globalThis.devicePixelRatio || 1
+  const w = canvas.clientWidth || canvas.width, h = canvas.clientHeight || canvas.height
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr)
+    canvas.height = Math.round(h * dpr)
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+  const css = getComputedStyle(canvas)
+  const pad = 4
+  ctx.beginPath()
+  ctx.setLineDash([3, 4])
+  ctx.strokeStyle = css.getPropertyValue("--muted").trim() || "gray"
+  ctx.globalAlpha = 0.5
+  ctx.lineWidth = 1
+  ctx.moveTo(pad, pad + 0.5)
+  ctx.lineTo(w - pad, pad + 0.5)
+  ctx.stroke()
+  ctx.globalAlpha = 1
+  ctx.setLineDash([])
+  ctx.fillStyle = css.getPropertyValue("--accent-green").trim() || "green"
+  const bars = milestoneBars(results, w, h, pad)
+  for (const b of bars) ctx.fillRect(b.x, b.y, b.w, b.h)
+  canvas.dataset.bars = String(bars.length)
+}
+
 /** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. */
 function setupTabs(): void {
   const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
@@ -104,7 +138,8 @@ function renderHistory(k: Knowledge): void {
     const a = document.createElement("a")
     a.href = r.href; a.textContent = r.learnerId; a.target = "_blank"; a.rel = "noopener noreferrer"
     const cells: [string, string | Node][] = [
-      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Held-out ratio", r.heldOutRatio], ["Own-stream ratio", r.lossRatio], ["Final", r.final],
+      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Held-out ratio", r.heldOutRatio], ["Own-stream ratio", r.lossRatio], ["Milestones", r.milestones],
+      ["Final", r.final],
       ["Setting", r.setting], ["Host", r.host],
     ]
     for (const [i, [label, c]] of cells.entries()) {
@@ -130,6 +165,10 @@ export interface Ui {
   progress(steps: number, cu: number): void
   /** `reset`: these points are the whole curve so far; otherwise they are added to it. */
   curve(points: CurvePoint[], reset: boolean): void
+  /** Milestone checkups: `reset`, these are all of them so far; otherwise they are added (a level already shown is not). */
+  checkups(results: CheckupResult[], reset: boolean): void
+  /** The caregiver's line (what it has done for this learner). */
+  caregiver(text: string): void
   /** The latest thing that happened to the learner (resumed, restored, moved to the CPU). */
   status(message: string): void
   /** A note in the life line that is not an error (e.g. a learner that cannot be resumed, a blocked database). */
@@ -153,8 +192,10 @@ export function createUi(): Ui {
   const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   const curveCanvas = byTest("curve") as HTMLCanvasElement
+  const milestonesCanvas = byTest("milestones") as HTMLCanvasElement
   let lifetime: number | undefined
   let curve: CurvePoint[] = []
+  let checkups: CheckupResult[] = []
   setupTabs()
   renderStatic()
 
@@ -173,8 +214,10 @@ export function createUi(): Ui {
       byTest("backend").textContent = "choosing…"
       byTest("rate").textContent = "…"
       byTest("status").textContent = "newborn"
+      byTest("caregiver").textContent = "…"
       this.progress(0, 0)
       this.curve([], true)
+      this.checkups([], true)
     },
     settings(settings) {
       byTest("setting").textContent = fmtSettings(settings)
@@ -197,6 +240,14 @@ export function createUi(): Ui {
       drawCurve(curveCanvas, curve)
       byTest("ratio").textContent = ratioText(curve)
       byTest("own-ratio").textContent = ownStreamText(curve)
+    },
+    checkups(results, reset) {
+      checkups = appendCheckups(reset ? [] : checkups, results)
+      drawMilestones(milestonesCanvas, checkups)
+      byTest("milestone-text").textContent = milestoneText(checkups)
+    },
+    caregiver(text) {
+      byTest("caregiver").textContent = text
     },
     status(message) {
       byTest("status").textContent = message

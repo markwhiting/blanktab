@@ -7,12 +7,13 @@ import { buildHeldOut } from "@blanktab/harness/heldout"
 import { LearnerStateVersionError, createLearner } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
 import type { Manifest } from "@blanktab/harness/knowledge"
-import type { CurvePoint } from "@blanktab/harness/log"
+import type { CheckupResult, CurvePoint, LogFile } from "@blanktab/harness/log"
 import { openQueue } from "@blanktab/harness/queue"
 import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, curvePoint, runSession, type SessionLearner } from "@blanktab/harness/session"
 import { chooseBackend } from "./backend"
 import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
+import { checkupStatus, fmtLevel } from "./milestones"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 
 const scope = self as unknown as {
@@ -51,14 +52,32 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
   let steps = 0
   let cu = 0
 
+  /** The caregiver as the page shows it: carries in the log files, plus this run's since the latest file. */
+  const care = { inFiles: 0, since: 0, to: null as string | null, safetyNet: false }
+  const postCare = () => post({ type: "carried", to: care.to, carries: care.inFiles + care.since, safetyNet: care.safetyNet })
+  /** The log files' share of the caregiver line (their carries, the latest one's safety-net mode). */
+  const careFromFiles = (files: readonly LogFile[]) => {
+    const v2 = files.flatMap(f => (f.schemaVersion === 2 ? [f] : []))
+    care.inFiles = v2.reduce((n, f) => n + (f.caregiver?.carries ?? 0), 0)
+    care.since = 0
+    care.safetyNet = v2.filter(f => f.caregiver).at(-1)?.caregiver?.safetyNet ?? false
+  }
+
   const run: RunLife = async (c, chosen, restore) => {
-    // Every log file this learner has written comes before its checkpoint, so its curve is the start of the resumed one.
-    const prior: CurvePoint[] = (await queue.files(id)).flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
+    // Every log file this learner has written comes before its checkpoint, so its curve (and its checkups) are the start
+    // of the resumed one.
+    const files = await queue.files(id)
+    const prior: CurvePoint[] = files.flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
+    const priorCheckups: CheckupResult[] = files.flatMap(f => (f.schemaVersion === 2 ? f.checkups ?? [] : []))
+    careFromFiles(files)
+    care.to = null
     const adopted = record
     record = undefined
     return runSession(c, {
       ...(adopted !== undefined ? { checkpointRecord: adopted } : {}),
       world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen), inbox,
+      // Each checkup room is a fresh world on a canvas of its own (decision 0016).
+      checkups: { canvas: () => new OffscreenCanvas(WORLD.width, WORLD.height) },
       createLearner: async (init): Promise<SessionLearner> => {
         // A newborn's held-out set (decision 0015 §3) is recorded here, at birth, from a world of its own; a resumed
         // learner carries its own in its state. The learner sees it only as data.
@@ -68,11 +87,16 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
         })
         const birth = "state" in init ? init.state : init
         post({ type: "learner", settings: { ...birth.settings, maxStepsPerSec: c.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC, seed: birth.seed }, widths: { ...birth.widths } })
-        if (!("state" in init)) post({ type: "curve", points: [], reset: true })
+        if (!("state" in init)) {
+          post({ type: "curve", points: [], reset: true })
+          post({ type: "checkups", results: [], reset: true })
+          postCare()
+        }
         // Refreshed knowledge goes to the learner if it takes it (the 04a learner does not; its logs still record the sha in force).
         const takesKnowledge = l as { onKnowledge?(m: Manifest): void }
         return {
           step: o => l.step(o), stats: () => l.stats(), save: () => l.save(), dispose: () => l.dispose(),
+          frozenRun: o => l.frozenRun(o),
           onKnowledge: k => takesKnowledge.onKnowledge?.(k),
           async sleep() {
             await l.sleep()
@@ -95,11 +119,31 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
           steps = e.steps
           cu = e.cu
           post({ type: "curve", points: [...prior, ...e.curveTail], reset: true })
+          post({ type: "checkups", results: [...priorCheckups, ...e.checkupTail], reset: true })
+          postCare()
           post({ type: "status", message: resumeStatus(e.steps, restore) })
         } else if (e.type === "restored") {
           post({ type: "status", message: `its updates kept failing at step ${e.fromSteps}: restored from its checkpoint at step ${e.toSteps} (${e.restores} restore${e.restores === 1 ? "" : "s"} so far)` })
         } else if (e.type === "logged") {
           post({ type: "queued", seq: e.seq, steps: e.steps, cu: e.cu, final: e.final })
+          // The file holds the carries since the previous one: this run's so far, and any a reload's checkpoint carried over.
+          const counted = care.since
+          void queue.latest(id).then(f => {
+            if (f?.seq !== e.seq || f.schemaVersion !== 2 || !f.caregiver) return
+            care.inFiles += f.caregiver.carries
+            care.since -= counted
+            care.safetyNet = f.caregiver.safetyNet
+            postCare()
+          }, () => {})
+        } else if (e.type === "checkupStarted") {
+          post({ type: "status", message: checkupStatus(e.level) })
+        } else if (e.type === "checkup") {
+          post({ type: "checkups", results: [e.result], reset: false })
+          post({ type: "status", message: `checkup at ${fmtLevel(e.result.level)} CU done; learning again` })
+        } else if (e.type === "carried") {
+          care.since++
+          care.to = e.to
+          postCare()
         }
       },
     })
