@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { createCanvas } from "@napi-rs/canvas"
-import { MOVE_MAGNITUDES, NOOP_ACTION, WORLD, type Action } from "@blanktab/interface"
+import { MOVE_MAGNITUDES, NOOP_ACTION, WORLD, emptyObservation, type Action } from "@blanktab/interface"
 import type { FrozenResult } from "@blanktab/learner"
 import { createRng } from "@blanktab/tensor"
 import {
@@ -78,10 +78,25 @@ function explorer(seed: number): (w: World) => Policy {
   }
 }
 
+/**
+ * Speed (rendering an observation is ~3 ms, nearly all of a run): the world with observe() answering a blank frame.
+ * Every policy in this file ignores its observation, and observing never changes a world, so a run in it records
+ * the very trace a checkup would; "blind runs record a checkup's trace" checks that against real observations.
+ */
+const BLANK = Object.freeze(emptyObservation())
+const blind = (w: World): World => new Proxy(w, { get: (t, k) => (k === "observe" ? () => BLANK : Reflect.get(t, k)) })
+
 async function run(m: Milestone, seed: number, policy: (w: World) => Policy, steps = m.budgetSteps) {
   const world = m.makeVariant(seed, canvas())
-  const trace = await recordRun(world, policy(world), steps)
+  const trace = await recordRun(blind(world), policy(world), steps)
   return { world, trace }
+}
+
+/** Each seed's M5 reference, computed once in this file (it is a pure function of the seed; checked below). */
+const refs = new Map<number, number>()
+const m5Ref = (seed: number) => {
+  if (!refs.has(seed)) refs.set(seed, byId("M5").reference!(seed, canvas()))
+  return refs.get(seed)!
 }
 const judge = (m: Milestone, trace: CheckupTrace, ref?: number) => ({ measure: m.measure(trace, NO_STATS, ref), passed: m.passes(trace, NO_STATS, ref) })
 
@@ -263,8 +278,8 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
     const m = byId("M5")
     expect([M5_REFERENCE_CLICKERS, M5_MIN_PAGES]).toEqual([16, 4])
     for (const seed of SEEDS_1_20) {
-      const ref = m.reference!(seed, canvas())
-      if (seed <= 3) expect(m.reference!(seed, canvas())).toBe(ref)
+      const ref = m5Ref(seed)
+      if (seed <= 3) expect(m.reference!(seed, canvas())).toBe(ref) // deterministic: a fresh computation agrees
       expect(ref).toBeGreaterThanOrEqual(1)
       const dfs = await run(m, seed, explorer(seed))
       const pages = distinct(dfs.trace)
@@ -275,7 +290,7 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
     // and they rarely pass against it (a lucky clicker reaching 4+ pages can).
     let lucky = 0
     for (const seed of [1, 2]) {
-      const ref = m.reference!(seed, canvas())
+      const ref = m5Ref(seed)
       let sum = 0
       for (let j = 0; j < M5_REFERENCE_CLICKERS; j++) {
         const rnd = createRng(hashSeed(seed, `random-clicker/${j}`))
@@ -325,7 +340,8 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
       passes[m.id] = 0
       measures[m.id] = []
       for (let seed = 1; seed <= 10; seed++) {
-        const ref = m.reference?.(seed, canvas())
+        const ref = m.id === "M5" ? m5Ref(seed) : undefined
+        expect(m.reference === undefined, m.id).toBe(m.id !== "M5")
         const { trace } = await run(m, seed, () => flailer(seed))
         const j = judge(m, trace, ref)
         if (j.passed) passes[m.id]!++
@@ -334,6 +350,16 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
     }
     console.info(`uniform-random policy, seeds 1–10: passes ${JSON.stringify(passes)}; measures ${JSON.stringify(measures)}`)
     for (const id of ["M2", "M3", "M4", "M5"]) expect(passes[id], id).toBeLessThanOrEqual(1)
+  })
+
+  it("blind runs record a checkup's trace: for every milestone, the same actions give the same trace with real observations", async () => {
+    for (const m of MILESTONES_V1) {
+      const policy = (seed: number) => { const rnd = createRng(hashSeed(seed, "blind-check")); return () => uniformAction(rnd) }
+      const seeing = await recordRun(m.makeVariant(3, canvas()), policy(3), m.budgetSteps)
+      const { trace } = await run(m, 3, () => policy(3))
+      expect(trace, m.id).toEqual(seeing)
+      expect(trace.events.length, m.id).toBeGreaterThan(0) // non-vacuous: the world did something
+    }
   })
 
   it("recordRun: initial state, one state per step, every trace event; yields every step when given yieldNow, else every YIELD_EVERY", async () => {
