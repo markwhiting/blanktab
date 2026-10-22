@@ -34,9 +34,9 @@ export type CheckupOutcome = { status: "done"; result: CheckupResult } | { statu
 /**
  * Runs every milestone of the suite in order. Milestone m acts in m.makeVariant(checkupSeed(learnerId, level, m.id))
  * through a frozen run seeded hashSeed(that seed, "policy"), for m.budgetSteps steps. A milestone that throws (not
- * recoverable) is not passed, its measure is null and the result has `error: true`; the rest still run. A recoverable
- * error is rethrown once the open run is disposed. A halt (shouldStop) abandons the checkup: no result. `evalCU` is the
- * learner's stats().evalCU delta over the whole checkup.
+ * recoverable), or whose run's dispose() throws, is not passed, its measure is null and the result has `error: true`;
+ * the rest still run. A recoverable error is rethrown once the open run is disposed. A halt (shouldStop) abandons the
+ * checkup: no result. `evalCU` is the learner's stats().evalCU delta over the whole checkup.
  */
 export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
   const suite = d.suite ?? MILESTONES_V1
@@ -48,22 +48,32 @@ export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
     if (d.shouldStop?.()) return { status: "abandoned" }
     const seed = checkupSeed(d.learnerId, d.level, m.id)
     let run: ReturnType<typeof d.learner.frozenRun> | null = null
+    let outcome: { value: number; pass: boolean } | null = null // null: the milestone threw
+    let rethrow: { e: unknown } | null = null
     try {
       const world = m.makeVariant(seed, d.canvas())
       const reference = m.reference?.(seed, d.canvas())
       const r = (run = d.learner.frozenRun({ seed: hashSeed(seed, "policy"), measureLoss: m.measuresLoss }))
       const trace = await recordRun(world, o => r.step(o), m.budgetSteps, d.yieldNow)
       const stats = r.result()
-      const value = m.measure(trace, stats, reference)
-      const pass = m.passes(trace, stats, reference)
-      measures[m.id] = Number.isFinite(value) ? value : null
-      if (pass) passed.push(m.id)
+      outcome = { value: m.measure(trace, stats, reference), pass: m.passes(trace, stats, reference) }
     } catch (e) {
-      if (d.recoverable?.(e)) throw e
+      if (d.recoverable?.(e)) rethrow = { e }
+    }
+    // A dispose that throws counts as the milestone throwing; it never masks a recoverable error in flight nor stops
+    // the remaining milestones.
+    try {
+      run?.dispose()
+    } catch {
+      outcome = null
+    }
+    if (rethrow) throw rethrow.e
+    if (outcome) {
+      measures[m.id] = Number.isFinite(outcome.value) ? outcome.value : null
+      if (outcome.pass) passed.push(m.id)
+    } else {
       measures[m.id] = null
       error = true
-    } finally {
-      run?.dispose()
     }
   }
   if (d.shouldStop?.()) return { status: "abandoned" }

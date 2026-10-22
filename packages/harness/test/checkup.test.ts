@@ -3,7 +3,7 @@ import { createCanvas } from "@napi-rs/canvas"
 import { WORLD, isValidAction, type Action } from "@blanktab/interface"
 import { DEFAULT_SETTINGS, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerStats, type Widths } from "@blanktab/learner"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
-import { createWorld, hashSeed } from "@blanktab/world"
+import { createWorld, hashSeed, type World } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
 import { MILESTONE_IDS, MILESTONE_SUITE_VERSION } from "../src/log"
 import { MILESTONES_V1, YIELD_EVERY, type Milestone } from "../src/milestones"
@@ -13,8 +13,11 @@ const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
 const canvas = () => createCanvas(WORLD.width, WORLD.height)
 const SUITE_IDS = MILESTONE_IDS[MILESTONE_SUITE_VERSION]!
 
-/** A stub learner: frozen runs act uniformly at random from their seed; each step bills 0.001 evalCU. */
-function stubLearner() {
+/**
+ * A stub learner: frozen runs act uniformly at random from their seed; each step bills 0.001 evalCU. The run opened
+ * `disposeThrows`-th (0-based) closes but then throws from dispose().
+ */
+function stubLearner(disposeThrows = -1) {
   const stats = { evalCU: 0.5, cu: 3 } as LearnerStats
   const log = { openRuns: 0, opened: [] as FrozenRunOptions[], disposed: 0 }
   return {
@@ -26,11 +29,15 @@ function stubLearner() {
         log.openRuns++
         log.opened.push(o)
         const rnd = createRng(o.seed)
+        const index = log.opened.length - 1
         let closed = false
         return {
           step: async () => { stats.evalCU += 0.001; return uniformAction(rnd) },
           result: () => ({ predLoss: NaN, baselineLoss: NaN, transitions: 0 }),
-          dispose() { if (!closed) { closed = true; log.openRuns--; log.disposed++ } },
+          dispose() {
+            if (!closed) { closed = true; log.openRuns--; log.disposed++ }
+            if (index === disposeThrows) throw new Error("stub: dispose failed")
+          },
         }
       },
     },
@@ -51,22 +58,57 @@ describe("checkups (decision 0016)", { timeout: 60_000 }, () => {
     expect(new Set([s, ...others]).size).toBe(4)
   })
 
-  it("each milestone runs in its own fresh world; the main world's tick, state() and trace are untouched", async () => {
-    const mk = () => createWorld({ seed: 5, canvas: canvas() })
-    const main = mk(), twin = mk()
-    const rnd = createRng(9), rndTwin = createRng(9)
-    for (let i = 0; i < 30; i++) { main.act(uniformAction(rnd)); twin.act(uniformAction(rndTwin)) }
-    const seeds: [string, number][] = []
-    const suite = small().map(m => ({ ...m, makeVariant: (seed: number, c: Parameters<Milestone["makeVariant"]>[1]) => { seeds.push([m.id, seed]); return m.makeVariant(seed, c) } }))
-    const { learner, log } = stubLearner()
+  it("each milestone acts in a new world of its own on a new canvas, seeded checkupSeed; none is reused across milestones or checkups", async () => {
+    type Canvas = ReturnType<typeof canvas>
+    const issued: Canvas[] = []
+    const made: { id: string; seed: number; canvas: unknown; world: World }[] = []
+    const suite = small().map(m => ({
+      ...m,
+      makeVariant(seed: number, c: Parameters<Milestone["makeVariant"]>[1]) {
+        const world = m.makeVariant(seed, c)
+        made.push({ id: m.id, seed, canvas: c, world })
+        return world
+      },
+    }))
+    const deps = (learner: CheckupDeps["learner"]) => base({ learner, suite, canvas: () => { const c = canvas(); issued.push(c); return c } })
+    const first = stubLearner(), second = stubLearner()
+    expect((await runCheckup(deps(first.learner))).status).toBe("done")
+    expect(made.map(x => [x.id, x.seed])).toEqual(SUITE_IDS.map(id => [id, checkupSeed("abc", 8, id)]))
+    expect((await runCheckup(deps(second.learner))).status).toBe("done")
+    expect(made).toHaveLength(12)
+    // Every d.canvas() call gave a distinct canvas (M5 asks for a second one for its reference), and each variant drew
+    // on one of them, never another's.
+    expect(issued).toHaveLength(14)
+    expect(new Set(issued).size).toBe(14)
+    expect(made.every(x => issued.includes(x.canvas as Canvas))).toBe(true)
+    expect(new Set(made.map(x => x.canvas)).size).toBe(12)
+    // Twelve distinct World instances, each the one acted in (from tick 0, for exactly the budget).
+    expect(new Set(made.map(x => x.world)).size).toBe(12)
+    for (const x of made) expect(x.world.tick).toBe(20)
+    // The policy: a frozen run per milestone, seeded hashSeed(variant seed, "policy"), measuring loss for M1 only.
+    expect(first.log.opened.map(o => o.seed)).toEqual(SUITE_IDS.map(id => hashSeed(checkupSeed("abc", 8, id), "policy")))
+    expect(first.log.opened.map(o => o.measureLoss)).toEqual(SUITE_IDS.map(id => id === "M1"))
+  })
+
+  it("a dispose() that throws marks that milestone not passed, measure null, error true; the rest still run", async () => {
+    const { learner, log } = stubLearner(2) // M3's run
+    const suite = small(10).map(m => ({ ...m, passes: () => true }))
     const out = await runCheckup(base({ learner, suite }))
-    expect(out.status).toBe("done")
-    expect(seeds).toEqual(SUITE_IDS.map(id => [id, checkupSeed("abc", 8, id)]))
-    expect(log.opened.map(o => o.seed)).toEqual(SUITE_IDS.map(id => hashSeed(checkupSeed("abc", 8, id), "policy")))
-    expect(log.opened.map(o => o.measureLoss)).toEqual(SUITE_IDS.map(id => id === "M1"))
-    expect(main.tick).toBe(twin.tick)
-    expect(main.state()).toEqual(twin.state())
-    expect(main.drainTrace()).toEqual(twin.drainTrace())
+    if (out.status !== "done") throw new Error("abandoned")
+    expect(out.result.error).toBe(true)
+    expect(out.result.passed).toEqual(SUITE_IDS.filter(id => id !== "M3"))
+    expect(out.result.measures.M3).toBeNull()
+    expect(log.opened).toHaveLength(6)
+    expect(log.openRuns).toBe(0)
+  })
+
+  it("a dispose() that throws does not mask a recoverable error in flight", async () => {
+    const { learner, log } = stubLearner(0)
+    class Lost extends Error {}
+    const suite = small(10).map(m => (m.id === "M1" ? { ...m, measure: () => { throw new Lost("device lost") } } : m))
+    await expect(runCheckup(base({ learner, suite, recoverable: e => e instanceof Lost }))).rejects.toBeInstanceOf(Lost)
+    expect(log.opened).toHaveLength(1)
+    expect(log.openRuns).toBe(0)
   })
 
   it("result: level, steps, passed in suite order, a measure per id, evalCU = the learner's evalCU delta", async () => {
@@ -142,9 +184,7 @@ describe("checkups (decision 0016)", { timeout: 60_000 }, () => {
     // see the task-4 report). This fixture (seed 21, id "nb-21") is one that passes nothing; M1 never passes (ratio 1).
     const l = await createLearner({ backend: createCpuBackend(), seed: 21, widths: TINY, settings: DEFAULT_SETTINGS })
     const before = await l.save()
-    const t0 = Date.now()
     const out = await runCheckup({ learnerId: "nb-21", level: 8, steps: 0, learner: l, canvas })
-    const ms = Date.now() - t0
     const after = await l.save()
     if (out.status !== "done") throw new Error("abandoned")
     expect({ ...after, stats: { ...after.stats, evalCU: 0 } }).toEqual({ ...before, stats: { ...before.stats, evalCU: 0 } })
@@ -158,7 +198,6 @@ describe("checkups (decision 0016)", { timeout: 60_000 }, () => {
     // The learner is usable afterwards (no frozen run left open).
     const a: Action = await l.step(createWorld({ seed: 1, canvas: canvas() }).observe())
     expect(isValidAction(a)).toBe(true)
-    console.info(`full v1 checkup, real CPU learner (TINY): ${ms} ms; measures ${JSON.stringify(out.result.measures)}`)
     l.dispose()
   })
 })

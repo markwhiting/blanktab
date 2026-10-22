@@ -73,6 +73,31 @@ On every seed tested:
 
 Every variant in seeds 1–20 leaves room to pass: interactive and responsive area in (0, 0.5), r0 < 1, ≥ 4 pages reachable, and 4 rooms.
 
+### Newborn base rate (added in Plan 04b Task 4, controller ruling; agent-measured)
+An untrained learner is not a uniform-random policy. Its fixed initial biases can repeat one kind of action, such as drifting to the taskbar and clicking there. So newborns pass milestones by luck more often than the uniform-random rates above suggest, including M3 and M6, which random passed 0/10.
+
+**Method.** The real v1 suite, via `runCheckup`, on 60 untrained learners:
+- `CPU_WIDTHS` on the CPU backend, `DEFAULT_SETTINGS`;
+- seeds 1000–1059, ids `newborn-0`…`newborn-59`, level 8;
+- a one-off script, not committed.
+
+**Results:**
+
+| | M1 | M2 | M3 | M4 | M5 | M6 |
+|---|---|---|---|---|---|---|
+| newborns passing (of 60) | 0 | 3 | 8 | 11 | 2 | 3 |
+| rate | 0 % | 5 % | 13 % | 18 % | 3 % | 5 % |
+| median measure | 1 | 0.99 | 0.65 | 0.41 | 0.89 | 0 |
+
+- **Scores (passes per newborn):** 0 on 35 learners, 1 on 23, 2 on 2. No learner had a milestone error.
+- **M1:** every newborn scored exactly 1, the on-device baseline ruling at work.
+- **Cost:** a checkup cost ~7.3 evalCU on average at `CPU_WIDTHS`.
+
+**How to read a pass.** This corrects the "Random behaviour scores ~0" expectation under Consequences: a newborn scores 1 or more on ~42 % of learners.
+- A single milestone pass counts as evidence of learning only when it is above this base rate. For example, it holds across learners at a rate clearly above the newborn row, or it is sustained across a learner's later checkups.
+- The first checkup, at 8 CU, is each learner's own baseline. Later checkups are read against it.
+- Thresholds are unchanged.
+
 ### Checkups
 - **Schedule.** Checkups follow the log schedule (0014): 8, 16, …, 512 CU, then every 1,024 CU. So 2⁰–2² CU are never checked. This amends §8.3's "2ᵏ, k = 0, 1, 2…".
 - **One per sleep.** Each sleep runs at most one checkup, at the highest level that is due and not yet checked. Early on, 8 and 16 CU can share one; the skipped level is not run separately.
