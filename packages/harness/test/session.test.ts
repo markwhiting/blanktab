@@ -66,7 +66,7 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
 function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number }) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
-    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0, evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN } }
+    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0, evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN, lastLoss: Number.NaN } }
     const st: StubState = structuredClone(s0)
     const loss = () => {
       const n = st.stats.steps

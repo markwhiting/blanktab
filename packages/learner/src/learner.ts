@@ -66,6 +66,28 @@ export interface LearnerStats {
   heldOutLoss: number
   /** Copy-last's mean loss on the same transitions (the same size weighting); NaN until the first scoring or without a set. */
   heldOutBaseline: number
+  /** L_before of this step's online update; NaN on the first step or when non-finite. Absent in older states: read as NaN. */
+  lastLoss: number
+}
+
+export interface FrozenRunOptions {
+  /** Seeds the run's own action-sampling RNG (the learner's is never drawn from). */
+  seed: number
+  /** Measure the prediction loss and copy-last on each transition (costs a forward pass of the predictor per step). */
+  measureLoss: boolean
+}
+/** Means over the run's transitions (o_{t-1}, a_{t-1}) → o_t; NaN with none or without measureLoss. */
+export interface FrozenResult { predLoss: number; baselineLoss: number; transitions: number }
+/**
+ * A frozen run (spec §8.3, checkups): the learner's current weights acting and predicting in some other stream, from
+ * the zero recurrent state with its own RNG. It changes nothing in the learner but stats.evalCU (its FLOPs). While it
+ * is open the learner's step, sleep, save and replayLoss reject; dispose it to free its tensors and reopen them. A run
+ * whose step threw has freed its tensors and only rejects from then on: dispose it.
+ */
+export interface FrozenRun {
+  step(o: Observation): Promise<Action>
+  result(): FrozenResult
+  dispose(): void
 }
 
 /**
@@ -139,6 +161,8 @@ export interface TrainableLearner extends Learner {
   replayLoss(): Promise<number>
   /** Every parameter's values, in checkpoint order (Model.params). */
   readParams(): Promise<Float32Array[]>
+  /** Opens a frozen run (see FrozenRun). Throws while one is open, while a step, sleep or save runs, or after dispose. */
+  frozenRun(opts: FrozenRunOptions): FrozenRun
   /** The FIFO replay buffer (raw frames; do not mutate). */
   readonly replay: ReplayBuffer
   dispose(): void
@@ -199,6 +223,9 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
     exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE), residualDecay: clamp(s.residualDecay, RESIDUAL_DECAY_RANGE),
   }
 }
+
+const FROZEN_OPEN = "learner: a frozen run is open (dispose it first)"
+const IN_PROGRESS = "learner: a step, sleep or save is already in progress (await it first)"
 
 /** Floor of the curiosity scale, so progress on a near-zero loss cannot blow up. */
 export const CURIOSITY_SCALE_FLOOR = 1e-6
@@ -363,6 +390,11 @@ function checkState(s: LearnerState): void {
     // NaN (not scored yet, or no set) or a finite loss: a scoring never stores anything else.
     if (!(typeof v === "number" && (Number.isNaN(v) || (Number.isFinite(v) && v >= 0)))) fail(`stats.${k} = ${v}`)
   }
+  // Optional (states from before it existed load with NaN); when present, NaN or a finite loss.
+  if ("lastLoss" in s.stats) {
+    const v: unknown = s.stats.lastLoss
+    if (!(typeof v === "number" && (Number.isNaN(v) || (Number.isFinite(v) && v >= 0)))) fail(`stats.lastLoss = ${String(v)}`)
+  }
   if (s.heldOut !== null) checkHeldOut(s.heldOut, "LearnerState: heldOut")
   if ((s.last === null) !== (s.stats.steps === 0)) fail("last must be null exactly when no step has been taken")
 }
@@ -449,7 +481,7 @@ export async function createLearner(opts: {
   const replay = new ReplayBuffer(settings.bufferSize)
   const stats: LearnerStats = {
     steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0,
-    evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN,
+    evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN, lastLoss: Number.NaN,
   }
 
   // Every tensor made by `t` while the learner is being constructed is registered (see `owned` below).
@@ -493,6 +525,9 @@ export async function createLearner(opts: {
   let last: Last | null = null
   let busy = false
   let disposed = false
+  /** A frozen run is open; closeFrozen disposes it (the learner's dispose does). */
+  let frozenOpen = false
+  let closeFrozen: (() => void) | null = null
   // concat(logits [1,76], value [1,1]) -> [1,77] as two exact 0/1 selection matmuls (no concat op in @blanktab/tensor),
   // so acting reads the heads once. Caller-owned constants, freed in dispose().
   let selL: Tensor
@@ -542,16 +577,48 @@ export async function createLearner(opts: {
   }
   const ema = (prev: number, v: number) => (Number.isFinite(prev) ? prev + STATS_ALPHA * (v - prev) : v)
 
+  /** Both outputs' MSE against y, weighted by size (the MSE over their concatenation, comparable with copyLastBaseline). */
+  const sizeWeightedLoss = (p: TargetTensors, y: TargetTensors) =>
+    add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
+
   /**
    * Size-weighted MSE of predict(core(inputs, hIn), action, base) against y. `base` is the targets of the frame
    * `inputs` came from (residual predictor). Builds a graph unless under noGrad.
    */
   const predictionLoss = (inputs: InputTensors, hIn: Tensor, action: Tensor, base: TargetTensors, y: TargetTensors) =>
     // A composite: if building it fails part-way, everything it made is freed (nothing unreachable is left).
-    composite(() => {
-      const p = model.predict(model.core(inputs, hIn), action, base)
-      return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
-    })
+    composite(() => sizeWeightedLoss(model.predict(model.core(inputs, hIn), action, base), y))
+
+  /** The acting heads at h as one [1,77] tensor (76 logits then V(h)), no graph: acting reads them once. */
+  const actingHeads = (hh: Tensor) => noGrad(() => composite(() => {
+    const { logits, value } = model.heads(hh)
+    return add(matmul(logits, selL), matmul(value, selV))
+  }))
+
+  /**
+   * Holds the tensors of one forward-only pass (scoreHeldOut, a frozen run): `keep` registers one, `drop` frees some
+   * now, `freeAll` frees whatever is still held (at the end, or on any failure: nothing leaks).
+   */
+  const tracker = () => {
+    const held = new Set<Tensor>()
+    const keep = <T extends Tensor>(x: T): T => { held.add(x); return x }
+    const T = (d: Float32Array, shape: number[]) => keep(t(d, shape))
+    return {
+      keep,
+      T,
+      drop: (...xs: (Tensor | null)[]) => { for (const x of xs) if (x) { held.delete(x); x.dispose() } },
+      freeAll: () => { for (const x of held) x.dispose(); held.clear() },
+      inputsOf: (o: Observation): InputTensors => {
+        const ins = obsToInputs(o)
+        return {
+          periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
+          fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
+          proprio: T(ins.proprio, [1, 3]),
+        }
+      },
+      targetsOf: (y: Targets): TargetTensors => ({ periphery: T(y.periphery, [1, PRED_P]), fovea: T(y.fovea, [1, PRED_F]) }),
+    }
+  }
 
   /** −logπ(a)·A + (target − V)² − β·H(π) on the heads at the detached h. `adv` is stopgrad(target − V). */
   const actorCriticLoss = (hPrev: Tensor, action: Action, target: number) => {
@@ -633,36 +700,21 @@ export async function createLearner(opts: {
     const flops0 = backend.stats.flops
     const n = heldOut.actions.length
     /** Every tensor this scoring holds right now (freed at the end, or on any failure: nothing leaks). */
-    const held = new Set<Tensor>()
-    const keep = <T extends Tensor>(x: T): T => { held.add(x); return x }
-    const drop = (...xs: Tensor[]) => { for (const x of xs) { held.delete(x); x.dispose() } }
-    const T = (d: Float32Array, shape: number[]) => keep(t(d, shape))
-    const targetsOf = (o: Observation): TargetTensors => {
-      const y = targetsFromObs(o)
-      return { periphery: T(y.periphery, [1, PRED_P]), fovea: T(y.fovea, [1, PRED_F]) }
-    }
+    const { keep, drop, T, freeAll, inputsOf, targetsOf } = tracker()
     try {
       let hh = keep(model.zeroState())
       let total: Tensor | null = null
-      let base = targetsOf(heldOut.obs[0]!)
+      let base = targetsOf(targetsFromObs(heldOut.obs[0]!))
       for (let i = 0; i < n; i++) {
-        const ins = obsToInputs(heldOut.obs[i]!)
-        const inputs: InputTensors = {
-          periphery: T(ins.periphery, [PERIPHERY.channels, PERIPHERY.height, PERIPHERY.width]),
-          fovea: T(ins.fovea, [FOVEA.channels, FOVEA.height, FOVEA.width]),
-          proprio: T(ins.proprio, [1, 3]),
-        }
-        const y = targetsOf(heldOut.obs[i + 1]!)
+        const inputs = inputsOf(heldOut.obs[i]!)
+        const y = targetsOf(targetsFromObs(heldOut.obs[i + 1]!))
         const aT = T(actionOneHot(heldOut.actions[i]!), [1, ACTION_DIM])
         const h0 = hh
         const hNext = keep(noGrad(() => composite(() => model.core(inputs, h0))))
         drop(h0)
         hh = hNext
         const b = base
-        const li = keep(noGrad(() => composite(() => {
-          const p = model.predict(hNext, aT, b)
-          return add(scale(mse(p.periphery, y.periphery), W_P), scale(mse(p.fovea, y.fovea), W_F))
-        })))
+        const li = keep(noGrad(() => composite(() => sizeWeightedLoss(model.predict(hNext, aT, b), y))))
         const prev: Tensor | null = total
         total = prev ? keep(noGrad(() => composite(() => add(prev, li)))) : li
         if (prev) drop(prev, li) // li is held until it is merged into the running total
@@ -674,7 +726,7 @@ export async function createLearner(opts: {
       stats.heldOutLoss = Number.isFinite(loss) ? loss : Number.NaN
       stats.heldOutBaseline = heldOutCopyLast
     } finally {
-      for (const x of held) x.dispose()
+      freeAll()
       stats.evalCU += (backend.stats.flops - flops0) / 1e9
     }
   }
@@ -717,10 +769,14 @@ export async function createLearner(opts: {
     } satisfies LearnerState)
   }
 
-  /** Runs `fn` with the learner to itself: step, sleep, save and replayLoss never interleave. */
-  async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  /**
+   * Runs `fn` with the learner to itself: step, sleep, save, replayLoss and a frozen run's step never interleave.
+   * Only a frozen run's own step may run while a frozen run is open.
+   */
+  async function exclusive<T>(fn: () => Promise<T>, frozenStep = false): Promise<T> {
     if (disposed) throw new Error("learner: used after dispose")
-    if (busy) throw new Error("learner: a step, sleep or save is already in progress (await it first)")
+    if (frozenOpen && !frozenStep) throw new Error(FROZEN_OPEN)
+    if (busy) throw new Error(IN_PROGRESS)
     busy = true
     try {
       return await fn()
@@ -739,6 +795,7 @@ export async function createLearner(opts: {
 
     let info: UpdateInfo | null = null
     let aT: Tensor | null = null
+    stats.lastLoss = Number.NaN
     if (last && hIn) {
       const prev: Last = last
       const hPrev2: Tensor = hIn
@@ -750,6 +807,7 @@ export async function createLearner(opts: {
       const lossBefore = predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)
       const lb = await scalar(lossBefore)
       if (Number.isFinite(lb)) {
+        stats.lastLoss = lb
         backward(lossBefore)
         opt.step()
         opt.zeroGrad()
@@ -774,10 +832,7 @@ export async function createLearner(opts: {
 
     // 3. Act: h_t and the heads (one [1,77] read: 76 logits then V(h_t)), no graph.
     const hNext = noGrad(() => composite(() => model.core(inputs, h)))
-    const headsT = noGrad(() => composite(() => {
-      const { logits, value } = model.heads(hNext)
-      return add(matmul(logits, selL), matmul(value, selV))
-    }))
+    const headsT = actingHeads(hNext)
     const [headsOut, hNextData] = await Promise.all([headsT.read(), hNext.read()])
     const logits = headsOut.subarray(0, ACTION_DIM)
     const valueNext = headsOut[ACTION_DIM]!
@@ -817,8 +872,101 @@ export async function createLearner(opts: {
     return action
   }
 
+  /**
+   * Opens a frozen run (spec §8.3): each step mirrors learnAndAct without its updates. From the zero state with its
+   * own RNG: if measuring and there is a previous step, the size-weighted prediction loss of (o_{t-1}, a_{t-1}) → o_t
+   * and copy-last's on the same transition (the same loss with the prediction replaced by the current frame, so a
+   * newborn, whose prediction is exactly copy-last, scores exactly equal) are added to running sums; then the core and
+   * heads, and a_t ~ sampleAction(…, the run's RNG). No graph, no update, no replay, nothing of the learner's state
+   * touched; FLOPs to stats.evalCU. The prediction uses the carried h_{t-1} rather than recomputing it from h_{t-2}
+   * as learnAndAct does: with the weights fixed the two are the same values.
+   */
+  function frozenRun(o: FrozenRunOptions): FrozenRun {
+    if (disposed) throw new Error("learner: used after dispose")
+    if (frozenOpen) throw new Error(FROZEN_OPEN)
+    if (busy) throw new Error(IN_PROGRESS)
+    const { measureLoss } = o
+    const runRng = createRng(o.seed)
+    const tr = tracker()
+    /** h_{t-1}: the core's output on the previous observation (the zero state before the first). */
+    let hh = tr.keep(model.zeroState())
+    /** The previous step's action and targets (the residual base of the next transition). */
+    let prev: { action: Action; base: TargetTensors } | null = null
+    let predSum = 0
+    let baseSum = 0
+    let transitions = 0
+    let stepping = false
+    let closed = false
+    let failed = false
+    const close = () => {
+      tr.freeAll()
+      frozenOpen = false
+      closeFrozen = null
+    }
+    frozenOpen = true
+    closeFrozen = () => run.dispose()
+
+    async function frozenStep(ob: Observation): Promise<Action> {
+      if (failed) throw new Error("learner: this frozen run failed part-way (dispose it)")
+      const y = targetsFromObs(ob) // validates the frames (RangeError) before anything is allocated
+      const flops0 = backend.stats.flops
+      stepping = true
+      try {
+        const inputs = tr.inputsOf(ob)
+        const yT = tr.targetsOf(y)
+        let aT: Tensor | null = null
+        let lossT: Tensor | null = null
+        let baseT: Tensor | null = null
+        if (measureLoss && prev) {
+          const p = prev
+          const h0 = hh
+          const a = (aT = tr.T(actionOneHot(p.action), [1, ACTION_DIM]))
+          lossT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(model.predict(h0, a, p.base), yT))))
+          baseT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(p.base, yT))))
+        }
+        const h0 = hh
+        const hNext = tr.keep(noGrad(() => composite(() => model.core(inputs, h0))))
+        const headsT = tr.keep(actingHeads(hNext))
+        const [headsOut, l, b] = await Promise.all([headsT.read(), lossT?.read(), baseT?.read()])
+        const action = sampleAction(headsOut.subarray(0, ACTION_DIM), settings.exploreEpsilon, runRng)
+        if (l && b) {
+          predSum += l[0]!
+          baseSum += b[0]!
+          transitions++
+        }
+        tr.drop(inputs.periphery, inputs.fovea, inputs.proprio, h0, headsT, aT, lossT, baseT, prev?.base.periphery ?? null, prev?.base.fovea ?? null)
+        hh = hNext
+        prev = { action, base: yT }
+        return action
+      } catch (e) {
+        failed = true
+        tr.freeAll()
+        throw e
+      } finally {
+        stepping = false
+        stats.evalCU += (backend.stats.flops - flops0) / 1e9
+        if (closed) close() // disposed while this step ran
+      }
+    }
+
+    const run: FrozenRun = {
+      step: (ob) => (closed ? Promise.reject(new Error("learner: frozen run used after dispose")) : exclusive(() => frozenStep(ob), true)),
+      result: () => (measureLoss && transitions > 0
+        ? { predLoss: predSum / transitions, baselineLoss: baseSum / transitions, transitions }
+        : { predLoss: Number.NaN, baselineLoss: Number.NaN, transitions: 0 }),
+      dispose() {
+        if (closed) return
+        closed = true
+        if (!stepping) close()
+      },
+    }
+    return run
+  }
+
   return {
     replay,
+
+    frozenRun,
 
     step: (o: Observation) => exclusive(() => learnAndAct(o)),
     sleep: () => exclusive(sleepNow),
@@ -831,6 +979,7 @@ export async function createLearner(opts: {
 
     dispose() {
       if (disposed) return
+      closeFrozen?.()
       disposed = true
       if (last) disposeLast(last)
       last = null
