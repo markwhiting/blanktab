@@ -3,18 +3,20 @@ import type { Observation, WorldView } from "@blanktab/interface"
 import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { hashSeed, type CanvasLike, type RoomKind, type World } from "@blanktab/world"
-import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings, type CaregiverState } from "./caregiver"
+import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings } from "./caregiver"
 import { runCheckup } from "./checkup"
+import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf, thin, birthOf, type Birth, type Lived } from "./final"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, tailEvalCUError, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CHECKUPS_PER_FILE, MAX_CURVE_POINTS, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
 import type { Milestone } from "./milestones"
 import { openQueue } from "./queue"
 // The log schedule lives in log.ts (browser-safe, shared with the gate); re-exported for existing callers.
 export { FIRST_LOG_CU, LAST_DOUBLING_CU, LOG_STEP_CU, logThresholds, nextCrossing } from "./log"
+// The final-log builder lives in final.ts (shared with the orphan sweep); its constant is re-exported for existing callers.
+export { DEFAULT_MAX_STEPS_PER_SEC } from "./final"
 
 export const DEFAULT_SLEEP_INTERVAL = 250
-export const DEFAULT_MAX_STEPS_PER_SEC = 30
 /** This many skipped updates in a row (a learner gone non-finite) restore the last checkpoint. */
 export const RESTORE_AFTER_SKIPS = 20
 /** Restores from one checkpoint before the life is given up as failing (no new checkpoint in between). */
@@ -220,35 +222,6 @@ export function curvePoint(
   return { cu, steps, predLoss, baselineLoss, ...(scored ? { heldOut: { loss: heldOutLoss, baseline: heldOutBaseline } } : {}) }
 }
 
-/** Keeps every other point, always the newest, until at most MAX_CURVE_POINTS remain. */
-function thin(curve: CurvePoint[]): CurvePoint[] {
-  let c = curve
-  while (c.length > MAX_CURVE_POINTS) c = c.filter((_, i) => (c.length - 1 - i) % 2 === 0)
-  return c
-}
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
-const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
-
-/** A checkpointed learner's birth facts, from its state. RangeError if they are missing or malformed. */
-type Birth = { seed: number; widths: Widths; settings: LearnerSettings }
-function birthOf(state: unknown, id: string): Birth {
-  const fail = (what: string): never => { throw new RangeError(`learner ${id}: the checkpoint's learnerState ${what}`) }
-  if (!isRecord(state)) return fail("is not an object")
-  const { seed, widths, settings } = state
-  if (!(Number.isInteger(seed) && (seed as number) >= 0 && (seed as number) < 2 ** 32)) fail("has no uint32 seed")
-  if (!isRecord(widths) || !WIDTH_KEYS.every(k => Number.isInteger(widths[k]) && (widths[k] as number) >= 1)) fail("has malformed widths")
-  if (!isRecord(settings)) fail("has no settings")
-  let clamped: LearnerSettings
-  try {
-    clamped = clampSettings(settings as unknown as LearnerSettings)
-  } catch (e) {
-    return fail(`has bad settings (${e instanceof Error ? e.message : String(e)})`)
-  }
-  const w = widths as Record<string, number>
-  return { seed: seed as number, widths: { conv1: w.conv1!, conv2: w.conv2!, enc: w.enc!, hidden: w.hidden! }, settings: clamped }
-}
-
 /**
  * Lives one learner's life (or the rest of it): for as long as it is run, or until it has used `lifetimeCU` compute units if there is one (a test knob).
  *
@@ -332,7 +305,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   let birth: Birth | undefined
   let knowledgeSha = cfg.knowledgeSha
   let sessionsSeenAtBirth = cfg.sessionsSeenAtBirth
-  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates" | "evalCU"> }) | undefined
+  let live: (() => Lived) | undefined
   /**
    * The caregiver's carries since `cp` was saved (decision 0017): counted as they happen and zeroed only once a save
    * has committed, so a save or log write that fails (after logFile took the caregiver's summary) or a learner too
@@ -342,79 +315,16 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
 
   /** The final log file of a life that failed (see runSession), or null if there is nothing to put on the record. */
   const failedLog = async (): Promise<LogFileV2 | null> => {
-    const last = await queue.latest(id)
-    const nextSeq = (last?.seq ?? -1) + 1
-    const prior = last?.schemaVersion === 2 ? last : undefined
-    let lived: ReturnType<NonNullable<typeof live>> | undefined
+    let lived: Lived | undefined
     try {
       lived = live?.()
     } catch {
       lived = undefined // a learner too broken to report: its counters are not known
     }
-    // A life that took no step and wrote no log file has nothing to put on the record.
-    if (!last && !(Math.max(cp?.steps ?? 0, lived?.steps ?? 0) > 0)) return null
-    // Labelled with the code the life was lived on: its checkpoint's (it may have been saved by other code than this
-    // page's, e.g. before a reload onto code that cannot resume it), else its latest file's, else this page's.
-    const base = {
-      schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cp?.codeSha ?? prior?.codeSha ?? cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
-      final: true, condition: "A" as const,
-    }
-    const birthFields = (b: Birth, care?: CaregiverState) => ({
-      settings: { ...b.settings, maxStepsPerSec, seed: b.seed, ...(care ? care.settings : {}) }, widths: { ...b.widths }, knowledgeSha, sessionsSeenAtBirth,
+    return finalLogOf({
+      ctx: { learnerId: id, now, hostSig: cfg.hostSig, codeSha: cfg.codeSha, maxStepsPerSec, knowledgeSha, sessionsSeenAtBirth },
+      cp, latest: await queue.latest(id), lived, birth, carriesSinceSave,
     })
-    // Never below the latest file's counters (they never decrease across seq).
-    const atLeast = (f: LogFileV2): LogFileV2 => !prior ? f : {
-      ...f, stepsTotal: Math.max(f.stepsTotal, prior.stepsTotal), cu: Math.max(f.cu, prior.cu), restores: Math.max(f.restores, prior.restores),
-      lostCU: Math.max(f.lostCU, prior.lostCU), skippedUpdates: Math.max(f.skippedUpdates, prior.skippedUpdates),
-      // Never from a number back to absent: a checkpoint without evalCU (an older or stub state) keeps the last file's.
-      ...(f.evalCU !== undefined || prior.evalCU !== undefined ? { evalCU: Math.max(f.evalCU ?? 0, prior.evalCU ?? 0) } : {}),
-    }
-    /** evalCU, when the stats have it (a learner state from before the held-out check, or a stub, may not). */
-    const evalOf = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? { evalCU: v } : {})
-    if (cp && birth && cp.seq === nextSeq) {
-      const st = (cp.learnerState as { stats?: Partial<LearnerStats> } | null)?.stats
-      const savedSkips = typeof st?.skippedUpdates === "number" ? st.skippedUpdates : 0
-      // The scoring done since the checkpoint is thrown away with the life (it is not training: not in lostCU).
-      const f = atLeast({
-        ...evalOf(st?.evalCU),
-        ...base, ...birthFields(birth, cp.caregiver), stepsTotal: cp.steps, cu: cp.cu, curve: thin([...cp.curveTail]), restores: cp.restores,
-        // The CU lived since the checkpoint is thrown away with the life: on the record, as a restore's is.
-        lostCU: cp.lostCU + Math.max(0, (lived?.stats.cu ?? cp.cu) - cp.cu),
-        skippedUpdates: cp.lostSkips + Math.max(savedSkips, lived?.stats.skippedUpdates ?? 0),
-      })
-      // The checkpoint's checkups not yet logged, under the suite they were recorded in, billed inside the file's evalCU.
-      // A checkpoint with a tail always has the learner's evalCU (checkCheckpoint), so a tail is never dropped here.
-      const ck = cp.checkups
-      if (ck && ck.tail.length > 0) {
-        if (f.evalCU === undefined) throw new Error("final log: a checkup tail without evalCU")
-        f.checkups = ck.tail.map(c => structuredClone(c))
-        f.milestoneSuiteVersion = ck.suiteVersion ?? 1
-      } else if (ck && f.evalCU !== undefined) {
-        f.checkups = []
-        f.milestoneSuiteVersion = MILESTONE_SUITE_VERSION
-      }
-      if (cp.caregiver) {
-        // The carries made since the checkpoint are thrown away with the life, as are those its restores threw away.
-        const lost = carriesSinceSave + (cp.caregiver.lost ?? 0)
-        f.caregiver = { carries: cp.caregiver.carries, to: { ...cp.caregiver.to }, safetyNet: cp.caregiver.safetyNet, ...(lost > 0 ? { lostCarries: lost } : {}) }
-      }
-      return f
-    }
-    if (prior) {
-      // Its counters, not its checkups or carries: those are on the record already, once.
-      const { checkups: _c, caregiver: _g, ...counters } = prior
-      void _c
-      void _g
-      return { ...counters, ...base, knowledgeSha: prior.knowledgeSha, sessionsSeenAtBirth: prior.sessionsSeenAtBirth, curve: [] }
-    }
-    if (!last && birth && lived && lived.steps > 0) {
-      return {
-        ...evalOf(lived.stats.evalCU),
-        ...base, ...birthFields(birth), stepsTotal: lived.steps, cu: lived.stats.cu, curve: thin([...lived.curve]), restores: lived.restores,
-        lostCU: lived.lostCU, skippedUpdates: lived.stats.skippedUpdates + lived.lostSkips,
-      }
-    }
-    return null
   }
 
   try {

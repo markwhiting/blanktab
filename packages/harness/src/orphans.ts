@@ -1,7 +1,10 @@
 // Orphaned checkpoints: learners whose tab was closed mid-life (spec §10, "Liveness and adoption"). At startup a tab
 // adopts the newest one it may, and deletes the ones nobody will resume, so they do not fill the visitor's disk.
 import { LEARNER_STATE_VERSION } from "@blanktab/learner"
-import { checkCheckpoint, checkpointEntry, checkpointIndex, deleteCheckpoint, readCheckpointRecord } from "./checkpoint"
+import { checkCheckpoint, checkpointEntry, checkpointIndex, deleteCheckpoint, fromRecord, readCheckpointRecord, type Checkpoint } from "./checkpoint"
+import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf } from "./final"
+import type { LogFileV1 } from "./log"
+import { openQueue, type Queue } from "./queue"
 
 /** An orphan checkpointed this long ago or more is not adopted, but deleted (its logs still go out). */
 export const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000
@@ -87,6 +90,14 @@ export interface SweepResult {
  * across a full read (a GPU checkpoint is tens of MB). Of the remaining eligible ones the newest MAX_ORPHANS (counting
  * the adopted one) are kept, the rest deleted, each under its own brief lock.
  *
+ * With `final` (decision 0017), every checkpoint deleted as invalid, version, stale or surplus ends its learner's record:
+ * a final log file (finalLogOf: from the checkpoint if it is readable and of this version, else from the latest log
+ * file) is queued in the transaction that removes the checkpoint. The checkpoint's full record is read for it. An
+ * orphan's carries since its last save are unknown (its tab is gone): only those its checkpoint counts as lost are on
+ * the record. Nothing is written when there is nothing to record (no log file and no step), when the latest file is
+ * final already, or when the file cannot be built (said on console.warn); the checkpoint is then just deleted.
+ * Without `final`, nothing is written.
+ *
  * What this cannot close: between a tab's unload and its reload's first line (main(), which asks for its own lock at
  * once) nobody holds or waits for its learner's lock, so a sweep running in exactly that gap still sees an orphan and
  * may adopt it (the reloaded tab then starts a newborn) or, if it is surplus or stale, delete it. The gap is narrowed
@@ -100,6 +111,11 @@ export async function sweepCheckpoints(o: {
   exclude?: readonly string[]
   /** The full read of an adoption candidate (tests slow it down). Default readCheckpointRecord. */
   readRecord?: (idb: IDBFactory, learnerId: string) => Promise<unknown>
+  /**
+   * Deleted orphans get a final log file, written at `now`. `hostSig` and `codeSha` label one whose own are unknown (no
+   * latest file to take the host from; no checkpoint or file naming its code).
+   */
+  final?: { hostSig: LogFileV1["hostSig"]; codeSha: string; now: () => Date }
 }): Promise<SweepResult> {
   const { idb, tryLock } = o
   const readRecord = o.readRecord ?? readCheckpointRecord
@@ -120,9 +136,42 @@ export async function sweepCheckpoints(o: {
       if (!kept.has(held)) held.release()
     }
   }
-  /** Deletes the checkpoint (we hold its lock, nobody waits for it). */
-  const remove = async (learnerId: string, why: OrphanVerdict) => {
-    await deleteCheckpoint(idb, learnerId)
+  let queue: Queue | undefined
+  /** The orphan's final log file, or null if it gets none (see above). `record`: its checkpoint record if already read. */
+  const finalOf = async (learnerId: string, fin: NonNullable<typeof o.final>, record: unknown) => {
+    queue ??= await openQueue(idb)
+    const latest = await queue.latest(learnerId)
+    if (latest?.final) return null
+    let cp: Checkpoint<unknown> | undefined
+    try {
+      const r = record !== undefined ? record : await readCheckpointRecord(idb, learnerId)
+      cp = r === undefined ? undefined : await fromRecord<unknown>(r, learnerId)
+    } catch {
+      cp = undefined // unreadable: the latest file is what is known
+    }
+    const knowledgeSha = cp?.knowledgeSha ?? latest?.knowledgeSha
+    const sessionsSeenAtBirth = cp?.sessionsSeenAtBirth ?? latest?.sessionsSeenAtBirth
+    if (knowledgeSha === undefined || sessionsSeenAtBirth === undefined) return null // an old checkpoint, never logged
+    const m = latest?.settings.maxStepsPerSec
+    try {
+      return finalLogOf({
+        ctx: {
+          // The host it was lived on (its latest file's), as the code is; this tab's only for one that never logged.
+          learnerId, now: fin.now, hostSig: latest?.hostSig ?? fin.hostSig, codeSha: fin.codeSha, maxStepsPerSec: typeof m === "number" ? m : DEFAULT_MAX_STEPS_PER_SEC,
+          knowledgeSha, sessionsSeenAtBirth,
+        },
+        cp, latest,
+      })
+    } catch (e) {
+      console.warn(`learner ${learnerId}: the orphan's final log could not be built; its checkpoint is deleted without one:`, e)
+      return null
+    }
+  }
+  /** Deletes the checkpoint (we hold its lock, nobody waits for it), with its final log file if the sweep writes them. */
+  const remove = async (learnerId: string, why: OrphanVerdict, record?: unknown) => {
+    const f = o.final && why !== "final" ? await finalOf(learnerId, o.final, record) : null
+    if (f) await queue!.put(f, { remove: learnerId })
+    else await deleteCheckpoint(idb, learnerId)
     return why
   }
 
@@ -154,7 +203,7 @@ export async function sweepCheckpoints(o: {
       try {
         checkCheckpoint(record, e.learnerId)
       } catch {
-        return remove(e.learnerId, "invalid")
+        return remove(e.learnerId, "invalid", record)
       }
       if (await held.wanted()) return "wanted" as const // its tab asked for it while we read
       kept.add(held)

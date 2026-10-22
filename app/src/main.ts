@@ -231,6 +231,7 @@ async function main(ui: Ui): Promise<void> {
   const own = storedLearnerId(sessionStorage)
   const ownLock = own === null ? Promise.resolve(null) : lockOwn(own)
   answerPresence()
+  const sig = hostSig() // for the sweep's final logs: counting tabs takes a moment, so it starts now
   const showTokenState = () => {
     const stored = getToken(localStorage) !== null
     ui.tokenPanel(!stored)
@@ -274,12 +275,12 @@ async function main(ui: Ui): Promise<void> {
   ctx.halted = watchForUpdates(ctx).halted
   const release = await ownLock
   if (own !== null && release !== null) {
-    await sweep(false, own)
+    await sweep(false, sig, own)
     return live(own, ctx, release)
   }
   // A new tab (or a duplicated one, whose learner lives in the original): adopt a closed tab's learner, if any.
   // The sweep never touches the learner in this tab's sessionStorage.
-  const adopted = own === null ? await sweep(true) : (await sweep(false, own), null)
+  const adopted = own === null ? await sweep(true, sig) : (await sweep(false, sig, own), null)
   if (adopted) {
     adoptLearnerId(sessionStorage, adopted.learnerId)
     ui.notice(`Adopted learner ${adopted.learnerId}: its tab was closed, so this tab lives the rest of its life.`)
@@ -329,13 +330,16 @@ function watchForUpdates(ctx: Ctx): { halted(): void } {
 
 /**
  * Orphaned checkpoints (spec §10): adopts the newest one this tab may if `adopt`, and deletes those nobody will
- * resume, so they do not fill the disk (sweepCheckpoints). Needs Web Locks to tell orphans from live learners; without
+ * resume, so they do not fill the disk (sweepCheckpoints), each with a final log file. Needs Web Locks to tell orphans from live learners; without
  * them, and on any error, it does nothing.
  */
-async function sweep(adopt: boolean, exclude?: string): Promise<SweepResult["adopted"]> {
+async function sweep(adopt: boolean, sig: Promise<LifeConfig["hostSig"]>, exclude?: string): Promise<SweepResult["adopted"]> {
   if (!("locks" in navigator)) return null
   try {
-    const r = await sweepCheckpoints({ idb: indexedDB, tryLock: webLock(navigator.locks), now: () => new Date(), adopt, ...(exclude ? { exclude: [exclude] } : {}) })
+    // A deleted orphan's final log (decision 0017) names the host it lived on (its latest file's); this tab's only for
+    // one that never logged, and no learner runs on WebGPU in writing it.
+    const final = { hostSig: { ...(await sig), webgpu: false }, codeSha: __CODE_SHA__, now: () => new Date() }
+    const r = await sweepCheckpoints({ idb: indexedDB, tryLock: webLock(navigator.locks), now: () => new Date(), adopt, final, ...(exclude ? { exclude: [exclude] } : {}) })
     return r.adopted
   } catch (e) {
     console.warn("blanktab: the orphaned-checkpoint sweep failed", e)

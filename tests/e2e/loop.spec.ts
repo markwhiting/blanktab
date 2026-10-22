@@ -1,6 +1,7 @@
 import { test, expect, type Page, type Request } from "@playwright/test"
 import { fakeGithub } from "../../packages/harness/test/fakeGithub"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
+import { validateSessionPr } from "../../tools/gate/validate"
 
 const TOKEN = "test-token"
 const UP = "markwhiting/learner"
@@ -411,7 +412,9 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
       get.onsuccess = () => {
         const tx = db.transaction(["checkpoints", "checkpointMeta"], "readwrite")
         for (const o of others) {
-          const rec = { ...get.result, learnerId: o.learnerId, savedAt: new Date(Date.now() - o.hoursAgo * 3_600_000).toISOString() }
+          // Each as if it had lived some steps (the copied one may be the birth checkpoint, at step 0: a life with no
+          // step and no log gets no final file).
+          const rec = { ...get.result, learnerId: o.learnerId, savedAt: new Date(Date.now() - o.hoursAgo * 3_600_000).toISOString(), steps: Math.max(get.result.steps, 50) }
           tx.objectStore("checkpoints").put(rec)
           tx.objectStore("checkpointMeta").put({ learnerId: rec.learnerId, savedAt: rec.savedAt, version: rec.learnerState.version, steps: rec.steps, seq: rec.seq })
         }
@@ -441,6 +444,27 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
     }
   }))
   expect(ids.sort()).toEqual([id, others[0]!.learnerId, others[1]!.learnerId].sort())
+  // Each deleted one ends on the record (decision 0017): a final log file built from its checkpoint, in the outbox.
+  const rows = await next.evaluate(() => new Promise<{ learnerId: string; seq: number; file: Record<string, unknown> }[]>((res, rej) => {
+    const req = indexedDB.open("blanktab")
+    req.onerror = () => rej(req.error)
+    req.onsuccess = () => {
+      const all = req.result.transaction("outbox").objectStore("outbox").getAll()
+      all.onsuccess = () => { req.result.close(); res(all.result) }
+    }
+  }))
+  const deleted = others.slice(2).map(o => o.learnerId)
+  const finals = rows.filter(r => deleted.includes(r.learnerId))
+  expect(finals.map(r => r.learnerId).sort()).toEqual([...deleted].sort())
+  for (const r of finals) {
+    expect(r.seq).toBe(0)
+    expect(r.file).toMatchObject({ schemaVersion: 2, learnerId: r.learnerId, seq: 0, final: true, condition: "A" })
+    expect(r.file.stepsTotal as number).toBeGreaterThanOrEqual(50)
+    // As the gate reads it: it parses and is accepted as the learner's first PR.
+    const v = validateSessionPr([{ path: `data/runs/${r.learnerId}/0.json`, content: JSON.stringify(r.file, null, 2) }], [])
+    expect(v.errors).toEqual([])
+  }
+  expect(rows.filter(r => r.learnerId === others[0]!.learnerId || r.learnerId === others[1]!.learnerId)).toEqual([])
 })
 
 test("two tabs start at once, one reloading and one new: the reloading tab keeps its learner", async ({ page, context }) => {

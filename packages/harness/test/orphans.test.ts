@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
-import { LEARNER_STATE_VERSION } from "@blanktab/learner"
+import { DEFAULT_SETTINGS, LEARNER_STATE_VERSION, clampSettings, type Widths } from "@blanktab/learner"
 import { checkpointIds, readCheckpointRecord, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
-import { CHECKPOINTS, CHECKPOINT_META, openDb } from "../src/db"
+import { CHECKPOINTS, CHECKPOINT_META, OUTBOX, openDb } from "../src/db"
+import { CAREGIVER_DEFAULTS, createCaregiver } from "../src/caregiver"
+import { parseLogFile, type LogFileV2 } from "../src/log"
+import { validateSessionPr } from "../../../tools/gate/validate"
 import { openQueue } from "../src/queue"
 import { MAX_ORPHANS, ORPHAN_MAX_AGE_MS, learnerLockName, sweepCheckpoints, waitLock, webLock } from "../src/orphans"
 import { adoptLearnerId, storedLearnerId } from "../src/identity"
@@ -245,5 +248,185 @@ describe("orphaned checkpoints", () => {
     } finally {
       Store.prototype.get = get
     }
+  })
+})
+
+describe("orphans deleted by the sweep end on the record with a final log (Plan 04c)", () => {
+  const HOST = { cores: 2, deviceMemoryGb: 4, webgpu: true, tabsOnMachine: 2 }
+  const FINAL = { hostSig: HOST, codeSha: "b".repeat(40), now: () => NOW }
+  const W: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
+  const SETTINGS = clampSettings(DEFAULT_SETTINGS)
+  const K = "c".repeat(64)
+  /** A learner state birthOf reads (seed, widths, settings) with the stats a final file takes. */
+  const state = (stats: Record<string, number>) => ({ version: LEARNER_STATE_VERSION, seed: 7, widths: W, settings: SETTINGS, stats })
+  /** A v2 log file as a session writes it: CU doubles with seq (seq 0 at 8 CU), 100 steps per CU. */
+  const v2 = (learnerId: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => {
+    const cu = 8 * 2 ** seq
+    return {
+      schemaVersion: 2, learnerId, seq, codeSha: "a".repeat(40), knowledgeSha: K, writtenAt: new Date(NOW.getTime() - 30 * HOUR).toISOString(),
+      stepsTotal: 100 * cu, settings: { ...SETTINGS, maxStepsPerSec: 20, seed: 7 }, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
+      sessionsSeenAtBirth: 2, final: false, cu, condition: "A", widths: { ...W }, curve: [{ cu, steps: 100 * cu, predLoss: 0.02, baselineLoss: 0.025 }],
+      skippedUpdates: 1, restores: 0, lostCU: 0, evalCU: 0.5, ...over,
+    }
+  }
+  const put = async (idb: IDBFactory, files: LogFileV2[]) => { const q = await openQueue(idb); for (const f of files) await q.put(f) }
+  const filesOf = async (idb: IDBFactory, learnerId: string) => (await (await openQueue(idb)).files(learnerId)) as LogFileV2[]
+  /** Writer/validator agreement: every file parses, and the gate accepts the final one after the files before it. */
+  const gateAccepts = (files: LogFileV2[]) => {
+    for (const f of files) {
+      const p = parseLogFile(JSON.parse(JSON.stringify(f)))
+      expect(p.ok, p.ok ? "" : p.error).toBe(true)
+    }
+    const last = files.at(-1)!
+    const v = validateSessionPr([{ path: `data/runs/${last.learnerId}/${last.seq}.json`, content: JSON.stringify(last, null, 2) }], files.slice(0, -1))
+    expect(v.errors).toEqual([])
+    expect(v.ok).toBe(true)
+  }
+
+  it("a stale orphan with log files gets a final file (seq latest+1, final true, counters >= the latest's) in the transaction that removes its checkpoint; the gate's validateSessionPr accepts it after the existing files", async () => {
+    const idb = new IDBFactory()
+    const L = id(1)
+    await put(idb, [v2(L, 0), v2(L, 1)]) // 8 and 16 CU
+    const care = createCaregiver({ settings: CAREGIVER_DEFAULTS, seed: 3 })
+    care.noteLost(2) // carries a restore threw away since the last file: what the checkpoint knows
+    const tailPt = { cu: 20, steps: 2000, predLoss: 0.019, baselineLoss: 0.025 }
+    await saveCheckpoint(idb, cp(L, 30 * HOUR, {
+      steps: 2000, cu: 20, seq: 2, curveTail: [tailPt], restores: 1, lostCU: 1.5, lostSkips: 3, knowledgeSha: K, sessionsSeenAtBirth: 2,
+      codeSha: "d".repeat(40), caregiver: care.state(), checkups: { lastLevel: 16, tail: [], suiteVersion: 1 }, world: { room: "paint" },
+      learnerState: state({ cu: 20, skippedUpdates: 4, evalCU: 0.75 }),
+    }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r.verdicts).toEqual({ [L]: "stale" })
+    expect(await checkpointIds(idb)).toEqual([])
+    const files = await filesOf(idb, L)
+    expect(files.map(f => [f.seq, f.final])).toEqual([[0, false], [1, false], [2, true]])
+    const f = files[2]!
+    expect(f).toMatchObject({
+      schemaVersion: 2, learnerId: L, seq: 2, final: true, stepsTotal: 2000, cu: 20, curve: [tailPt], restores: 1, lostCU: 1.5,
+      skippedUpdates: 3 + 4, evalCU: 0.75, codeSha: "d".repeat(40), knowledgeSha: K, sessionsSeenAtBirth: 2, hostSig: files[1]!.hostSig, writtenAt: NOW.toISOString(),
+      widths: W, checkups: [], milestoneSuiteVersion: 1,
+      // maxStepsPerSec from the latest file's settings; the caregiver's settings with the learner's.
+      settings: { ...SETTINGS, maxStepsPerSec: 20, seed: 7, ...CAREGIVER_DEFAULTS },
+      caregiver: { carries: 0, to: {}, safetyNet: false, lostCarries: 2 },
+    })
+    for (const k of ["stepsTotal", "cu", "restores", "lostCU", "skippedUpdates", "evalCU"] as const) expect(f[k]!).toBeGreaterThanOrEqual(files[1]![k]!)
+    gateAccepts(files)
+  })
+
+  it("the final file and the checkpoint's removal are one transaction: a log that cannot be queued leaves the checkpoint", async () => {
+    const idb = new IDBFactory()
+    const L = id(1)
+    await put(idb, [v2(L, 0)])
+    await saveCheckpoint(idb, cp(L, 30 * HOUR, { steps: 900, cu: 9, seq: 1, knowledgeSha: K, sessionsSeenAtBirth: 2, learnerState: state({ cu: 9, skippedUpdates: 1, evalCU: 0.5 }) }))
+    const { IDBObjectStore: Store } = await import("fake-indexeddb")
+    const add = Store.prototype.add
+    Store.prototype.add = function (this: IDBObjectStore, ...a: Parameters<typeof add>) {
+      if (this.name === OUTBOX) throw new DOMException("disk full", "QuotaExceededError")
+      return add.apply(this, a)
+    } as typeof add
+    try {
+      await expect(sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: false, final: FINAL })).rejects.toThrow("disk full")
+    } finally {
+      Store.prototype.add = add
+    }
+    expect(await checkpointIds(idb)).toEqual([L])
+    expect((await filesOf(idb, L)).map(f => f.seq)).toEqual([0])
+  })
+
+  it("a version orphan (learner state version 1) gets a final file from its latest log", async () => {
+    const idb = new IDBFactory()
+    const L = id(1)
+    const care = createCaregiver({ settings: CAREGIVER_DEFAULTS, seed: 3 }).state()
+    await put(idb, [v2(L, 0), v2(L, 1, { caregiver: { carries: 2, to: { paint: 2 }, safetyNet: false }, milestoneSuiteVersion: 1, checkups: [] })])
+    await saveCheckpoint(idb, cp(L, HOUR, { steps: 3000, cu: 30, seq: 2, caregiver: care, learnerState: { version: 1, seed: 7, widths: W, stats: { cu: 30 } } }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r).toEqual({ adopted: null, verdicts: { [L]: "version" } })
+    expect(await checkpointIds(idb)).toEqual([])
+    const files = await filesOf(idb, L)
+    const { checkups: _c, caregiver: _g, ...counters } = files[1]!
+    void _c
+    void _g
+    // Its counters, an empty curve, final: not its checkups or carries (on the record already).
+    expect(files[2]).toEqual({ ...counters, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
+    gateAccepts(files)
+  })
+
+  it("a surplus orphan gets one; an adopted or kept one does not", async () => {
+    const idb = new IDBFactory()
+    for (let n = 1; n <= 5; n++) {
+      await put(idb, [v2(id(n), 0)])
+      await saveCheckpoint(idb, cp(id(n), n * HOUR, { steps: 900, cu: 9, seq: 1, knowledgeSha: K, sessionsSeenAtBirth: 2, learnerState: state({ cu: 9, skippedUpdates: 1, evalCU: 0.5 }) }))
+    }
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r.verdicts).toEqual({ [id(1)]: "adopted", [id(2)]: "kept", [id(3)]: "kept", [id(4)]: "surplus", [id(5)]: "surplus" })
+    for (let n = 1; n <= 5; n++) {
+      const files = await filesOf(idb, id(n))
+      expect(files.map(f => f.final), id(n)).toEqual(n >= 4 ? [false, true] : [false])
+      if (n >= 4) {
+        expect(files[1]).toMatchObject({ seq: 1, stepsTotal: 900, cu: 9 })
+        gateAccepts(files)
+      }
+    }
+    expect((await checkpointIds(idb)).sort()).toEqual([id(1), id(2), id(3)])
+  })
+
+  it("an invalid orphan (no meta, unreadable record) with log files gets a final from the latest file; without log files, none", async () => {
+    const idb = new IDBFactory()
+    await put(idb, [v2(id(1), 0)])
+    const db = await openDb(idb)
+    // Written by hand: no meta record, and a record that is not a checkpoint.
+    await new Promise(r => { const tx = db.transaction(CHECKPOINTS, "readwrite"); tx.objectStore(CHECKPOINTS).put({ learnerId: id(1), steps: -1 }); tx.objectStore(CHECKPOINTS).put({ learnerId: id(2) }); tx.oncomplete = r })
+    // Malformed, found only when its full record is read for adoption.
+    await put(idb, [v2(id(3), 0)])
+    await saveCheckpoint(idb, cp(id(3), HOUR, { steps: -1 }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r.verdicts).toEqual({ [id(1)]: "invalid", [id(2)]: "invalid", [id(3)]: "invalid" })
+    expect(await checkpointIds(idb)).toEqual([])
+    for (const n of [1, 3]) {
+      const files = await filesOf(idb, id(n))
+      expect(files.map(f => ({ seq: f.seq, final: f.final, stepsTotal: f.stepsTotal, cu: f.cu }))).toEqual([
+        { seq: 0, final: false, stepsTotal: 800, cu: 8 }, { seq: 1, final: true, stepsTotal: 800, cu: 8 },
+      ])
+      gateAccepts(files)
+    }
+    expect(await filesOf(idb, id(2))).toEqual([])
+  })
+
+  it("an orphan whose latest file is final gets nothing more", async () => {
+    const idb = new IDBFactory()
+    await put(idb, [v2(id(1), 0), v2(id(1), 1, { final: true })])
+    await saveCheckpoint(idb, cp(id(1), HOUR, { seq: 2 }))
+    // Stale and final at once: no file after the final one either.
+    await put(idb, [v2(id(2), 0, { final: true })])
+    await saveCheckpoint(idb, cp(id(2), 30 * HOUR, { seq: 1 }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r.verdicts).toEqual({ [id(1)]: "final", [id(2)]: "stale" })
+    expect(await checkpointIds(idb)).toEqual([])
+    expect((await filesOf(idb, id(1))).map(f => f.seq)).toEqual([0, 1])
+    expect((await filesOf(idb, id(2))).map(f => f.seq)).toEqual([0])
+  })
+
+  it("an orphan that never logged and took no step gets none; one that took steps gets one from its checkpoint", async () => {
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, cp(id(1), 30 * HOUR, { steps: 0, cu: 0, knowledgeSha: K, sessionsSeenAtBirth: 0, learnerState: state({ cu: 0, skippedUpdates: 0, evalCU: 0 }) }))
+    await saveCheckpoint(idb, cp(id(2), 30 * HOUR, { steps: 500, cu: 5, knowledgeSha: K, sessionsSeenAtBirth: 0, learnerState: state({ cu: 5, skippedUpdates: 0, evalCU: 0 }) }))
+    await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: false, final: FINAL })
+    expect(await checkpointIds(idb)).toEqual([])
+    expect(await filesOf(idb, id(1))).toEqual([])
+    const files = await filesOf(idb, id(2))
+    expect(files).toHaveLength(1)
+    // No latest file: maxStepsPerSec is the default; the code is the checkpoint's, else this page's; the host this tab's.
+    expect(files[0]).toMatchObject({ seq: 0, final: true, stepsTotal: 500, cu: 5, codeSha: FINAL.codeSha, hostSig: HOST, settings: { maxStepsPerSec: 30 } })
+    gateAccepts(files)
+  })
+
+  it("without the final option the sweep writes no log (as before)", async () => {
+    const idb = new IDBFactory()
+    await put(idb, [v2(id(1), 0)])
+    await saveCheckpoint(idb, cp(id(1), 30 * HOUR, { steps: 900, cu: 9, seq: 1, knowledgeSha: K, sessionsSeenAtBirth: 2, learnerState: state({ cu: 9, skippedUpdates: 1, evalCU: 0.5 }) }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: false })
+    expect(r.verdicts).toEqual({ [id(1)]: "stale" })
+    expect(await checkpointIds(idb)).toEqual([])
+    expect((await filesOf(idb, id(1))).map(f => f.seq)).toEqual([0])
   })
 })
