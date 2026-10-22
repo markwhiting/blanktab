@@ -140,6 +140,29 @@ describe("Adam", () => {
     p.dispose()
   })
 
+  it("state() settles every read before it rejects (a caller may free the optimizer once it has)", async () => {
+    const be = createCpuBackend()
+    const { read } = be
+    let reads = 0
+    let pending = 0
+    // Patched in place (a tensor's backend is its storage's): the first read rejects at once, the others take 5 ms.
+    Object.assign(be, {
+      read: (s: Parameters<typeof read>[0]) => {
+        if (++reads === 1) return Promise.reject(new Error("read failed"))
+        pending++
+        return new Promise((r) => setTimeout(r, 5)).then(() => read(s)).finally(() => { pending-- })
+      },
+    })
+    const ps = [0, 1, 2].map(() => tensor(Float32Array.from([1, 2]), [2], { requiresGrad: true, backend: be }))
+    const opt = new Adam(ps, { lr: 0.1 })
+    await expect(opt.state()).rejects.toThrow("read failed")
+    expect(reads).toBe(6)
+    expect(pending).toBe(0)
+    opt.dispose()
+    for (const p of ps) p.dispose()
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
   it("setState rejects a state that does not match the parameters", async () => {
     const be = createCpuBackend()
     const p = tensor(Float32Array.from([1, 2]), [2], { requiresGrad: true, backend: be })

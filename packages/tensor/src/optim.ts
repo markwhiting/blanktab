@@ -102,13 +102,19 @@ export class Adam {
     this.lr = lr
   }
 
-  /** A copy of the moments and step counts, in parameter order. lr and betas are not part of it (they are settings). */
+  /**
+   * A copy of the moments and step counts, in parameter order. lr and betas are not part of it (they are settings).
+   * Every read settles before it resolves or rejects (with the first rejection), so the caller may then free the
+   * optimizer: nothing is freed under a pending read.
+   */
   async state(): Promise<AdamState> {
-    const slots = await Promise.all(this.slots.map(async (s) => {
-      const [m, v] = await Promise.all([s.p.backend.read(s.m), s.p.backend.read(s.v)])
-      return { m, v, t: s.t }
-    }))
-    return { slots }
+    const ts = this.slots.map((s) => s.t)
+    const reads = this.slots.flatMap((s) => [s.m, s.v].map((st) => new Promise<Float32Array>((resolve) => resolve(s.p.backend.read(st)))))
+    let first: { e: unknown } | null = null
+    const rs = await Promise.allSettled(reads.map((r) => r.catch((e: unknown) => { first ??= { e }; throw e })))
+    if (first) throw (first as { e: unknown }).e
+    const values = rs.map((r) => (r as PromiseFulfilledResult<Float32Array>).value)
+    return { slots: ts.map((t, i) => ({ m: values[2 * i]!, v: values[2 * i + 1]!, t })) }
   }
 
   /**

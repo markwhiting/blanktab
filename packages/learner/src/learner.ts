@@ -165,6 +165,11 @@ export interface TrainableLearner extends Learner {
   frozenRun(opts: FrozenRunOptions): FrozenRun
   /** The FIFO replay buffer (raw frames; do not mutate). */
   readonly replay: ReplayBuffer
+  /**
+   * Frees the learner (idempotent). Later calls reject "learner: used after dispose" at once; a call in flight (step,
+   * sleep, save, replayLoss, a frozen step) runs to completion first, and the learner and any open frozen run are
+   * freed when it settles.
+   */
   dispose(): void
 }
 
@@ -275,6 +280,23 @@ export function sampleAction(logits: Float32Array, exploreEpsilon: number, rng: 
     return sampleFactor(logits, OFFSETS[f]!, n, rng)
   }
   return { move: factor(0), button: factor(1), scroll: factor(2), key: factor(3) }
+}
+
+/**
+ * Awaits every promise; once all have settled, resolves to their values in order, or rejects with the first rejection
+ * (in time). Unlike Promise.all, it never returns while one is still pending, so a caller may free what they read.
+ */
+async function settleAll<T>(ps: readonly Promise<T>[]): Promise<T[]> {
+  let first: { e: unknown } | null = null
+  const rs = await Promise.allSettled(ps.map((p) => p.catch((e: unknown) => { first ??= { e }; throw e })))
+  if (first) throw (first as { e: unknown }).e
+  return rs.map((r) => (r as PromiseFulfilledResult<T>).value)
+}
+
+/** Reads every tensor; waits for all to settle; then resolves to the values, or rejects with the first rejection. */
+async function readAll(xs: readonly Tensor[]): Promise<Float32Array[]> {
+  // The executor form turns a read that throws synchronously into a rejection, so every read is still awaited.
+  return settleAll(xs.map((x) => new Promise<Float32Array>((resolve) => resolve(x.read()))))
 }
 
 const isUint32 = (v: unknown) => Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 32
@@ -442,7 +464,8 @@ interface Last {
  * The predictor's residual output layers train at lr × headLrScale (a second Adam), all other parameters at lr.
  *
  * Guards: lr is clamped to LR_RANGE, headLrScale to HEAD_LR_SCALE_RANGE; a non-finite loss skips its update (counted in skippedUpdates, never
- * applied, never thrown). A rejected read() is fatal and propagates (packages/tensor/README.md rule 5).
+ * applied, never thrown). A rejected read() is fatal and propagates (packages/tensor/README.md rule 5); a step that
+ * throws part-way frees its own tensors (the learner must then be disposed) and leaves h, hIn and last as they were.
  */
 export async function createLearner(opts: {
   backend: Backend
@@ -596,8 +619,9 @@ export async function createLearner(opts: {
   }))
 
   /**
-   * Holds the tensors of one forward-only pass (scoreHeldOut, a frozen run): `keep` registers one, `drop` frees some
-   * now, `freeAll` frees whatever is still held (at the end, or on any failure: nothing leaks).
+   * Holds the tensors of one pass (scoreHeldOut, a frozen run, a step): `keep` registers one, `drop` frees some now,
+   * `release` hands some over to the caller, `freeAll` frees whatever is still held (at the end, or on any failure:
+   * nothing leaks).
    */
   const tracker = () => {
     const held = new Set<Tensor>()
@@ -607,6 +631,8 @@ export async function createLearner(opts: {
       keep,
       T,
       drop: (...xs: (Tensor | null)[]) => { for (const x of xs) if (x) { held.delete(x); x.dispose() } },
+      /** Hands tensors over to the caller (no longer freed by freeAll). */
+      release: (...xs: Tensor[]) => { for (const x of xs) held.delete(x) },
       freeAll: () => { for (const x of held) x.dispose(); held.clear() },
       inputsOf: (o: Observation): InputTensors => {
         const ins = obsToInputs(o)
@@ -750,7 +776,7 @@ export async function createLearner(opts: {
   }
 
   async function saveNow(): Promise<LearnerState> {
-    const [params, adam0, adam1] = await Promise.all([Promise.all(model.params.map((p) => p.read())), opts_[0]!.state(), opts_[1]!.state()])
+    const [params, adam0, adam1] = (await settleAll<unknown>([readAll(model.params), opts_[0]!.state(), opts_[1]!.state()])) as [Float32Array[], AdamState, AdamState]
     // structuredClone: a snapshot that shares nothing with the learner (frames shared between consecutive
     // transitions stay shared within the snapshot).
     return structuredClone({
@@ -771,7 +797,8 @@ export async function createLearner(opts: {
 
   /**
    * Runs `fn` with the learner to itself: step, sleep, save, replayLoss and a frozen run's step never interleave.
-   * Only a frozen run's own step may run while a frozen run is open.
+   * Only a frozen run's own step may run while a frozen run is open. A dispose() made while `fn` runs takes effect
+   * here, once it has settled.
    */
   async function exclusive<T>(fn: () => Promise<T>, frozenStep = false): Promise<T> {
     if (disposed) throw new Error("learner: used after dispose")
@@ -782,94 +809,130 @@ export async function createLearner(opts: {
       return await fn()
     } finally {
       busy = false
+      if (disposed) teardown()
     }
+  }
+
+  /** Frees everything the learner holds (once; dispose() calls it now, or exclusive() when the call in flight settles). */
+  function teardown(): void {
+    closeFrozen?.()
+    if (last) disposeLast(last)
+    last = null
+    selL.dispose()
+    selV.dispose()
+    h.dispose()
+    hIn?.dispose()
+    hIn = null
+    opt.dispose()
+    model.dispose()
   }
 
   async function learnAndAct(o: Observation): Promise<Action> {
     const flops0 = backend.stats.flops
     const obs = copyObs(o)
     const y = targetsFromObs(obs) // validates the frames (RangeError) before any state changes
-    const inputs = upload(obsToInputs(obs))
-    const yT = targetTensors(y)
-    stats.steps++
+    /**
+     * This step's own tensors (inputs, yT, aT, hNext, headsT). If the step throws part-way they are all freed (the
+     * graphs and the advantage are freed where they are made), and h, hIn and last are left as they were.
+     */
+    const tr = tracker()
+    try {
+      const inputs = tr.inputsOf(obs)
+      const yT = tr.targetsOf(y)
+      stats.steps++
 
-    let info: UpdateInfo | null = null
-    let aT: Tensor | null = null
-    stats.lastLoss = Number.NaN
-    if (last && hIn) {
-      const prev: Last = last
-      const hPrev2: Tensor = hIn
-      aT = t(actionOneHot(prev.action), [1, ACTION_DIM])
-      const a1 = aT
-      info = { step: stats.steps, lossBefore: Number.NaN, lossAfter: Number.NaN, reward: 0, advantage: Number.NaN, skipped: true }
+      let info: UpdateInfo | null = null
+      let aT: Tensor | null = null
+      stats.lastLoss = Number.NaN
+      if (last && hIn) {
+        const prev: Last = last
+        const hPrev2: Tensor = hIn
+        aT = tr.T(actionOneHot(prev.action), [1, ACTION_DIM])
+        const a1 = aT
+        info = { step: stats.steps, lossBefore: Number.NaN, lossAfter: Number.NaN, reward: 0, advantage: Number.NaN, skipped: true }
 
-      // 1. Prediction update (TBPTT-1 through the core); the residual base is y_{t-1}.
-      const lossBefore = predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)
-      const lb = await scalar(lossBefore)
-      if (Number.isFinite(lb)) {
-        stats.lastLoss = lb
-        backward(lossBefore)
-        opt.step()
-        opt.zeroGrad()
-      }
-      disposeGraph(lossBefore, [])
-      // 2. Curiosity: the same loss with the updated weights, relative to the running loss.
-      if (Number.isFinite(lb)) {
-        info.lossBefore = lb
-        const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)))
-        const la = await scalar(after)
-        after.dispose()
-        if (Number.isFinite(la)) {
-          info.lossAfter = la
-          // Scaled by the EMA from before this loss is folded in; the very first update has no scale yet (r = 0).
-          info.reward = curiosityReward(lb, la, stats.predLoss)
+        // 1. Prediction update (TBPTT-1 through the core); the residual base is y_{t-1}.
+        let lb = Number.NaN
+        let lossBefore: Tensor | null = null
+        try {
+          lossBefore = predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)
+          lb = await scalar(lossBefore)
+          if (Number.isFinite(lb)) {
+            stats.lastLoss = lb
+            backward(lossBefore)
+            opt.step()
+          }
+        } finally {
+          opt.zeroGrad() // also after a failure part-way through backward: no parameter keeps a stray gradient
+          if (lossBefore) disposeGraph(lossBefore, [])
         }
-        stats.predLoss = ema(stats.predLoss, lb)
+        // 2. Curiosity: the same loss with the updated weights, relative to the running loss.
+        if (Number.isFinite(lb)) {
+          info.lossBefore = lb
+          const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)))
+          let la: number
+          try {
+            la = await scalar(after)
+          } finally {
+            after.dispose()
+          }
+          if (Number.isFinite(la)) {
+            info.lossAfter = la
+            // Scaled by the EMA from before this loss is folded in; the very first update has no scale yet (r = 0).
+            info.reward = curiosityReward(lb, la, stats.predLoss)
+          }
+          stats.predLoss = ema(stats.predLoss, lb)
+        }
+        const base = copyLastBaseline(prev.targets, y)
+        if (Number.isFinite(base)) stats.baselineLoss = ema(stats.baselineLoss, base)
       }
-      const base = copyLastBaseline(prev.targets, y)
-      if (Number.isFinite(base)) stats.baselineLoss = ema(stats.baselineLoss, base)
-    }
 
-    // 3. Act: h_t and the heads (one [1,77] read: 76 logits then V(h_t)), no graph.
-    const hNext = noGrad(() => composite(() => model.core(inputs, h)))
-    const headsT = actingHeads(hNext)
-    const [headsOut, hNextData] = await Promise.all([headsT.read(), hNext.read()])
-    const logits = headsOut.subarray(0, ACTION_DIM)
-    const valueNext = headsOut[ACTION_DIM]!
-    const action = sampleAction(logits, settings.exploreEpsilon, rng)
+      // 3. Act: h_t and the heads (one [1,77] read: 76 logits then V(h_t)), no graph.
+      const hNext = tr.keep(noGrad(() => composite(() => model.core(inputs, h))))
+      const headsT = tr.keep(actingHeads(hNext))
+      const [headsOut, hNextData] = (await readAll([headsT, hNext])) as [Float32Array, Float32Array]
+      const logits = headsOut.subarray(0, ACTION_DIM)
+      const valueNext = headsOut[ACTION_DIM]!
+      const action = sampleAction(logits, settings.exploreEpsilon, rng)
 
-    // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
-    if (last && info && Number.isFinite(info.lossAfter)) {
-      const target = settings.curiosityWeight * info.reward + GAMMA * valueNext
-      const { loss, adv } = actorCriticLoss(h, last.action, target)
-      const [lac, advantage] = await Promise.all([scalar(loss), scalar(adv)])
-      if (Number.isFinite(lac)) {
-        backward(loss)
-        opt.step()
-        opt.zeroGrad()
-        info.advantage = advantage
-        info.skipped = false
+      // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
+      if (last && info && Number.isFinite(info.lossAfter)) {
+        const target = settings.curiosityWeight * info.reward + GAMMA * valueNext
+        const { loss, adv } = actorCriticLoss(h, last.action, target)
+        try {
+          const [lac, advantage] = (await readAll([loss, adv])).map((v) => v[0]!) as [number, number]
+          if (Number.isFinite(lac)) {
+            backward(loss)
+            opt.step()
+            info.advantage = advantage
+            info.skipped = false
+          }
+        } finally {
+          opt.zeroGrad()
+          disposeGraph(loss, [])
+          adv.dispose()
+        }
       }
-      disposeGraph(loss, [])
-      adv.dispose()
+      if (info) countUpdate(!info.skipped)
+
+      // 5. Store the transition, carry the state, free the rest.
+      if (last) replay.push({ obs: last.obs, hIn: hInData, action: last.action, next: obs })
+      tr.drop(aT, headsT)
+      tr.release(inputs.periphery, inputs.fovea, inputs.proprio, yT.periphery, yT.fovea, hNext)
+      if (last) disposeLast(last)
+      hIn?.dispose()
+      hIn = h
+      hInData = hData
+      h = hNext
+      hData = hNextData
+      last = { obs, inputs, action, targets: y, targetTensors: yT }
+
+      stats.cu += (backend.stats.flops - flops0) / 1e9
+      if (info) opts.onUpdate?.(info)
+      return action
+    } finally {
+      tr.freeAll() // empty after a step that completed
     }
-    if (info) countUpdate(!info.skipped)
-
-    // 5. Store the transition, carry the state, free the rest.
-    if (last) replay.push({ obs: last.obs, hIn: hInData, action: last.action, next: obs })
-    aT?.dispose()
-    headsT.dispose()
-    if (last) disposeLast(last)
-    hIn?.dispose()
-    hIn = h
-    hInData = hData
-    h = hNext
-    hData = hNextData
-    last = { obs, inputs, action, targets: y, targetTensors: yT }
-
-    stats.cu += (backend.stats.flops - flops0) / 1e9
-    if (info) opts.onUpdate?.(info)
-    return action
   }
 
   /**
@@ -890,8 +953,8 @@ export async function createLearner(opts: {
     const tr = tracker()
     /** h_{t-1}: the core's output on the previous observation (the zero state before the first). */
     let hh = tr.keep(model.zeroState())
-    /** The previous step's action and targets (the residual base of the next transition). */
-    let prev: { action: Action; base: TargetTensors } | null = null
+    /** The previous step's action and, when measuring, its targets (the residual base of the next transition). */
+    let prev: { action: Action; base: TargetTensors | null } | null = null
     let predSum = 0
     let baseSum = 0
     let transitions = 0
@@ -913,28 +976,29 @@ export async function createLearner(opts: {
       stepping = true
       try {
         const inputs = tr.inputsOf(ob)
-        const yT = tr.targetsOf(y)
+        // The targets are only ever a loss's target or the next one's base: uploaded only when measuring.
+        const yT = measureLoss ? tr.targetsOf(y) : null
         let aT: Tensor | null = null
         let lossT: Tensor | null = null
         let baseT: Tensor | null = null
-        if (measureLoss && prev) {
-          const p = prev
+        if (yT && prev?.base) {
+          const pb = prev.base
           const h0 = hh
-          const a = (aT = tr.T(actionOneHot(p.action), [1, ACTION_DIM]))
-          lossT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(model.predict(h0, a, p.base), yT))))
-          baseT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(p.base, yT))))
+          const a = (aT = tr.T(actionOneHot(prev.action), [1, ACTION_DIM]))
+          lossT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(model.predict(h0, a, pb), yT))))
+          baseT = tr.keep(noGrad(() => composite(() => sizeWeightedLoss(pb, yT))))
         }
         const h0 = hh
         const hNext = tr.keep(noGrad(() => composite(() => model.core(inputs, h0))))
         const headsT = tr.keep(actingHeads(hNext))
-        const [headsOut, l, b] = await Promise.all([headsT.read(), lossT?.read(), baseT?.read()])
-        const action = sampleAction(headsOut.subarray(0, ACTION_DIM), settings.exploreEpsilon, runRng)
+        const [headsOut, l, b] = await readAll(lossT && baseT ? [headsT, lossT, baseT] : [headsT])
+        const action = sampleAction(headsOut!.subarray(0, ACTION_DIM), settings.exploreEpsilon, runRng)
         if (l && b) {
           predSum += l[0]!
           baseSum += b[0]!
           transitions++
         }
-        tr.drop(inputs.periphery, inputs.fovea, inputs.proprio, h0, headsT, aT, lossT, baseT, prev?.base.periphery ?? null, prev?.base.fovea ?? null)
+        tr.drop(inputs.periphery, inputs.fovea, inputs.proprio, h0, headsT, aT, lossT, baseT, prev?.base?.periphery ?? null, prev?.base?.fovea ?? null)
         hh = hNext
         prev = { action, base: yT }
         return action
@@ -975,21 +1039,14 @@ export async function createLearner(opts: {
 
     stats: () => ({ ...stats }),
 
-    readParams: () => Promise.all(model.params.map((p) => p.read())),
+    readParams: () => readAll(model.params),
 
     dispose() {
       if (disposed) return
-      closeFrozen?.()
+      // From now on every call rejects. A call in flight (step, sleep, save, replayLoss, a frozen step) is never
+      // freed under: exclusive() tears down when it settles.
       disposed = true
-      if (last) disposeLast(last)
-      last = null
-      selL.dispose()
-      selV.dispose()
-      h.dispose()
-      hIn?.dispose()
-      hIn = null
-      opt.dispose()
-      model.dispose()
+      if (!busy) teardown()
     },
   }
 }

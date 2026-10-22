@@ -1051,3 +1051,171 @@ describe("frozen runs (checkups, spec §8.3)", { timeout: 60_000 }, () => {
     expect(be.stats.liveBuffers).toBe(0)
   })
 })
+
+/**
+ * A CPU backend whose reads can be delayed (each settles after 5 ms, reading the storage then) or made to fail (the
+ * `failRead`-th read after arming rejects at once), and which counts uploads and any dispose made while a read is
+ * still pending. Patched in place: a tensor's backend is its storage's, so a wrapper object would miss reads.
+ */
+function flakyBackend() {
+  const be = createCpuBackend()
+  const { read, dispose, upload } = be
+  const ctl = { delay: false, failRead: 0, reads: 0, pending: 0, disposedWhilePending: 0, uploads: 0 }
+  Object.assign(be, {
+    read: (s: Storage) => {
+      ctl.reads++
+      if (ctl.failRead > 0 && ctl.reads === ctl.failRead) return Promise.reject(new Error("read failed"))
+      if (!ctl.delay) return read(s)
+      ctl.pending++
+      return new Promise((r) => setTimeout(r, 5)).then(() => read(s)).finally(() => { ctl.pending-- })
+    },
+    dispose: (s: Storage) => {
+      if (ctl.pending > 0) ctl.disposedWhilePending++
+      dispose(s)
+    },
+    upload: (d: Float32Array) => { ctl.uploads++; return upload(d) },
+  })
+  /** From now on: delay every read, and fail the `failRead`-th one (0: none). */
+  const arm = (failRead = 0) => { ctl.reads = 0; ctl.delay = true; ctl.failRead = failRead }
+  const disarm = () => { ctl.delay = false; ctl.failRead = 0 }
+  return { be, ctl, arm, disarm }
+}
+
+describe("robustness (Plan 04c)", { timeout: 60_000 }, () => {
+  const warm = async (seed: number, steps: number) => {
+    const f = flakyBackend()
+    const l = await createLearner({ backend: f.be, seed, widths: TINY, settings: { ...DEFAULT_SETTINGS, replayPerSleep: 4 } })
+    const w = createSyntheticStream()
+    for (let i = 0; i < steps; i++) w.act(await l.step(w.observe()))
+    return { ...f, l, w }
+  }
+
+  it("readAll: one read rejects while another is pending — nothing is disposed until both settle; the step rejects with the first error", async () => {
+    // A newborn's first step reads two tensors at once (the acting heads and h_t): the first rejects at once.
+    const { be, ctl, arm, l, w } = await warm(51, 0)
+    arm(1)
+    await expect(l.step(w.observe())).rejects.toThrow("read failed")
+    expect(ctl.pending).toBe(0)
+    expect(ctl.disposedWhilePending).toBe(0)
+    l.dispose()
+    expect(ctl.disposedWhilePending).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("a step whose read rejects frees its step-local tensors: after dispose, liveBuffers is 0", async () => {
+    const probe = await warm(52, 3)
+    probe.arm()
+    probe.w.act(await probe.l.step(probe.w.observe()))
+    const n = probe.ctl.reads
+    expect(n).toBeGreaterThanOrEqual(6) // L_before, L_after, heads and h, actor-critic loss and advantage
+    probe.l.dispose()
+    for (let failAt = 1; failAt <= n; failAt++) {
+      const { be, ctl, arm, disarm, l, w } = await warm(52, 3)
+      const before = await l.save()
+      arm(failAt)
+      await expect(l.step(w.observe()), `failing read ${failAt}`).rejects.toThrow("read failed")
+      expect(ctl.disposedWhilePending, `failing read ${failAt}`).toBe(0)
+      disarm()
+      // The carried state is as it was before the step.
+      const after = await l.save()
+      expect(firstDifference(after.h, before.h), `failing read ${failAt}`).toBeNull()
+      expect(firstDifference(after.last, before.last), `failing read ${failAt}`).toBeNull()
+      l.dispose()
+      expect(be.stats.liveBuffers, `failing read ${failAt}`).toBe(0)
+    }
+  })
+
+  it("dispose() during an in-flight step: the step settles, later calls reject 'used after dispose', no 'storage used after dispose' error, liveBuffers 0", async () => {
+    const { be, ctl, arm, l, w } = await warm(53, 3)
+    arm()
+    const o = w.observe()
+    const p = l.step(o)
+    l.dispose()
+    l.dispose() // idempotent
+    const outcome = await p.catch((e: unknown) => e)
+    expect(outcome instanceof Error ? outcome.message : "").not.toMatch(/storage used after dispose/)
+    expect(isValidAction(outcome as Action)).toBe(true)
+    for (const call of [() => l.step(o), () => l.sleep(), () => l.save(), () => l.replayLoss()]) {
+      await expect(call()).rejects.toThrow("learner: used after dispose")
+    }
+    expect(() => l.frozenRun({ seed: 1, measureLoss: true })).toThrow("learner: used after dispose")
+    expect(ctl.disposedWhilePending).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("dispose() during an in-flight sleep: the sleep settles, later calls reject 'used after dispose', liveBuffers 0", async () => {
+    const { be, ctl, arm, l, w } = await warm(54, 6)
+    arm()
+    const p = l.sleep()
+    l.dispose()
+    const outcome = await p.catch((e: unknown) => e)
+    expect(outcome).toBeUndefined()
+    await expect(l.step(w.observe())).rejects.toThrow("learner: used after dispose")
+    expect(ctl.disposedWhilePending).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("dispose() during an in-flight frozen step: the step settles, later calls reject, liveBuffers 0", async () => {
+    const { be, ctl, arm, l, w } = await warm(55, 3)
+    const run = l.frozenRun({ seed: 1, measureLoss: true })
+    const obs = stream(3)
+    await run.step(obs[0]!)
+    await run.step(obs[1]!)
+    arm()
+    const p = run.step(obs[2]!)
+    l.dispose()
+    run.dispose()
+    const outcome = await p.catch((e: unknown) => e)
+    expect(outcome instanceof Error ? outcome.message : "").not.toMatch(/storage used after dispose/)
+    expect(isValidAction(outcome as Action)).toBe(true)
+    await expect(run.step(obs[0]!)).rejects.toThrow(/dispose/)
+    await expect(l.step(w.observe())).rejects.toThrow("learner: used after dispose")
+    expect(ctl.disposedWhilePending).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("frozenRun() while a step is in flight throws 'already in progress'", async () => {
+    const { arm, l, w } = await warm(56, 2)
+    arm()
+    const p = l.step(w.observe())
+    expect(() => l.frozenRun({ seed: 1, measureLoss: false })).toThrow(/already in progress/)
+    await p
+    l.dispose()
+  })
+
+  it("lastLoss is NaN after a step whose L_before is non-finite", async () => {
+    const inner = createCpuBackend()
+    const allocated: Storage[] = []
+    const be: Backend = {
+      ...inner,
+      upload: (d) => { const st = inner.upload(d); allocated.push(st); return st },
+      zeros: (n) => { const st = inner.zeros(n); allocated.push(st); return st },
+    }
+    const l = await createLearner({ backend: be, seed: 1, widths: TINY, settings: DEFAULT_SETTINGS })
+    const w = createSyntheticStream()
+    for (let i = 0; i < 5; i++) w.act(await l.step(w.observe()))
+    expect(l.stats().lastLoss).toBeGreaterThan(0)
+    ;(allocated[35] as unknown as { data: Float32Array }).data[7] = Number.NaN // Model.params[35], headP's bias
+    w.act(await l.step(w.observe()))
+    expect(l.stats().skippedUpdates).toBe(1)
+    expect(Number.isNaN(l.stats().lastLoss)).toBe(true)
+    l.dispose()
+  })
+
+  it("measureLoss false: no target upload per frozen step", async () => {
+    const { ctl, l } = await warm(57, 5)
+    const obs = stream(10)
+    const uploads = async (measureLoss: boolean) => {
+      const run = l.frozenRun({ seed: 3, measureLoss })
+      const u0 = ctl.uploads
+      for (const o of obs) await run.step(o)
+      const n = ctl.uploads - u0
+      run.dispose()
+      return n
+    }
+    // Per step: 3 inputs, 2 targets and (from the second step on) 1 action when measuring; 3 inputs only when not.
+    expect(await uploads(true)).toBe(10 * 5 + 9)
+    expect(await uploads(false)).toBe(10 * 3)
+    l.dispose()
+  })
+})
