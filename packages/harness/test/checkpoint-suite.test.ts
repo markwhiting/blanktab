@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
 import { NOOP_ACTION, emptyObservation, type WorldView } from "@blanktab/interface"
 import { DEFAULT_SETTINGS, type LearnerState, type LearnerStats } from "@blanktab/learner"
-import { loadCheckpoint, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
+import { loadCheckpoint, readCheckpointRecord, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
 import { MILESTONE_SUITE_VERSION, parseLogFile, type CheckupResult, type LogFileV2 } from "../src/log"
 import { openQueue } from "../src/queue"
 import { runSession, type SessionEvent, type SessionLearner } from "../src/session"
@@ -65,6 +65,7 @@ describe("a checkpoint's tail keeps its suite version", () => {
     const world: WorldView = { observe: () => emptyObservation(), act: () => {} }
     const events: SessionEvent[] = []
     let afterFile: Checkpoint | undefined
+    const saved: Checkpoint[] = []
     await runSession(
       { learnerId: ID, codeSha: "dev", knowledgeSha: "f".repeat(64), sessionsSeenAtBirth: 0, hostSig: { cores: 1, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
         seed: 7, widths: WIDTHS, learnerSettings: DEFAULT_SETTINGS, lifetimeCU: 42, sleepInterval: 5, checkpointEveryMs: 0 },
@@ -72,7 +73,12 @@ describe("a checkpoint's tail keeps its suite version", () => {
         world, idb, createLearner, now: () => new Date(0), clock: { now: () => 0, sleep: async () => {} },
         checkups: { canvas: () => { throw new Error("no canvas needed") }, suite: [] },
         onEvent: e => events.push(e),
-        onTick: async ({ steps }) => { if (steps === 17) afterFile = await loadCheckpoint(idb, ID) },
+        onTick: async ({ steps }) => {
+          // The raw record: log.ts's own parseCheckups does not see the mocked suite 2, so a suite-2 tail would not load here.
+          const c = (await readCheckpointRecord(idb, ID)) as Checkpoint | undefined
+          if (c) saved.push(c)
+          if (steps === 17) afterFile = await loadCheckpoint(idb, ID)
+        },
       },
     )
     const order = events.flatMap(e => (e.type === "logged" ? [`logged ${e.steps}`] : e.type === "checkupStarted" ? [`checkup ${e.level}`] : []))
@@ -83,7 +89,13 @@ describe("a checkpoint's tail keeps its suite version", () => {
     const p = parseLogFile(JSON.parse(JSON.stringify(logs[0])))
     expect(p.ok, p.ok ? "" : p.error).toBe(true)
     // After that file the checkpoint is of the current suite.
-    expect(afterFile!.checkups).toEqual({ lastLevel: 8, tail: [], suiteVersion: 2 })
+    expect(afterFile!.checkups).toEqual({ lastLevel: 8, tail: [] }) // an empty tail carries no suiteVersion
+    // A non-empty tail of suite 2 does carry it; the resumed suite-1 tail did not (absent means suite 1).
+    expect(saved.filter(c => c.checkups!.tail.length > 0).map(c => [c.steps, c.checkups!.suiteVersion])).toEqual([
+      ...saved.filter(c => c.steps < 16).map(c => [c.steps, undefined]),
+      ...saved.filter(c => c.steps >= 20).map(c => [c.steps, 2]),
+    ])
+    expect(saved.some(c => c.steps >= 20)).toBe(true)
     expect(logs[1]).toMatchObject({ final: true, milestoneSuiteVersion: 2 })
     expect(logs[1]!.checkups!.map(c => c.level)).toEqual([32])
   })

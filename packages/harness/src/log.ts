@@ -123,7 +123,7 @@ export interface CheckupResult {
   errorReasons?: Record<string, string>
 }
 
-/** A milestone's error reason: 1 to 80 printable ASCII characters, so a log stays small and carries no stack or machine detail. */
+/** A milestone's error reason: 1 to 80 printable ASCII characters, so a log stays small: no stack, at most an 80-character message fragment. */
 export const ERROR_REASON_RE = /^[\x20-\x7E]{1,80}$/
 
 /**

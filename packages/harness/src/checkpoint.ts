@@ -40,7 +40,8 @@ export interface Checkpoint<S = LearnerState> {
   /**
    * Checkups (decision 0016): the highest level checked so far (0: none) and the results not yet in a log file. Absent
    * in checkpoints written before checkups (lastLevel 0 then). `suiteVersion` (decision 0017) is the suite the tail was
-   * recorded under (MILESTONE_IDS key); absent in checkpoints written before it: suite 1. A non-empty tail needs the
+   * recorded under (MILESTONE_IDS key); absent means suite 1, and it is written only for a non-empty tail of another
+   * suite (pre-04c code rejects the key, so rolling back past 04c keeps lives going). A non-empty tail needs the
    * learner state's stats.evalCU (its results are billed inside it).
    */
   checkups?: { lastLevel: number; tail: CheckupResult[]; suiteVersion?: number }

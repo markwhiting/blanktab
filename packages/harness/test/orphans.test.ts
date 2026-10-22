@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { IDBFactory } from "fake-indexeddb"
 import { DEFAULT_SETTINGS, LEARNER_STATE_VERSION, clampSettings, type Widths } from "@blanktab/learner"
 import { checkpointIds, readCheckpointRecord, saveCheckpoint, type Checkpoint } from "../src/checkpoint"
@@ -10,6 +10,19 @@ import { openQueue } from "../src/queue"
 import { MAX_ORPHANS, ORPHAN_MAX_AGE_MS, learnerLockName, sweepCheckpoints, waitLock, webLock } from "../src/orphans"
 import { adoptLearnerId, storedLearnerId } from "../src/identity"
 import { mkFile, stubStorage } from "./helpers"
+
+/** When set, finalLogOf throws for a final built from a checkpoint (the sweep's fallback is tested with it). */
+const finalSpy = vi.hoisted(() => ({ throwWithCp: false }))
+vi.mock("../src/final", async orig => {
+  const real = await orig<typeof import("../src/final")>()
+  return {
+    ...real,
+    finalLogOf: (o: Parameters<typeof real.finalLogOf>[0]) => {
+      if (finalSpy.throwWithCp && o.cp) throw new Error("cannot build it from the checkpoint")
+      return real.finalLogOf(o)
+    },
+  }
+})
 
 const NOW = new Date("2026-10-20T12:00:00.000Z")
 const HOUR = 60 * 60 * 1000
@@ -348,6 +361,43 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     void _g
     // Its counters, an empty curve, final: not its checkups or carries (on the record already).
     expect(files[2]).toEqual({ ...counters, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
+    gateAccepts(files)
+  })
+
+  it("a version orphan whose old state has full birth facts still gets its final from the latest log: its settings are not read (or re-clamped) by this code", async () => {
+    const idb = new IDBFactory()
+    const L = id(1)
+    await put(idb, [v2(L, 0), v2(L, 1)])
+    // Version 1 with everything birthOf reads, and a setting this code's clamp would change.
+    const old = { version: 1, seed: 7, widths: W, settings: { ...SETTINGS, lr: 1e9 }, stats: { cu: 30, skippedUpdates: 0, evalCU: 0.5 } }
+    expect(clampSettings(old.settings as typeof SETTINGS)).not.toEqual(old.settings)
+    await saveCheckpoint(idb, cp(L, HOUR, { steps: 3000, cu: 30, seq: 2, knowledgeSha: K, sessionsSeenAtBirth: 2, codeSha: "d".repeat(40), learnerState: old }))
+    const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })
+    expect(r.verdicts).toEqual({ [L]: "version" })
+    const files = await filesOf(idb, L)
+    expect(files[2]).toEqual({ ...files[1]!, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
+    gateAccepts(files)
+  })
+
+  it("a final that cannot be built from the checkpoint is built from the latest log file instead (said on console.warn)", async () => {
+    const idb = new IDBFactory()
+    const L = id(1)
+    await put(idb, [v2(L, 0), v2(L, 1)])
+    await saveCheckpoint(idb, cp(L, 30 * HOUR, { steps: 2000, cu: 20, seq: 2, knowledgeSha: K, sessionsSeenAtBirth: 2, learnerState: state({ cu: 20, skippedUpdates: 4, evalCU: 0.75 }) }))
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    finalSpy.throwWithCp = true
+    try {
+      const r = await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: false, final: FINAL })
+      expect(r.verdicts).toEqual({ [L]: "stale" })
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0]![0])).toContain("built from its latest log file")
+    } finally {
+      finalSpy.throwWithCp = false
+      warn.mockRestore()
+    }
+    expect(await checkpointIds(idb)).toEqual([])
+    const files = await filesOf(idb, L)
+    expect(files[2]).toEqual({ ...files[1]!, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
     gateAccepts(files)
   })
 

@@ -13,8 +13,8 @@ export function checkupSeed(learnerId: string, level: number, milestoneId: strin
 
 /**
  * `${name}: ${message}` (name: e.name for an Error, else "thrown"), whitespace runs become " ", anything outside printable
- * ASCII "?", at most 80 characters, never empty ("unknown"). Short and bounded so a log stays small and carries no stack
- * or machine detail (decision 0017). An empty message leaves just the name.
+ * ASCII "?", at most 80 characters, never empty ("unknown"). Short and bounded so a log stays small: no stack, and at most
+ * an 80-character fragment of the message (decision 0017). An empty message leaves just the name.
  */
 export function errorReason(e: unknown): string {
   const clean = (t: unknown) => String(t).replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "?").trim()

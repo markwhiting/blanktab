@@ -398,7 +398,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     let prevRoom: string | undefined
     /**
      * Brings the checkpoint's room to the front (decision 0017), so the learner's first frame after a resume or restore
-     * is seen in the room its checkpointed last frame was. A harness focus, not a carry (the caregiver is not told, and
+     * is seen in the room the life's next frame would have been seen in. A harness focus, not a carry (the caregiver is not told, and
      * no carried event) nor a learner switch (M6 counts source "learner" only). The learner sees only the frames that
      * follow. Nothing without cp.world (an older checkpoint) or for a room this world does not have.
      */
@@ -428,7 +428,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         const c: Checkpoint = {
           learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
           restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha,
-          ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), suiteVersion: tail.length > 0 ? tailSuite : MILESTONE_SUITE_VERSION } } : {}),
+          // suiteVersion only for a non-empty tail of a suite other than 1 (absent means suite 1): pre-04c code rejects
+          // the key, so a checkpoint carries it only when it must (decision 0017, rollback).
+          ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), ...(tail.length > 0 && tailSuite !== 1 ? { suiteVersion: tailSuite } : {}) } } : {}),
           ...(caregiver ? { caregiver: caregiver.state() } : {}),
           ...(typeof world.state === "function" ? { world: { room: world.state().room } } : {}),
           learnerState: await learner.save(),

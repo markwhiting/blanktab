@@ -24,6 +24,8 @@ export interface Fixture {
   commitMain(files: Record<string, Entry>, remove?: string[], pull?: boolean): string
   /** Sets refs/pull/<n>/head on origin to a commit on top of main (`stack`: on top of PR n's last commit); resolves to it. */
   pr(n: number, files: Record<string, Entry>, remove?: string[], stack?: boolean): string
+  /** Drops every object origin no longer reaches (as GitHub stops serving a commit force-pushed past). */
+  prune(): void
   cleanup(): void
 }
 
@@ -69,6 +71,10 @@ export function makeFixture(): Fixture {
       run(src, "push", "-q", "-f", "origin", `HEAD:refs/pull/${n}/head`)
       run(src, "checkout", "-q", "main")
       return sha
+    },
+    prune() {
+      run(bare, "reflog", "expire", "--expire=now", "--all")
+      run(bare, "gc", "-q", "--prune=now")
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }

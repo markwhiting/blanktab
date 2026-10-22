@@ -1,5 +1,4 @@
-import { FOVEA, PERIPHERY, WORLD, decodeMove, emptyObservation } from "@blanktab/interface"
-import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS } from "@blanktab/interface"
+import { BUTTON_OPTIONS, FOVEA, KEYS, MOVE_OPTIONS, PERIPHERY, SCROLL_OPTIONS, WORLD, decodeMove, emptyObservation } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
 import { createRng } from "@blanktab/tensor"
 import type { HeldOutSet } from "../src/learner"

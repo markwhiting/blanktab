@@ -69,7 +69,9 @@ export interface Git { (args: string[], env?: Record<string, string>, limits?: {
 /**
  * A Git running in `cwd` (default: the current directory, the checkout of main), killed after `timeoutMs`, with `env`
  * added to every call. A file-size limit runs git under bash's `ulimit -f` (KiB in bash; sh's unit differs: 512 bytes
- * in dash, 1024 in macOS sh). The arguments reach git as bash's positional parameters, never parsed as shell text.
+ * in dash, 1024 in macOS sh). That bash runs without POSIXLY_CORRECT: in POSIX mode bash 5 counts `ulimit -f` in
+ * 512-byte blocks, which would halve the limit. The arguments reach git as bash's positional parameters, never parsed
+ * as shell text.
  */
 export function gitRunner(opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {}): Git {
   return (args, env, limits) => {
@@ -80,7 +82,9 @@ export function gitRunner(opts: { cwd?: string; timeoutMs?: number; env?: Record
     const max = limits?.maxFileBytes
     if (max === undefined) return execFileSync("git", args, o)
     if (!Number.isSafeInteger(max) || max < 1024) throw new Error(`not a file-size limit: ${max}`)
-    return execFileSync("bash", ["-c", 'ulimit -f "$1" && shift && exec git "$@"', "bash", String(Math.floor(max / 1024)), ...args], o)
+    const { POSIXLY_CORRECT: _posix, ...env1 } = o.env
+    void _posix
+    return execFileSync("bash", ["-c", 'ulimit -f "$1" && shift && exec git "$@"', "bash", String(Math.floor(max / 1024)), ...args], { ...o, env: env1 })
   }
 }
 export const gitBuf: Git = gitRunner()
@@ -127,7 +131,8 @@ export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => 
   const ref = `refs/gate/pr-${n}`
   // The head commit pulls/N named, not the moving refs/pull/N/head: the commit cap binds exactly what is fetched.
   // Limit MAX_BYTES + 1: the filter omits blobs of *at least* the limit, and a file of exactly 1 MB is allowed.
-  const fetchArgs = ["-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+${headSha}:${ref}`]
+  // No auto gc or maintenance after it: they would rewrite packs outside the bounds and outlive the fetch's timeout.
+  const fetchArgs = ["-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+${headSha}:${ref}`]
   try {
     gitFn(["--no-lazy-fetch", ...fetchArgs], undefined, { maxFileBytes: fetchMaxBytes })
   } catch (e) {

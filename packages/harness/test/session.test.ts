@@ -16,6 +16,7 @@ import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
 import { buildHeldOut } from "../src/heldout"
 import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
+import { pre04cCheckpointError } from "./pre04c-checkpoint"
 
 // Plan 04b: a spy on every caregiver the session makes (each delegates to a real one), in one call log with the events.
 const cgSpy = vi.hoisted(() => ({ log: [] as string[], inits: [] as unknown[] }))
@@ -1380,7 +1381,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(checkupEvents(events)).toEqual([["start", 8], ["done", 8, 5], ["start", 16]])
       const cp = (await loadCheckpoint(idb, ID))!
       expect(cp.steps).toBe(10)
-      expect(cp.checkups).toEqual({ lastLevel: 8, tail: [], suiteVersion: MILESTONE_SUITE_VERSION })
+      expect(cp.checkups).toEqual({ lastLevel: 8, tail: [] }) // no suiteVersion: an empty tail (decision 0017, rollback)
       expect(levelsOf(await logsOf(idb))).toEqual([8])
       const again: SessionEvent[] = []
       await grow(idb, { suite, deps: { onEvent: e => again.push(e) } })
@@ -1699,6 +1700,25 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(levelsOf(logs)).toEqual([8, 16, 32])
       expect(results(logs).some(c => c.error)).toBe(false) // it was not recorded as a milestone error
       gateAccepts(logs)
+    })
+
+    it("every checkpoint a 04c life writes (caregiver, world, checkups, tails empty and not) loads on pre-04c code (decision 0017, rollback)", async () => {
+      const idb = new IDBFactory()
+      const records: Record<string, unknown>[] = []
+      await grow(idb, {
+        cfg: { lifetimeCU: 140, sleepInterval: 10, caregiver: CARE },
+        deps: { onTick: async () => { records.push((await readCheckpointRecord(idb, ID)) as Record<string, unknown>) } },
+      })
+      const seen = records.filter(r => r !== undefined)
+      for (const r of seen) expect(pre04cCheckpointError(r, ID), `steps ${String(r.steps)}`).toBeNull()
+      const tails = seen.map(r => (r.checkups as { tail: unknown[] }).tail.length)
+      expect(tails.some(n => n === 0) && tails.some(n => n > 0)).toBe(true)
+      expect(seen.every(r => "caregiver" in r && "world" in r)).toBe(true)
+      expect(seen.some(r => "suiteVersion" in (r.checkups as object))).toBe(false)
+      // The frozen validator is the old one: it rejects what 04c added only when it carries information.
+      const one = seen.find(r => (r.checkups as { tail: unknown[] }).tail.length > 0)!
+      expect(pre04cCheckpointError({ ...one, checkups: { ...(one.checkups as object), suiteVersion: 1 } }, ID)).toMatch(/checkups must be/)
+      expect(pre04cCheckpointError({ ...one, caregiver: { ...(one.caregiver as object), lost: 1 } }, ID)).toMatch(/not a caregiver state/)
     })
 
     it("a pre-04b checkpoint (no checkups or caregiver fields) resumes: lastLevel 0, caregiver from cfg", async () => {

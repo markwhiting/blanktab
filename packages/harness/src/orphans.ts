@@ -92,10 +92,12 @@ export interface SweepResult {
  *
  * With `final` (decision 0017), every checkpoint deleted as invalid, version, stale or surplus ends its learner's record:
  * a final log file (finalLogOf: from the checkpoint if it is readable and of this version, else from the latest log
- * file) is queued in the transaction that removes the checkpoint. The checkpoint's full record is read for it. An
- * orphan's carries since its last save are unknown (its tab is gone): only those its checkpoint counts as lost are on
- * the record. Nothing is written when there is nothing to record (no log file and no step), when the latest file is
- * final already, or when the file cannot be built (said on console.warn); the checkpoint is then just deleted.
+ * file; a version orphan's checkpoint is not read for it, and one the file cannot be built from falls back to the latest
+ * file) is queued in the transaction that removes the checkpoint. The checkpoint's full record is read for it (not a
+ * version orphan's). An orphan's carries since its last save are unknown (its tab is gone): only those its checkpoint
+ * counts as lost are on the record. Nothing is written when there is nothing to record (no log file, or no step with a
+ * readable checkpoint of this version), when the latest file is final already, or when the file cannot be built (said
+ * on console.warn); the checkpoint is then just deleted.
  * Without `final`, nothing is written.
  *
  * What this cannot close: between a tab's unload and its reload's first line (main(), which asks for its own lock at
@@ -138,38 +140,51 @@ export async function sweepCheckpoints(o: {
   }
   let queue: Queue | undefined
   /** The orphan's final log file, or null if it gets none (see above). `record`: its checkpoint record if already read. */
-  const finalOf = async (learnerId: string, fin: NonNullable<typeof o.final>, record: unknown) => {
+  const finalOf = async (learnerId: string, fin: NonNullable<typeof o.final>, record: unknown, why: OrphanVerdict) => {
     queue ??= await openQueue(idb)
     const latest = await queue.latest(learnerId)
     if (latest?.final) return null
     let cp: Checkpoint<unknown> | undefined
-    try {
-      const r = record !== undefined ? record : await readCheckpointRecord(idb, learnerId)
-      cp = r === undefined ? undefined : await fromRecord<unknown>(r, learnerId)
-    } catch {
-      cp = undefined // unreadable: the latest file is what is known
+    // A checkpoint of another learner state version is not read for it: this code would read (and clamp) another
+    // version's settings and stats by its own rules. Its latest file is what is known.
+    if (why !== "version") {
+      try {
+        const r = record !== undefined ? record : await readCheckpointRecord(idb, learnerId)
+        cp = r === undefined ? undefined : await fromRecord<unknown>(r, learnerId)
+      } catch {
+        cp = undefined // unreadable: the latest file is what is known
+      }
     }
-    const knowledgeSha = cp?.knowledgeSha ?? latest?.knowledgeSha
-    const sessionsSeenAtBirth = cp?.sessionsSeenAtBirth ?? latest?.sessionsSeenAtBirth
-    if (knowledgeSha === undefined || sessionsSeenAtBirth === undefined) return null // an old checkpoint, never logged
     const m = latest?.settings.maxStepsPerSec
-    try {
+    const build = (from: Checkpoint<unknown> | undefined) => {
+      const knowledgeSha = from?.knowledgeSha ?? latest?.knowledgeSha
+      const sessionsSeenAtBirth = from?.sessionsSeenAtBirth ?? latest?.sessionsSeenAtBirth
+      if (knowledgeSha === undefined || sessionsSeenAtBirth === undefined) return null // an old checkpoint, never logged
       return finalLogOf({
         ctx: {
           // The host it was lived on (its latest file's), as the code is; this tab's only for one that never logged.
           learnerId, now: fin.now, hostSig: latest?.hostSig ?? fin.hostSig, codeSha: fin.codeSha, maxStepsPerSec: typeof m === "number" ? m : DEFAULT_MAX_STEPS_PER_SEC,
           knowledgeSha, sessionsSeenAtBirth,
         },
-        cp, latest,
+        cp: from, latest,
       })
+    }
+    try {
+      return build(cp)
     } catch (e) {
-      console.warn(`learner ${learnerId}: the orphan's final log could not be built; its checkpoint is deleted without one:`, e)
-      return null
+      // Not from the checkpoint, then: from the latest file, as for one that cannot be read.
+      console.warn(`learner ${learnerId}: the orphan's final log could not be built from its checkpoint; it is built from its latest log file:`, e)
+      try {
+        return build(undefined)
+      } catch (e2) {
+        console.warn(`learner ${learnerId}: the orphan's final log could not be built; its checkpoint is deleted without one:`, e2)
+        return null
+      }
     }
   }
   /** Deletes the checkpoint (we hold its lock, nobody waits for it), with its final log file if the sweep writes them. */
   const remove = async (learnerId: string, why: OrphanVerdict, record?: unknown) => {
-    const f = o.final && why !== "final" ? await finalOf(learnerId, o.final, record) : null
+    const f = o.final && why !== "final" ? await finalOf(learnerId, o.final, record, why) : null
     if (f) await queue!.put(f, { remove: learnerId })
     else await deleteCheckpoint(idb, learnerId)
     return why

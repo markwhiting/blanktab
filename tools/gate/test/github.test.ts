@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect } from "vitest"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { boundAuthor, bytesToContent, FETCH_MAX_BYTES, FetchBoundError, GIT_TIMEOUT_MS, gitRunner, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_COMMITS, MAX_PR_FILES } from "../github.ts"
@@ -227,6 +227,9 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
     for (const c of calls) expect(c.a[0]).toBe("--no-lazy-fetch")
     const fetch = calls.find(c => c.a.includes("fetch"))!
     expect(fetch.a).toContain("--no-recurse-submodules")
+    // No auto gc or maintenance after the fetch (each as a -c pair before the subcommand).
+    const pre = fetch.a.slice(0, fetch.a.indexOf("fetch"))
+    for (const c of ["gc.auto=0", "maintenance.auto=false"]) expect(pre[pre.indexOf(c) - 1], c).toBe("-c")
     expect(fetch.a).toContain(`+${head}:refs/gate/pr-5`) // the pinned commit, not refs/pull/5/head
     expect(fetch.limits).toEqual({ maxFileBytes: FETCH_MAX_BYTES })
     expect(calls.find(c => c.a.includes("diff"))!.a).toContain("--ignore-submodules=none")
@@ -268,6 +271,42 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
     expect(() => fx.git(["rev-parse", "--verify", "refs/gate/pr-12"])).toThrow()
     // Under the bound the same PR loads (the bound, not the fetch, failed it).
     expect(loadPrViaGit("o/r", 12, ghFor(12, head, { changed_files: 3, commits: 3 }).fn, fx.git, 8 * 1_048_576).loadErrors).toEqual([])
+  })
+
+  it("a file of invalid UTF-8: a load error, the PR's other files are read", () => {
+    const head = fx.pr(13, { [`${D}/0.json`]: Buffer.from([0x7b, 0xff, 0xfe, 0x7d]), [`${D}/1.json`]: "{}" })
+    const r = loadPrViaGit("o/r", 13, ghFor(13, head, { changed_files: 2 }).fn, fx.git)
+    expect(r.loadErrors).toEqual([`${D}/0.json: file is not valid UTF-8`])
+    expect(r.files).toEqual([{ path: `${D}/1.json`, content: "{}" }])
+  })
+
+  it("a head GitHub no longer serves (force-pushed past, or never there): moved, no files, nothing kept", () => {
+    const old = fx.pr(14, { [`${D}/0.json`]: "a" })
+    const now = fx.pr(14, { [`${D}/0.json`]: "b" }) // a fresh branch from main: the old head is unreachable on origin
+    expect(now).not.toBe(old)
+    fx.prune()
+    for (const sha of [old, "0123456789abcdef0123456789abcdef01234567"]) {
+      const r = loadPrViaGit("o/r", 14, ghFor(14, sha).fn, fx.git)
+      expect(r, sha).toMatchObject({ moved: true, files: [], loadErrors: [] })
+      expect(() => fx.git(["rev-parse", "--verify", "refs/gate/pr-14"])).toThrow()
+    }
+    // The head it does serve loads.
+    expect(loadPrViaGit("o/r", 14, ghFor(14, now).fn, fx.git).files).toEqual([{ path: `${D}/0.json`, content: "b" }])
+  })
+
+  it("the byte bound counts KiB even when the environment asks for POSIX mode (bash 5 would count 512-byte blocks)", () => {
+    // A git alias runs a shell under the same limit: what it can write, and what environment it sees.
+    const posix = gitRunner({ cwd: fx.work, env: { ...FIXTURE_ENV, POSIXLY_CORRECT: "1" } })
+    const out = join(fx.work, "..", "written")
+    const write = (bytes: number) => posix(["-c", `alias.w=!head -c ${bytes} /dev/zero > '${out}'`, "w"], undefined, { maxFileBytes: 64 * 1024 })
+    write(60 * 1024)
+    expect(statSync(out).size).toBe(60 * 1024) // over 32 KiB: the limit is not in 512-byte blocks
+    expect(() => write(70 * 1024)).toThrow()
+    expect(statSync(out).size).toBe(64 * 1024)
+    const env = posix(["-c", "alias.e=!env", "e"], undefined, { maxFileBytes: 64 * 1024 }).toString()
+    expect(env).not.toMatch(/^POSIXLY_CORRECT=/m)
+    // Without a byte bound the environment is passed as given.
+    expect(posix(["-c", "alias.e=!env", "e"]).toString()).toMatch(/^POSIXLY_CORRECT=1$/m)
   })
 
   it("the byte-bounded runner passes arguments to git as data, never as shell text", () => {
