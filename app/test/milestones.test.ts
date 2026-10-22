@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import type { CheckupResult } from "@blanktab/harness/log"
 import { MILESTONE_NAMES, appendCheckups, caregiverText, checkupStatus, createCarryTally, milestoneBars, milestoneText } from "../src/milestones"
 
@@ -12,6 +14,11 @@ describe("milestones", () => {
     })
   })
 
+  it("the page's static milestone text (before any script runs) is milestoneText's for no checkup", () => {
+    const html = readFileSync(join(__dirname, "../index.html"), "utf8")
+    const m = html.match(/<p data-testid="milestone-text"[^>]*>([^<]*)<\/p>/)
+    expect(m?.[1]).toBe(milestoneText([]))
+  })
   it("milestoneText: none → 'no checkup yet (the first comes soon after it has lived 8 CU)'; latest result → level, n of 6, and the passed names", () => {
     expect(milestoneText([])).toBe("no checkup yet (the first comes soon after it has lived 8 CU)")
     expect(milestoneText([result(8, []), result(512, ["M1"])])).toBe("Latest checkup at 512 CU: passed 1 of 6 (predicts its world).")
