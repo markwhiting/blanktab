@@ -1,13 +1,13 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { createCanvas } from "@napi-rs/canvas"
 import { WORLD, isValidAction, type Action } from "@blanktab/interface"
 import { DEFAULT_SETTINGS, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerStats, type Widths } from "@blanktab/learner"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
 import { createWorld, hashSeed, type World } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
-import { MILESTONE_IDS, MILESTONE_SUITE_VERSION } from "../src/log"
+import { ERROR_REASON_RE, MILESTONE_IDS, MILESTONE_SUITE_VERSION } from "../src/log"
 import { MILESTONES_V1, YIELD_EVERY, type Milestone } from "../src/milestones"
-import { checkupSeed, runCheckup, type CheckupDeps } from "../src/checkup"
+import { checkupSeed, errorReason, runCheckup, type CheckupDeps } from "../src/checkup"
 
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
 const canvas = () => createCanvas(WORLD.width, WORLD.height)
@@ -142,6 +142,56 @@ describe("checkups (decision 0016)", { timeout: 60_000 }, () => {
     expect(log.opened).toHaveLength(6)
     expect(log.openRuns).toBe(0)
     expect(log.disposed).toBe(6)
+  })
+
+  it("errorReason: Error → 'RangeError: bad'; a string throw → 'thrown: …'; control chars and non-ASCII → '?'; 200 chars → 80; '' → 'unknown'", () => {
+    expect(errorReason(new RangeError("bad"))).toBe("RangeError: bad")
+    expect(errorReason("oops")).toBe("thrown: oops")
+    expect(errorReason(42)).toBe("thrown: 42")
+    expect(errorReason(new Error("a\u0001b\u00e9c\u{1F600}"))).toBe("Error: a?b?c??")
+    expect(errorReason(new Error("line one\n\n  line\ttwo"))).toBe("Error: line one line two")
+    const long = errorReason(new Error("x".repeat(200)))
+    expect(long).toHaveLength(80)
+    expect(long.startsWith("Error: xxx")).toBe(true)
+    expect(errorReason("")).toBe("unknown")
+    expect(errorReason(Object.assign(new Error(""), { name: "" }))).toBe("unknown")
+    expect(errorReason(new TypeError(""))).toBe("TypeError")
+    expect(errorReason({ toString() { throw new Error("no") } })).toMatch(ERROR_REASON_RE)
+    for (const e of [undefined, null, Symbol("s"), { a: 1 }, "é".repeat(500), new Error("\n")]) expect(errorReason(e)).toMatch(ERROR_REASON_RE)
+  })
+
+  it("a milestone that throws records its reason (≤ 80 chars) and warns once; the others have none", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const { learner } = stubLearner()
+      const suite = small(10).map(m => (m.id === "M3" ? { ...m, measure: () => { throw new RangeError("boom ".repeat(40)) } } : m))
+      const out = await runCheckup(base({ learner, suite }))
+      if (out.status !== "done") throw new Error("abandoned")
+      expect(Object.keys(out.result.errorReasons ?? {})).toEqual(["M3"])
+      const reason = out.result.errorReasons!.M3!
+      expect(reason).toMatch(ERROR_REASON_RE)
+      expect(reason.startsWith("RangeError: boom boom")).toBe(true)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]!.slice(0, 3)).toEqual(["blanktab: milestone", "M3", "threw"])
+    } finally { warn.mockRestore() }
+  })
+
+  it("a dispose that throws records the dispose error's reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const { learner } = stubLearner(2) // M3's run
+      const out = await runCheckup(base({ learner }))
+      if (out.status !== "done") throw new Error("abandoned")
+      expect(out.result.errorReasons).toEqual({ M3: "Error: stub: dispose failed" })
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally { warn.mockRestore() }
+  })
+
+  it("no errorReasons without an error", async () => {
+    const { learner } = stubLearner()
+    const out = await runCheckup(base({ learner }))
+    if (out.status !== "done") throw new Error("abandoned")
+    expect("errorReasons" in out.result).toBe(false)
   })
 
   it("a recoverable error is rethrown after disposing the open run", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { MAX_CHECKUPS_PER_FILE, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { ERROR_REASON_RE, MAX_CHECKUPS_PER_FILE, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -66,6 +66,30 @@ describe("parseLogFile: checkups, milestoneSuiteVersion, caregiver", () => {
     const r = bad(many, { cu: 5000 })
     expect(r.ok).toBe(false)
     expect(bad(many.slice(0, 8), { cu: 5000 }).ok).toBe(true)
+  })
+  it("errorReasons: accepted only with error true, ids in the suite with null measures, ERROR_REASON_RE values; an 81-char value, a newline, an unknown id, a non-null measure and {} are rejected; old error-true results without it parse", () => {
+    const withReasons = (reasons: unknown, over: Partial<CheckupResult> = {}) =>
+      parseLogFile(v2({ checkups: [{ ...checkup(64, { error: true, measures: measures({ M2: null, M4: null }) }), errorReasons: reasons, ...over }] }))
+    const good = withReasons({ M2: "RangeError: bad", M4: "x".repeat(80) })
+    expect(good.ok).toBe(true)
+    if (good.ok && good.value.schemaVersion === 2) expect(good.value.checkups![0]!.errorReasons).toEqual({ M2: "RangeError: bad", M4: "x".repeat(80) })
+    expect(ERROR_REASON_RE.test("x".repeat(80))).toBe(true)
+    const cases: [string, ReturnType<typeof withReasons>][] = [
+      ["81 chars", withReasons({ M2: "x".repeat(81) })],
+      ["empty value", withReasons({ M2: "" })],
+      ["newline", withReasons({ M2: "a\nb" })],
+      ["non-ASCII", withReasons({ M2: "caf\u00e9" })],
+      ["non-string", withReasons({ M2: 3 })],
+      ["unknown id", withReasons({ M9: "x" })],
+      ["non-null measure", withReasons({ M1: "x" })],
+      ["empty object", withReasons({})],
+      ["not an object", withReasons("x")],
+      ["null", withReasons(null)],
+      ["array", withReasons(["x"])],
+      ["without error true", parseLogFile(v2({ checkups: [{ ...checkup(64, { measures: measures({ M2: null }) }), errorReasons: { M2: "x" } }] }))],
+    ]
+    for (const [name, r] of cases) expect(r.ok, name).toBe(false)
+    expect(ok(v2({ checkups: [checkup(64, { error: true })] }))).toBe(true)
   })
   it("rejects a bad caregiver summary", () => {
     const cg = (c: unknown) => ok(v2({ caregiver: c }))

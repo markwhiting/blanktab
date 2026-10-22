@@ -3,12 +3,30 @@
 // restore afterwards. Everything a milestone reads (state, trace) is privileged and harness only.
 import type { TrainableLearner } from "@blanktab/learner"
 import { hashSeed, type CanvasLike } from "@blanktab/world"
-import type { CheckupResult } from "./log"
+import { ERROR_REASON_RE, type CheckupResult } from "./log"
 import { MILESTONES_V1, recordRun, type Milestone } from "./milestones"
 
 /** hashSeed(0, `${learnerId}/${level}/${milestoneId}`): a variant this learner has never seen. */
 export function checkupSeed(learnerId: string, level: number, milestoneId: string): number {
   return hashSeed(0, `${learnerId}/${level}/${milestoneId}`)
+}
+
+/**
+ * `${name}: ${message}` (name: e.name for an Error, else "thrown"), whitespace runs become " ", anything outside printable
+ * ASCII "?", at most 80 characters, never empty ("unknown"). Short and bounded so a log stays small and carries no stack
+ * or machine detail (decision 0017). An empty message leaves just the name.
+ */
+export function errorReason(e: unknown): string {
+  const clean = (t: unknown) => String(t).replace(/\s+/g, " ").replace(/[^\x20-\x7E]/g, "?").trim()
+  let name = ""
+  let message = ""
+  try {
+    if (e instanceof Error) { name = clean(e.name); message = clean(e.message) } else { name = "thrown"; message = clean(e) }
+  } catch {
+    // an object whose toString or name throws: leave what we have
+  }
+  const text = (e instanceof Error ? (message ? (name ? `${name}: ${message}` : message) : name) : message ? `${name}: ${message}` : "").slice(0, 80).trimEnd()
+  return ERROR_REASON_RE.test(text) ? text : "unknown"
 }
 
 export interface CheckupDeps {
@@ -44,11 +62,13 @@ export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
   const passed: string[] = []
   const measures: Record<string, number | null> = {}
   let error = false
+  const errorReasons: Record<string, string> = {}
   for (const m of suite) {
     if (d.shouldStop?.()) return { status: "abandoned" }
     const seed = checkupSeed(d.learnerId, d.level, m.id)
     let run: ReturnType<typeof d.learner.frozenRun> | null = null
     let outcome: { value: number; pass: boolean } | null = null // null: the milestone threw
+    let thrown: { e: unknown } | null = null // what a non-recoverable milestone threw
     let rethrow: { e: unknown } | null = null
     try {
       const world = m.makeVariant(seed, d.canvas())
@@ -59,13 +79,15 @@ export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
       outcome = { value: m.measure(trace, stats, reference), pass: m.passes(trace, stats, reference) }
     } catch (e) {
       if (d.recoverable?.(e)) rethrow = { e }
+      else thrown = { e }
     }
     // A dispose that throws counts as the milestone throwing; it never masks a recoverable error in flight nor stops
     // the remaining milestones.
     try {
       run?.dispose()
-    } catch {
+    } catch (e) {
       outcome = null
+      thrown = { e }
     }
     if (rethrow) throw rethrow.e
     if (outcome) {
@@ -74,10 +96,13 @@ export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
     } else {
       measures[m.id] = null
       error = true
+      const e = thrown?.e
+      console.warn("blanktab: milestone", m.id, "threw", e)
+      errorReasons[m.id] = errorReason(e)
     }
   }
   if (d.shouldStop?.()) return { status: "abandoned" }
   const result: CheckupResult = { level: d.level, steps: d.steps, passed, measures, evalCU: d.learner.stats().evalCU - evalCU0 }
-  if (error) result.error = true
+  if (error) { result.error = true; result.errorReasons = errorReasons }
   return { status: "done", result }
 }

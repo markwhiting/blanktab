@@ -119,7 +119,12 @@ export interface CheckupResult {
   measures: Record<string, number | null> // each milestone's measured value; null if not finite
   evalCU: number // what it cost (inside the file's evalCU)
   error?: true // a milestone threw; it counts as not passed
+  /** Why each milestone that threw did (decision 0017): id -> a short reason. Only with `error: true`; absent before 04c. */
+  errorReasons?: Record<string, string>
 }
+
+/** A milestone's error reason: 1 to 80 printable ASCII characters, so a log stays small and carries no stack or machine detail. */
+export const ERROR_REASON_RE = /^[\x20-\x7E]{1,80}$/
 
 /**
  * What the caregiver did since the previous file: `carries` in all, `to` by destination, whether the safety net fired.
@@ -207,7 +212,7 @@ const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
 const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss", "heldOut"]
 const HELD_OUT_KEYS = ["loss", "baseline"]
-const CHECKUP_KEYS = ["level", "steps", "passed", "measures", "evalCU", "error"]
+const CHECKUP_KEYS = ["level", "steps", "passed", "measures", "evalCU", "error", "errorReasons"]
 const CAREGIVER_KEYS = ["carries", "to", "safetyNet", "lostCarries"]
 const CARE_DEST_RE = /^[a-z]{1,16}$/
 const MAX_CARE_DESTS = 16
@@ -392,10 +397,26 @@ export function parseCheckups(v: unknown, suiteVersion: number | undefined, cu: 
     }
     if (!isNonNeg(c.evalCU)) return `${at}.evalCU must be a finite number >= 0`
     if ("error" in c && c.error !== true) return `${at}.error must be true when present`
+    let errorReasons: Record<string, string> | undefined
+    if ("errorReasons" in c) {
+      if (c.error !== true) return `${at}.errorReasons needs error: true`
+      const er = c.errorReasons
+      if (!isObj(er)) return `${at}.errorReasons must be an object`
+      const reasonIds = Object.keys(er)
+      if (reasonIds.length === 0) return `${at}.errorReasons must not be empty`
+      for (const id of reasonIds) {
+        if (!ids.includes(id)) return `${at}.errorReasons has an id outside the suite`
+        if (meas[id] !== null) return `${at}.errorReasons.${id} needs a null measure`
+        const r = er[id]
+        if (typeof r !== "string" || !ERROR_REASON_RE.test(r)) return `${at}.errorReasons.${id} must match ${ERROR_REASON_RE}`
+      }
+      errorReasons = Object.fromEntries(ids.filter(id => id in er).map(id => [id, er[id] as string]))
+    }
     out.push({
       level: c.level, steps: c.steps, passed: [...(c.passed as string[])],
       measures: Object.fromEntries(ids.map(id => [id, meas[id] as number | null])),
       evalCU: c.evalCU, ...(c.error === true ? { error: true as const } : {}),
+      ...(errorReasons ? { errorReasons } : {}),
     })
   }
   return out
