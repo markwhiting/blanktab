@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, it, expect } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { boundAuthor, bytesToContent, GIT_TIMEOUT_MS, gitRunner, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_COMMITS, MAX_PR_FILES } from "../github.ts"
-import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
+import { boundAuthor, bytesToContent, FETCH_MAX_BYTES, FetchBoundError, GIT_TIMEOUT_MS, gitRunner, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_COMMITS, MAX_PR_FILES } from "../github.ts"
+import { FIXTURE_ENV, makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import { validateSessionPr } from "../validate.ts"
 
 describe("statusErrors", () => {
@@ -35,7 +35,7 @@ describe("listOpenPrs", () => {
   it("asks only for the fields the gate uses", () => {
     const calls: string[][] = []
     const listed = listOpenPrs("o/r", a => { calls.push(a); return Buffer.from(JSON.stringify([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])) })
-    expect(calls).toEqual([["pr", "list", "--repo", "o/r", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]])
+    expect(calls).toEqual([["pr", "list", "--repo", "o/r", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,labels"]])
     expect(listed).toEqual([{ number: 3, title: "run: x", headRefName: "run/x", baseRefName: "main" }])
   })
 })
@@ -220,13 +220,16 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
 
   it("every git call runs with --no-lazy-fetch; the fetch recurses into no submodules; the diff ignores no submodule", () => {
     const head = fx.pr(5, { [`${D}/0.json`]: "a" })
-    const calls: string[][] = []
-    const r = loadPrViaGit("o/r", 5, ghFor(5, head).fn, (a, env) => { calls.push(a); return fx.git(a, env) })
+    const calls: { a: string[]; limits?: { maxFileBytes?: number } }[] = []
+    const r = loadPrViaGit("o/r", 5, ghFor(5, head).fn, (a, env, limits) => { calls.push({ a, limits }); return fx.git(a, env, limits) })
     expect(r.loadErrors).toEqual([])
     expect(calls.length).toBeGreaterThan(0)
-    for (const c of calls) expect(c[0]).toBe("--no-lazy-fetch")
-    expect(calls.find(c => c[1] === "fetch")).toContain("--no-recurse-submodules")
-    expect(calls.find(c => c[1] === "diff")).toContain("--ignore-submodules=none")
+    for (const c of calls) expect(c.a[0]).toBe("--no-lazy-fetch")
+    const fetch = calls.find(c => c.a.includes("fetch"))!
+    expect(fetch.a).toContain("--no-recurse-submodules")
+    expect(fetch.a).toContain(`+${head}:refs/gate/pr-5`) // the pinned commit, not refs/pull/5/head
+    expect(fetch.limits).toEqual({ maxFileBytes: FETCH_MAX_BYTES })
+    expect(calls.find(c => c.a.includes("diff"))!.a).toContain("--ignore-submodules=none")
   })
 
   it("more than MAX_PR_COMMITS commits: rejected from the PR object; nothing is fetched", () => {
@@ -245,25 +248,33 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
     expect(r.loadErrors).toEqual([])
   })
 
-  it("a git call that runs past its timeout throws (the caller leaves that PR for the next run)", () => {
+  it("a fetch that runs past its timeout throws FetchBoundError", () => {
     const head = fx.pr(11, { [`${D}/0.json`]: "a" })
-    expect(() => loadPrViaGit("o/r", 11, ghFor(11, head).fn, gitRunner({ cwd: fx.work, timeoutMs: 1 }))).toThrow(/ETIMEDOUT|timed out/i)
+    expect(() => loadPrViaGit("o/r", 11, ghFor(11, head).fn, gitRunner({ cwd: fx.work, env: FIXTURE_ENV, timeoutMs: 1 }))).toThrow(FetchBoundError)
     expect(GIT_TIMEOUT_MS).toBe(120_000)
   })
 
-  it("invalid UTF-8 is a load error", () => {
-    const head = fx.pr(6, { [`${D}/0.json`]: Buffer.from([0x7b, 0xff, 0xfe, 0x7d]) })
-    const r = loadPrViaGit("o/r", 6, ghFor(6, head).fn, fx.git)
-    expect(r.loadErrors).toEqual([`${D}/0.json: file is not valid UTF-8`])
-    expect(r.files).toEqual([])
+  it("a fetch over the byte bound throws FetchBoundError; the cut-off pack is removed and nothing is kept", () => {
+    const rnd = (seed: number) => { const b = Buffer.alloc(900_000); let x = seed; for (let i = 0; i < b.length; i++) { x = (Math.imul(x, 1103515245) + 12345) >>> 0; b[i] = 0x21 + ((x >>> 24) % 94) } return b }
+    fx.pr(12, { [`${D}/0.json`]: rnd(1) }) // three commits of hard-to-compress printable sub-1 MB blobs: over 2 MB to fetch
+    fx.pr(12, { [`${D}/1.json`]: rnd(2) }, [], true)
+    const head = fx.pr(12, { [`${D}/2.json`]: rnd(3) }, [], true)
+    expect(FETCH_MAX_BYTES).toBe(64 * 1_048_576)
+    const err = (() => { try { loadPrViaGit("o/r", 12, ghFor(12, head, { changed_files: 3 }).fn, fx.git, 1_048_576); return undefined } catch (e) { return e } })()
+    expect(err).toBeInstanceOf(FetchBoundError)
+    expect((err as Error).message).toContain("over 1 MiB")
+    const packDir = fx.git(["rev-parse", "--path-format=absolute", "--git-path", "objects/pack"]).toString().trim()
+    expect(readdirSync(packDir).filter(f => f.startsWith("tmp_pack_"))).toEqual([])
+    expect(() => fx.git(["rev-parse", "--verify", "refs/gate/pr-12"])).toThrow()
+    // Under the bound the same PR loads (the bound, not the fetch, failed it).
+    expect(loadPrViaGit("o/r", 12, ghFor(12, head, { changed_files: 3, commits: 3 }).fn, fx.git, 8 * 1_048_576).loadErrors).toEqual([])
   })
 
-  it("a head that moved since pulls/N: moved, no files", () => {
-    fx.pr(7, { [`${D}/0.json`]: "a" })
-    const r = loadPrViaGit("o/r", 7, ghFor(7, "f".repeat(40)).fn, fx.git)
-    expect(r.moved).toBe(true)
-    expect(r.files).toEqual([])
-    expect(r.loadErrors).toEqual([])
+  it("the byte-bounded runner passes arguments to git as data, never as shell text", () => {
+    const marker = join(fx.work, "pwned")
+    expect(() => fx.git(["rev-parse", "--verify", "--end-of-options", `$(touch '${marker}')`, ";", "touch", marker], undefined, { maxFileBytes: 1_048_576 })).toThrow()
+    expect(existsSync(marker)).toBe(false)
+    expect(fx.git(["rev-parse", "HEAD"], undefined, { maxFileBytes: 1_048_576 }).toString().trim()).toMatch(/^[0-9a-f]{40}$/)
   })
 
   it("more than 16 changed files: rejected from the PR object; nothing is fetched", () => {

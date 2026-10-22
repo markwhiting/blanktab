@@ -4,12 +4,13 @@ import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { gitRunner } from "../github.ts"
+import { gitRunner, type Git } from "../github.ts"
 
 /** A file's content, or a symlink to a target, or a submodule (gitlink) at a commit. */
 export type Entry = string | Buffer | { symlink: string } | { submodule: string }
 
-const ENV = {
+/** Isolates every git the fixture and the code under test run from the user's and the system's git config. */
+export const FIXTURE_ENV = {
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
   GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
 }
@@ -18,20 +19,21 @@ export interface Fixture {
   /** The gate's checkout of main. */
   work: string
   /** git in `work`, as loadPrViaGit's gitFn. */
-  git(args: string[], env?: Record<string, string>): Buffer
+  git: Git
   /** Commits to main on origin and (unless `pull` is false) pulls it into `work`; resolves to the new main commit. */
   commitMain(files: Record<string, Entry>, remove?: string[], pull?: boolean): string
-  /** Sets refs/pull/<n>/head on origin to a commit on top of main; resolves to that commit. */
-  pr(n: number, files: Record<string, Entry>, remove?: string[]): string
+  /** Sets refs/pull/<n>/head on origin to a commit on top of main (`stack`: on top of PR n's last commit); resolves to it. */
+  pr(n: number, files: Record<string, Entry>, remove?: string[], stack?: boolean): string
   cleanup(): void
 }
 
 export function makeFixture(): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "gate-git-"))
   const bare = join(dir, "origin.git"), src = join(dir, "src"), work = join(dir, "work")
-  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...ENV }, stdio: ["ignore", "pipe", "pipe"] }).trim()
+  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...FIXTURE_ENV }, stdio: ["ignore", "pipe", "pipe"] }).trim()
   run(dir, "init", "-q", "--bare", "-b", "main", bare)
   run(bare, "config", "uploadpack.allowFilter", "true")
+  run(bare, "config", "uploadpack.allowReachableSHA1InWant", "true") // GitHub serves any reachable commit by its sha
   run(dir, "init", "-q", "-b", "main", src)
   run(src, "remote", "add", "origin", `file://${bare}`)
   const apply = (files: Record<string, Entry>, remove: string[]) => {
@@ -53,7 +55,7 @@ export function makeFixture(): Fixture {
   run(dir, "clone", "-q", `file://${bare}`, work)
   return {
     work,
-    git: gitRunner({ cwd: work }),
+    git: gitRunner({ cwd: work, env: FIXTURE_ENV }),
     commitMain(files, remove = [], pull = true) {
       run(src, "checkout", "-q", "main")
       const sha = apply(files, remove)
@@ -61,8 +63,8 @@ export function makeFixture(): Fixture {
       if (pull) run(work, "pull", "-q", "--ff-only")
       return sha
     },
-    pr(n, files, remove = []) {
-      run(src, "checkout", "-q", "-B", `pr-${n}`, "main")
+    pr(n, files, remove = [], stack = false) {
+      run(src, "checkout", "-q", ...(stack ? [`pr-${n}`] : ["-B", `pr-${n}`, "main"]))
       const sha = apply(files, remove)
       run(src, "push", "-q", "-f", "origin", `HEAD:refs/pull/${n}/head`)
       run(src, "checkout", "-q", "main")

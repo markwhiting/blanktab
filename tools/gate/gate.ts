@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url"
 import { parseLogFile, type LogFile } from "@blanktab/harness/log"
 import { validateSessionPr, type PrFile } from "./validate.ts"
 import { readLearnerLogs } from "./summary.ts"
-import { boundAuthor, closePr, gh, ghCalls, git, gitBuf, isShallow, labelNeedsHuman, listOpenPrs, loadPrViaGit, mergePr, type Git } from "./github.ts"
+import { boundAuthor, closePr, FetchBoundError, gh, ghCalls, git, gitBuf, isShallow, labelNeedsHuman, listOpenPrs, loadPrViaGit, mergePr, type Git } from "./github.ts"
 
 export interface OpenPr {
   number: number
@@ -28,6 +28,8 @@ export interface OpenPr {
 export type GateDecision = { pr: number; action: "merge" | "close" | "label-needs-human"; reason: string }
 
 export const DEV_BUILD_REASON = "Development builds don't contribute."
+/** The label for a PR a person must look at (github.ts labelNeedsHuman); the gate skips PRs that carry it. */
+export const NEEDS_HUMAN = "needs-human"
 
 const LOG_PATH_RE = /^data\/runs\/[^/]+\/\d+\.json$/
 const LEARNER_DIR_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\//
@@ -147,6 +149,8 @@ export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
   // Oldest first (decide and act sort again): the earliest PR for an unbound learner is the one that can claim it.
   for (const listed of [...listOpenPrs(repo, ghFn)].sort((a, b) => a.number - b.number)) {
     if (!listed.title.startsWith("run: ")) continue // not a session PR: leave alone
+    // A person has it (a non-log path, or a fetch over its bounds): not loaded or decided again until they remove the label.
+    if ((listed.labels ?? []).some(l => l?.name === NEEDS_HUMAN)) continue
     const before = calls
     try {
       const loaded = loadPrViaGit(repo, listed.number, ghFn, deps.gitBuf)
@@ -170,7 +174,13 @@ export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
         loadErrors: loaded.loadErrors, headSha: loaded.headSha, author: loaded.author, boundAuthor: bound, learnerId: ids.length === 1 ? ids[0]! : null,
       })
     } catch (e) {
-      deps.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+      if (e instanceof FetchBoundError) {
+        // Labelled now, not after every load: a run that hits its job time limit still never fetches this PR again.
+        deps.error(`PR #${listed.number}: ${e.message}; labelling it ${NEEDS_HUMAN}, and it is not fetched again`)
+        try { labelNeedsHuman(repo, listed.number, ghFn) } catch (le) { deps.error(`PR #${listed.number}: labelling failed: ${le instanceof Error ? le.message : le}`) }
+      } else {
+        deps.error(`PR #${listed.number}: could not load (${e instanceof Error ? e.message : e}); leaving it for the next run`)
+      }
     } finally {
       deps.log(`PR #${listed.number}: ${calls - before} gh calls`)
     }

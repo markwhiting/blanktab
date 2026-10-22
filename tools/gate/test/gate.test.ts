@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { act, decide, memoBound, runGate, type GateDeps, type GateOps, type OpenPr } from "../gate.ts"
 import { gitRunner, MAX_PR_FILES } from "../github.ts"
-import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
+import { FIXTURE_ENV, makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import type { PrFile } from "../validate.ts"
 import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
 
@@ -169,13 +169,13 @@ describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }
    * A fake gh: lists the given PRs, answers pulls/<n> with `heads[n]` (and `over`), commits/<sha>/pulls from `owners`
    * (a commit not in it was a direct push: []), and records ready/merge/close/label calls.
    */
-  const deps = (heads: Record<number, string>, owners: Record<string, string> = {}, over: Record<string, unknown> = {}, workDir = fx.work) => {
+  const deps = (heads: Record<number, string>, owners: Record<string, string> = {}, over: Record<string, unknown> = {}, workDir = fx.work, labels: Record<number, string[]> = {}) => {
     const calls: string[] = [], logs: string[] = []
     const d: GateDeps = {
       gh: a => {
         const j = a.join(" ")
         calls.push(j)
-        if (a[0] === "pr" && a[1] === "list") return Buffer.from(JSON.stringify(Object.keys(heads).map(n => ({ number: Number(n), title: `run: ${ID}`, headRefName: `run/${n}`, baseRefName: "main" }))))
+        if (a[0] === "pr" && a[1] === "list") return Buffer.from(JSON.stringify(Object.keys(heads).map(n => ({ number: Number(n), title: `run: ${ID}`, headRefName: `run/${n}`, baseRefName: "main", labels: (labels[Number(n)] ?? []).map(name => ({ name })) }))))
         let m = /^api repos\/o\/r\/pulls\/(\d+)$/.exec(j)
         if (m) return prObject(Number(m[1]), heads[Number(m[1])]!, over)
         m = /^api repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls$/.exec(j)
@@ -183,8 +183,8 @@ describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }
         if (a[0] === "pr" || a[0] === "label") return Buffer.from("")
         throw new Error(`unexpected gh call: ${j}`)
       },
-      git: a => execFileSync("git", a, { cwd: workDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-      gitBuf: gitRunner({ cwd: workDir }),
+      git: a => execFileSync("git", a, { cwd: workDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...FIXTURE_ENV } }),
+      gitBuf: gitRunner({ cwd: workDir, env: FIXTURE_ENV }),
       log: m => void logs.push(m), error: m => void logs.push(`error ${m}`),
     }
     return { d, calls, logs }
@@ -216,19 +216,44 @@ describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }
     expect(logs.some(l => l.includes("PR #1") && l.includes("moved") && l.includes("next run"))).toBe(true)
   })
 
-  it("a git fetch that times out fails that PR's load, not the run: it stays open and the next PR is decided", () => {
+  it("a fetch over its bound (here: time) labels that PR needs-human at once, the run goes on, and later runs skip it", () => {
     const h1 = fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
     const h2 = fx.pr(2, { [`${D}/0.json`]: json(log(0)) })
     const { d, calls, logs } = deps({ 1: h1, 2: h2 })
     const real = d.gitBuf
-    d.gitBuf = (a, env) => {
-      if (a.includes("fetch") && a.some(x => x.startsWith("+refs/pull/1/"))) return gitRunner({ cwd: fx.work, timeoutMs: 1 })(a, env)
-      return real(a, env)
-    }
+    d.gitBuf = (a, env, limits) => a.includes(`+${h1}:refs/gate/pr-1`) ? gitRunner({ cwd: fx.work, env: FIXTURE_ENV, timeoutMs: 1 })(a, env, limits) : real(a, env, limits)
     expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(1)
-    expect(logs.some(l => l.startsWith("error PR #1: could not load") && l.includes("next run"))).toBe(true)
+    expect(logs.some(l => l.startsWith("error PR #1: fetching it took over 120 s") && l.includes("needs-human"))).toBe(true)
+    expect(calls).toContain("pr edit 1 --repo o/r --add-label needs-human")
     expect(calls.filter(c => /^pr (close|merge|ready) 1 /.test(c))).toEqual([])
     expect(calls).toContain(`pr merge 2 --repo o/r --squash --delete-branch --match-head-commit ${h2}`)
+    // Next run: PR 1 carries the label, so it is neither read nor fetched again.
+    const next = deps({ 1: h1 }, {}, {}, fx.work, { 1: ["needs-human"] })
+    const fetched: string[][] = []
+    next.d.gitBuf = (a, env, limits) => { fetched.push(a); return real(a, env, limits) }
+    expect(runGate("o/r", join(fx.work, "data/runs"), next.d)).toBe(0)
+    expect(next.calls).toEqual([next.calls[0]]) // only the PR list
+    expect(fetched).toEqual([])
+  })
+
+  it("a git error that is not a bound (e.g. the network) leaves the PR for the next run, unlabelled", () => {
+    const h1 = fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
+    const { d, calls, logs } = deps({ 1: h1 })
+    d.gitBuf = () => { throw new Error("fatal: unable to access origin") }
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(0)
+    expect(logs.some(l => l.startsWith("error PR #1: could not load") && l.includes("next run"))).toBe(true)
+    expect(calls.filter(c => c.startsWith("pr edit") || c.startsWith("label"))).toEqual([])
+  })
+
+  it("two PRs for one learner in one run: the older merges, the newer is deferred (not closed) to the next run", () => {
+    fx.commitMain({ [`${D}/0.json`]: json(log(0)) })
+    const h1 = fx.pr(1, { [`${D}/1.json`]: json(log(1)) })
+    const h2 = fx.pr(2, { [`${D}/2.json`]: json(log(2)) })
+    const { d, calls, logs } = deps({ 1: h1, 2: h2 })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(1)
+    expect(calls).toContain(`pr merge 1 --repo o/r --squash --delete-branch --match-head-commit ${h1}`)
+    expect(calls.filter(c => /^pr (close|merge|ready|edit) 2 /.test(c))).toEqual([])
+    expect(logs).toContain(`PR #2: deferred, another PR for ${ID} merged this run`)
   })
 
   it("a PR based on a main newer than the gate's checkout: left open for the next run", () => {

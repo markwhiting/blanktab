@@ -1,6 +1,8 @@
 // Thin `gh` and `git` wrappers. Everything fetched from a PR is treated as data; nothing from a PR is ever executed.
 // Arguments go through execFileSync (no shell), so untrusted file names cannot inject commands.
 import { execFileSync } from "node:child_process"
+import { readdirSync, rmSync, statSync } from "node:fs"
+import { join } from "node:path"
 import { LEARNER_ID_RE } from "@blanktab/harness/log"
 import type { PrFile } from "./validate.ts"
 
@@ -12,12 +14,21 @@ export const MAX_OWNER_WALK = 20
 /**
  * A PR with more commits is rejected from the PR object, before anything is fetched (decision 0017). A tab makes one
  * commit per send, and a send with nothing new makes none (contributor.ts commitFiles), so every commit adds or changes
- * a file; with at most 16 files that is about 16 commits, and 64 leaves room for re-sends. The cap bounds what one
- * fetch of refs/pull/N/head can bring: the PR's own commits, whose blobs over 1 MB the filter leaves out.
+ * a file; with at most 16 files that is about 16 commits, and 64 leaves room for re-sends. The cap bounds what the
+ * fetch of the PR's head commit can bring: the PR's own commits, whose blobs over 1 MB the filter leaves out.
  */
 export const MAX_PR_COMMITS = 64
-/** Every git the gate runs is killed after this long; a fetch that hangs or is huge fails that PR's load, not the run. */
+/** Every git the gate runs is killed after this long. A PR fetch that runs past it is over its bound (FetchBoundError). */
 export const GIT_TIMEOUT_MS = 120_000
+/**
+ * The most a PR fetch may write: the pack it downloads is kept as one file (unpackLimit 1) and git runs under
+ * `ulimit -f`, so a larger pack is cut off and the fetch fails (FetchBoundError). A valid PR's pack holds at most
+ * 16 files of at most 1 MB, plus the trees and commits of at most 64 commits: well under 32 MiB; 64 MiB is twice that.
+ */
+export const FETCH_MAX_BYTES = 64 * 1_048_576
+
+/** A PR whose fetch went over its time or byte bound. The gate labels it needs-human; it is not fetched again. */
+export class FetchBoundError extends Error {}
 
 let ghCallCount = 0
 export function gh(args: string[]): Buffer {
@@ -27,10 +38,10 @@ export function gh(args: string[]): Buffer {
 /** Calls made through gh() so far in this process. */
 export function ghCalls(): number { return ghCallCount }
 
-export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string }
+export interface ListedPr { number: number; title: string; headRefName: string; baseRefName: string; labels?: { name?: unknown }[] }
 
 export function listOpenPrs(repo: string, ghFn: (args: string[]) => Buffer = gh): ListedPr[] {
-  return JSON.parse(ghFn(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName"]).toString("utf8")) as ListedPr[]
+  return JSON.parse(ghFn(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,labels"]).toString("utf8")) as ListedPr[]
 }
 
 /**
@@ -50,14 +61,27 @@ export function bytesToContent(raw: Buffer): { content: string } | { error: stri
   try { return { content: new TextDecoder("utf-8", { fatal: true }).decode(raw) } } catch { return { error: "file is not valid UTF-8" } }
 }
 
-/** git, returning raw bytes; `env` is added to the process env. */
-export interface Git { (args: string[], env?: Record<string, string>): Buffer }
-/** A Git running in `cwd` (default: the current directory, the checkout of main), killed after `timeoutMs`. */
-export function gitRunner(opts: { cwd?: string; timeoutMs?: number } = {}): Git {
-  return (args, env) => execFileSync("git", args, {
-    cwd: opts.cwd, timeout: opts.timeoutMs ?? GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"], env: env ? { ...process.env, ...env } : process.env,
-  })
+/**
+ * git, returning raw bytes; `env` is added to the process env. With `limits.maxFileBytes`, no file git writes may grow
+ * past that many bytes (rounded down to whole KiB).
+ */
+export interface Git { (args: string[], env?: Record<string, string>, limits?: { maxFileBytes?: number }): Buffer }
+/**
+ * A Git running in `cwd` (default: the current directory, the checkout of main), killed after `timeoutMs`, with `env`
+ * added to every call. A file-size limit runs git under bash's `ulimit -f` (KiB in bash; sh's unit differs: 512 bytes
+ * in dash, 1024 in macOS sh). The arguments reach git as bash's positional parameters, never parsed as shell text.
+ */
+export function gitRunner(opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {}): Git {
+  return (args, env, limits) => {
+    const o = {
+      cwd: opts.cwd, timeout: opts.timeoutMs ?? GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+      env: opts.env || env ? { ...process.env, ...opts.env, ...env } : process.env,
+    }
+    const max = limits?.maxFileBytes
+    if (max === undefined) return execFileSync("git", args, o)
+    if (!Number.isSafeInteger(max) || max < 1024) throw new Error(`not a file-size limit: ${max}`)
+    return execFileSync("bash", ["-c", 'ulimit -f "$1" && shift && exec git "$@"', "bash", String(Math.floor(max / 1024)), ...args], o)
+  }
 }
 export const gitBuf: Git = gitRunner()
 
@@ -68,10 +92,11 @@ const REGULAR = new Set(["100644", "100755"])
 
 /**
  * Reads PR <n>'s files with git (decision 0017). One gh call (pulls/N); a PR over MAX_PR_FILES files or MAX_PR_COMMITS
- * commits is rejected from it, before any fetch. Then a partial fetch of refs/pull/N/head into refs/gate/pr-N leaves
- * out blobs over 1 MB, and every git call runs with `--no-lazy-fetch`, so such a blob is never downloaded: one that is
- * missing reads as "file exceeds 1 MB". Files are the diff from the merge base with the checkout of main (HEAD) to the
- * head commit pulls/N named. If the fetched head is another commit, the PR is `moved`. If HEAD..head is not the PR's
+ * commits is rejected from it, before any fetch. Then a partial fetch of the head commit pulls/N named into
+ * refs/gate/pr-N leaves out blobs over 1 MB, and every git call runs with `--no-lazy-fetch`, so such a blob is never
+ * downloaded: one that is missing reads as "file exceeds 1 MB". The fetch is bounded by GIT_TIMEOUT_MS and
+ * FETCH_MAX_BYTES; past either it throws FetchBoundError. Files are the diff from the merge base with the checkout of
+ * main (HEAD) to that commit. If GitHub no longer serves the commit, the PR is `moved`. If HEAD..head is not the PR's
  * commit count, the checkout of main is not the main GitHub compares the PR with (it is older than the PR's base, or
  * GitHub has not caught up): `stale`. Either way it has no files and is left for the next run. Nothing from the PR is
  * run: fetch runs no hooks from it and recurses into no submodules; the diff runs no external diff or textconv.
@@ -79,7 +104,7 @@ const REGULAR = new Set(["100644", "100755"])
  * HEAD is the one main used throughout a gate run: the merge base here, the earlier logs (read from its working tree)
  * and the owner (boundAuthor's git log) all come from it.
  */
-export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => Buffer = gh, gitFn: Git = gitBuf): LoadedPr & { moved?: true; stale?: true } {
+export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => Buffer = gh, gitFn: Git = gitBuf, fetchMaxBytes = FETCH_MAX_BYTES): LoadedPr & { moved?: true; stale?: true } {
   if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`not a PR number: ${n}`)
   const pr = JSON.parse(ghFn(["api", `repos/${repo}/pulls/${n}`]).toString("utf8")) as { base: { ref: string }; head: { sha?: unknown; ref: string }; changed_files?: unknown; commits?: unknown; user?: { login?: unknown } | null }
   const headSha = typeof pr.head.sha === "string" && SHA_RE.test(pr.head.sha) ? pr.head.sha : undefined
@@ -100,8 +125,31 @@ export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => 
   const g = (args: string[]) => gitFn(["--no-lazy-fetch", ...args])
   const text = (args: string[]) => g(args).toString("utf8").trim()
   const ref = `refs/gate/pr-${n}`
+  // The head commit pulls/N named, not the moving refs/pull/N/head: the commit cap binds exactly what is fetched.
   // Limit MAX_BYTES + 1: the filter omits blobs of *at least* the limit, and a file of exactly 1 MB is allowed.
-  g(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+refs/pull/${n}/head:${ref}`])
+  const fetchArgs = ["-c", "fetch.unpackLimit=1", "-c", "transfer.unpackLimit=1", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+${headSha}:${ref}`]
+  try {
+    gitFn(["--no-lazy-fetch", ...fetchArgs], undefined, { maxFileBytes: fetchMaxBytes })
+  } catch (e) {
+    const timedOut = (e as { code?: unknown }).code === "ETIMEDOUT"
+    // A pack cut off at the limit is left as a tmp_pack_* file: that is how "over the byte bound" is told, and it is removed.
+    let over = false
+    try {
+      const packDir = text(["rev-parse", "--path-format=absolute", "--git-path", "objects/pack"])
+      for (const f of readdirSync(packDir)) {
+        if (!f.startsWith("tmp_pack_")) continue
+        if (statSync(join(packDir, f)).size >= Math.floor(fetchMaxBytes / 1024) * 1024) over = true
+        rmSync(join(packDir, f), { force: true })
+      }
+    } catch (ce) {
+      if (!timedOut) throw ce
+    }
+    if (timedOut) throw new FetchBoundError(`fetching it took over ${GIT_TIMEOUT_MS / 1000} s`)
+    if (over) throw new FetchBoundError(`fetching it took over ${fetchMaxBytes / 1_048_576} MiB`)
+    // GitHub no longer serves that commit (the branch was force-pushed past it): the head moved.
+    if (/not our ref/.test(String((e as { stderr?: unknown }).stderr ?? ""))) return { ...base, files: [], loadErrors: [], moved: true }
+    throw e
+  }
   if (text(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]) !== headSha) return { ...base, files: [], loadErrors: [], moved: true }
   if (text(["rev-list", "--count", `HEAD..${headSha}`]) !== String(commits)) return { ...base, files: [], loadErrors: [], stale: true }
   const mergeBase = text(["merge-base", "HEAD", headSha])
@@ -188,7 +236,7 @@ export function closePr(repo: string, n: number, reason: string, ghFn: (args: st
   ghFn(["pr", "close", String(n), "--repo", repo, "--comment", `Closed by the session gate:\n\n${fence(reason)}`])
 }
 export function labelNeedsHuman(repo: string, n: number, ghFn: (args: string[]) => Buffer = gh): void {
-  ghFn(["label", "create", "needs-human", "--repo", repo, "--force", "--description", "Session PR touches non-log paths; needs a person", "--color", "d93f0b"])
+  ghFn(["label", "create", "needs-human", "--repo", repo, "--force", "--description", "Session PR needs a person: it touches non-log paths, or was too large or slow to fetch", "--color", "d93f0b"])
   ghFn(["pr", "edit", String(n), "--repo", repo, "--add-label", "needs-human"])
 }
 /** Drafts cannot be merged, so mark ready first. --match-head-commit refuses to merge if the head moved since validation. */
