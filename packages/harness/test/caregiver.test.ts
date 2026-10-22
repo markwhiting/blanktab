@@ -232,6 +232,39 @@ describe("takeSummary", () => {
     nextDecision(c, "x", ["a"])
     expect(c.takeSummary()).toEqual({ carries: 1, to: { a: 1 }, safetyNet: false })
   })
+  it("takeSummary carries lostCarries only when lost > 0, then resets it", () => {
+    const c = mk({ caregiverEpsilon: 1, caregiverPeriod: 50 })
+    c.noteLost(0)
+    expect(c.state().lost).toBeUndefined()
+    expect(c.takeSummary()).toEqual({ carries: 0, to: {}, safetyNet: false })
+    c.noteLost(2)
+    c.noteLost(3)
+    expect(c.state().lost).toBe(5)
+    nextDecision(c, "x", ["a"])
+    expect(c.takeSummary()).toEqual({ carries: 1, to: { a: 1 }, safetyNet: false, lostCarries: 5 })
+    expect(c.state().lost).toBeUndefined()
+    expect(c.takeSummary()).toEqual({ carries: 0, to: {}, safetyNet: false })
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => c.noteLost(bad), String(bad)).toThrow(RangeError)
+    // A restored caregiver keeps its lost count (it survives a checkpoint).
+    c.noteLost(4)
+    expect(createCaregiver({ state: c.state() }).takeSummary().lostCarries).toBe(4)
+  })
+  it("checkCaregiverState: lost absent or an integer ≥ 0; −1, NaN and 1.5 are RangeError", () => {
+    const st = mk().state()
+    for (const lost of [0, 1, 7]) expect(() => checkCaregiverState({ ...st, lost })).not.toThrow()
+    for (const lost of [-1, Number.NaN, 1.5, "2", null]) {
+      expect(() => checkCaregiverState({ ...st, lost }), String(lost)).toThrow(RangeError)
+      expect(() => createCaregiver({ state: { ...st, lost } as CaregiverState }), String(lost)).toThrow(RangeError)
+    }
+  })
+  it("a state without lost (pre-04c) loads", () => {
+    const st = mk().state()
+    expect("lost" in st).toBe(false)
+    const { lost: _l, ...pre } = { ...st, lost: 3 }
+    void _l
+    expect(() => checkCaregiverState(pre)).not.toThrow()
+    expect(createCaregiver({ state: pre }).takeSummary()).toEqual({ carries: 0, to: {}, safetyNet: false })
+  })
 })
 
 describe("clampCaregiverSettings", () => {

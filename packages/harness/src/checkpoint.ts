@@ -2,7 +2,7 @@
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
 import { checkCaregiverState, type CaregiverState } from "./caregiver"
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_SUITE_VERSION, isLogLevel, parseCheckups, type CheckupResult, type CurvePoint } from "./log"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_IDS, isLogLevel, parseCheckups, type CheckupResult, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
@@ -39,9 +39,11 @@ export interface Checkpoint<S = LearnerState> {
   codeSha?: string
   /**
    * Checkups (decision 0016): the highest level checked so far (0: none) and the results not yet in a log file. Absent
-   * in checkpoints written before checkups (lastLevel 0 then).
+   * in checkpoints written before checkups (lastLevel 0 then). `suiteVersion` (decision 0017) is the suite the tail was
+   * recorded under (MILESTONE_IDS key); absent in checkpoints written before it: suite 1. A non-empty tail needs the
+   * learner state's stats.evalCU (its results are billed inside it).
    */
-  checkups?: { lastLevel: number; tail: CheckupResult[] }
+  checkups?: { lastLevel: number; tail: CheckupResult[]; suiteVersion?: number }
   /** The caregiver's state, when the life has one. Absent in older checkpoints (and lives without one). */
   caregiver?: CaregiverState
   learnerState: S
@@ -64,7 +66,10 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (r.knowledgeSha !== undefined && !(typeof r.knowledgeSha === "string" && KNOWLEDGE_SHA_RE.test(r.knowledgeSha))) fail("knowledgeSha must be 64 lowercase hex chars")
   if (r.sessionsSeenAtBirth !== undefined && !isNonNegInt(r.sessionsSeenAtBirth)) fail("sessionsSeenAtBirth must be a non-negative integer")
   if (r.codeSha !== undefined && !(typeof r.codeSha === "string" && CODE_SHA_RE.test(r.codeSha))) fail("codeSha must be 40 lowercase hex chars or \"dev\"")
-  if (r.checkups !== undefined) checkCheckups(r.checkups, r.cu as number, r.steps as number, fail)
+  if (r.checkups !== undefined) {
+    checkCheckups(r.checkups, r.cu as number, r.steps as number, fail)
+    checkTailEvalCU(r.checkups as { tail: unknown[] }, r.learnerState, fail)
+  }
   if (r.caregiver !== undefined) {
     try {
       checkCaregiverState(r.caregiver)
@@ -79,12 +84,26 @@ const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every(k => keys.includes(k))
 
 function checkCheckups(v: unknown, cu: number, steps: number, fail: (what: string) => void): void {
-  if (!isRec(v) || !onlyKeys(v, ["lastLevel", "tail"])) return fail("checkups must be { lastLevel, tail }")
-  const { lastLevel, tail } = v
+  if (!isRec(v) || !onlyKeys(v, ["lastLevel", "tail", "suiteVersion"])) return fail("checkups must be { lastLevel, tail, suiteVersion? }")
+  const { lastLevel, tail, suiteVersion } = v
   if (!(lastLevel === 0 || (typeof lastLevel === "number" && isLogLevel(lastLevel) && lastLevel <= cu))) fail("checkups.lastLevel must be 0 or a log level no more than cu")
-  const parsed = parseCheckups(tail, MILESTONE_SUITE_VERSION, cu, steps)
+  // The tail is checked against the suite it was recorded under, not the current one (decision 0017).
+  if (suiteVersion !== undefined && !(isNonNegInt(suiteVersion) && Object.hasOwn(MILESTONE_IDS, suiteVersion as number))) {
+    return fail("checkups.suiteVersion is not a known suite")
+  }
+  const parsed = parseCheckups(tail, (suiteVersion as number | undefined) ?? 1, cu, steps)
   if (typeof parsed === "string") return fail(`checkups.tail: ${parsed}`)
   if (parsed.some(c => c.level > (lastLevel as number))) fail("checkups.tail has a level above lastLevel")
+}
+
+/**
+ * A non-empty tail is billed inside the learner's evalCU (a failed life's final file carries both), so the learner
+ * state must have one: stats.evalCU, a finite number >= 0. Holds for the stored (packed) state and the unpacked one.
+ */
+function checkTailEvalCU(checkups: { tail: unknown[] }, learnerState: unknown, fail: (what: string) => void): void {
+  if (checkups.tail.length === 0) return
+  const stats = isRec(learnerState) && isRec(learnerState.stats) ? learnerState.stats : undefined
+  if (!isNonNeg(stats?.evalCU)) fail("checkups.tail without the learner's evalCU")
 }
 
 /**
@@ -185,6 +204,7 @@ export async function fromRecord<S = LearnerState>(c: unknown, learnerId: string
   } catch (e) {
     throw new RangeError(`checkpoint for ${learnerId}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
   }
+  if (c.checkups) checkTailEvalCU(c.checkups, learnerState, what => { throw new RangeError(`checkpoint for ${learnerId}: ${what}`) })
   return { ...c, learnerState } as Checkpoint<S>
 }
 

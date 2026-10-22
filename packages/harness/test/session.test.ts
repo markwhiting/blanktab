@@ -5,7 +5,7 @@ import { createCpuBackend, createRng } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, clampSettings, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
 import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/checkpoint"
-import { MAX_RESTORES, MILESTONE_SUITE_VERSION, levelAtOrBelow, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
+import { MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_IDS, MILESTONE_SUITE_VERSION, levelAtOrBelow, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
 import { createWorld, hashSeed, type TraceEvent } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
 import { MILESTONES_V1, type Milestone } from "../src/milestones"
@@ -30,7 +30,7 @@ vi.mock("../src/caregiver", async importOriginal => {
         cgSpy.log.push(k)
         return (c[k] as (...x: unknown[]) => unknown)(...a)
       }) as (typeof c)[K]
-      return { observe: spy("observe"), decide: spy("decide"), onCheckup: spy("onCheckup"), takeSummary: spy("takeSummary"), state: spy("state") }
+      return { observe: spy("observe"), decide: spy("decide"), onCheckup: spy("onCheckup"), takeSummary: spy("takeSummary"), state: spy("state"), noteLost: spy("noteLost") }
     },
   }
 })
@@ -1380,7 +1380,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(checkupEvents(events)).toEqual([["start", 8], ["done", 8, 5], ["start", 16]])
       const cp = (await loadCheckpoint(idb, ID))!
       expect(cp.steps).toBe(10)
-      expect(cp.checkups).toEqual({ lastLevel: 8, tail: [] })
+      expect(cp.checkups).toEqual({ lastLevel: 8, tail: [], suiteVersion: MILESTONE_SUITE_VERSION })
       expect(levelsOf(await logsOf(idb))).toEqual([8])
       const again: SessionEvent[] = []
       await grow(idb, { suite, deps: { onEvent: e => again.push(e) } })
@@ -1405,13 +1405,147 @@ describe("session v2", { timeout: 60_000 }, () => {
         },
       })
       expect(after!.steps).toBe(70)
-      expect(after!.checkups!.lastLevel).toBe(32)
-      expect(after!.checkups!.tail.map(c => [c.level, c.steps])).toEqual([[32, 70]])
       expect(cgSpy.inits).toHaveLength(2)
       expect(cgSpy.inits[1]).toEqual({ state: after!.caregiver })
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
       expect(logs.at(-1)).toMatchObject({ final: true, restores: 1 })
+      gateAccepts(logs)
+    })
+
+    /** Every carry the caregiver made (the carried events) is on the record once: in a file's carries or its lostCarries. */
+    const carriesOnRecord = (logs: LogFileV2[]) => logs.reduce((a, f) => a + (f.caregiver?.carries ?? 0) + (f.caregiver?.lostCarries ?? 0), 0)
+    /** 0.5 CU a step, a sleep every 10, a carry decision every 50 steps: skips from step 95 restore at 114 to the checkpoint at 90. */
+    const restoreLife = (idb: IDBFactory, events: SessionEvent[], o: { onRestored?: () => Promise<void>; poisoned?: boolean } = {}) => {
+      let poisoned = o.poisoned ?? true, justRestored = false
+      return grow(idb, {
+        cfg: { lifetimeCU: 64, sleepInterval: 10, caregiver: CARE }, stub: { cuPerStep: 0.5, skip: n => poisoned && n >= 95 },
+        deps: {
+          onEvent: e => { events.push(e); if (e.type === "restored") { poisoned = false; justRestored = true } },
+          onTick: async () => { if (justRestored) { justRestored = false; await o.onRestored?.() } },
+        },
+      })
+    }
+    /** The carries thrown away by the restore: those after its checkpoint's step and before the restored event. */
+    const thrownAway = (events: SessionEvent[]) => {
+      const r = events.findIndex(e => e.type === "restored")
+      const back = (events[r] as Extract<SessionEvent, { type: "restored" }>).toSteps
+      return events.slice(0, r).filter(e => e.type === "carried" && e.steps > back).length
+    }
+
+    it("a restore after 20 skips puts the carries since the checkpoint into the next file's lostCarries; the sum of carries and lostCarries over the files equals every carried event", async () => {
+      const idb = new IDBFactory()
+      const events: SessionEvent[] = []
+      await restoreLife(idb, events)
+      const lost = thrownAway(events)
+      expect(lost).toBeGreaterThan(0) // non-vacuous
+      const logs = await logsOf(idb)
+      expect(logs.reduce((a, f) => a + (f.caregiver!.lostCarries ?? 0), 0)).toBe(lost)
+      expect(logs.filter(f => f.caregiver!.lostCarries !== undefined)).toHaveLength(1)
+      expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+      gateAccepts(logs)
+    })
+
+    it("a reload right after a restore keeps lostCarries", async () => {
+      const idb = new IDBFactory()
+      const events: SessionEvent[] = []
+      let after: Awaited<ReturnType<typeof loadCheckpoint>>
+      await expect(restoreLife(idb, events, { onRestored: async () => { after = await loadCheckpoint(idb, ID); throw new Error("reload") } })).rejects.toThrow("reload")
+      const lost = thrownAway(events)
+      expect(lost).toBeGreaterThan(0)
+      expect(after!.steps).toBe(90)
+      expect(after!.caregiver!.lost).toBe(lost) // the restore's own save holds the restored caregiver with its count
+      await restoreLife(idb, events, { poisoned: false }) // resumed from that save
+      const logs = await logsOf(idb)
+      expect(logs.reduce((a, f) => a + (f.caregiver!.lostCarries ?? 0), 0)).toBe(lost)
+      expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+      gateAccepts(logs)
+    })
+
+    it("a failed life's final file carries the lost carries", async () => {
+      // 0.125 CU a step, the default 300 s throttle: saves only at the crossings (8, 16, 32 CU at steps 64, 128, 256). The
+      // learner fails at step 255: the carries after step 128 (here one, at step 250) are thrown away with the life.
+      const idb = new IDBFactory()
+      const events: SessionEvent[] = []
+      await expect(grow(idb, {
+        checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE, checkpointEveryMs: undefined },
+        stub: { cuPerStep: 0.125, throwAt: { steps: 255, error: new Error("boom") } }, deps: { onEvent: e => events.push(e) },
+      })).rejects.toThrow("boom")
+      const lost = events.filter(e => e.type === "carried" && e.steps > 128).length
+      expect(lost).toBeGreaterThan(0)
+      const logs = await logsOf(idb)
+      expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 128, caregiver: { carries: 0, lostCarries: lost } })
+      expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+      gateAccepts(logs)
+    })
+
+    it("no checkup runs while the tail holds MAX_CHECKUPS_PER_FILE; the level runs after the next file", async () => {
+      // 100 CU a step, a sleep every 5. A first run without checkups stops at step 22 (its checkpoint: step 21, 2100 CU).
+      const idb = new IDBFactory()
+      const stub = { cuPerStep: 100 }
+      await expect(grow(idb, { checkups: false, cfg: { lifetimeCU: 3200 }, stub, deps: { onTick: ({ steps }) => { if (steps === 22) throw new Error("reload") } } })).rejects.toThrow("reload")
+      // Its checkpoint now holds a full tail (levels 8 ... 1024): level 2048 is due at the next sleep (step 25).
+      const c = (await loadCheckpoint(idb, ID))!
+      expect(c.steps).toBe(21)
+      const levels = [8, 16, 32, 64, 128, 256, 512, 1024]
+      expect(levels).toHaveLength(MAX_CHECKUPS_PER_FILE)
+      const ids = MILESTONE_IDS[MILESTONE_SUITE_VERSION]!
+      const tail = levels.map(level => ({ level, steps: 1, passed: [], measures: Object.fromEntries(ids.map(id => [id, null])), evalCU: 0 }))
+      await saveCheckpoint(idb, { ...c, checkups: { lastLevel: 1024, tail, suiteVersion: MILESTONE_SUITE_VERSION } })
+      // New knowledge at step 27 writes a file (the boundary) that takes the tail; the sleep at step 30 then checks 2048.
+      const inbox = new SessionInbox()
+      const events: SessionEvent[] = []
+      await grow(idb, { cfg: { lifetimeCU: 3200 }, stub, deps: {
+        inbox, onEvent: e => events.push(e), onTick: ({ steps }) => { if (steps === 27) inbox.setKnowledge(knowledgeWith("e".repeat(64))) },
+      } })
+      const order = events.flatMap(e => (e.type === "logged" ? [`logged ${e.steps}`] : e.type === "checkupStarted" ? [`checkup ${e.level}`] : []))
+      expect(order).toEqual(["logged 27", "checkup 2048", "logged 31", "logged 32"])
+      const logs = await logsOf(idb)
+      expect(logs.map(f => (f.checkups ?? []).map(x => x.level)).filter(l => l.length > 0)).toEqual([levels, [2048]])
+      gateAccepts(logs)
+    })
+
+    it("after a checkup event, a checkpoint holding its level is saved before the next learner step", async () => {
+      // The default 300 s throttle: only crossings and finished checkups save. 2 CU a step, a sleep every 5, 70 steps.
+      const idb = new IDBFactory()
+      let due: number | null = null
+      const checked: number[] = []
+      const inner = stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 } })
+      const createLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+        const l = await inner(init)
+        return { ...l, step: async o => {
+          if (due !== null) {
+            const c = (await loadCheckpoint(idb, ID))!
+            expect(c.checkups!.lastLevel, `before the step after the ${due} CU checkup`).toBe(due)
+            checked.push(due)
+            due = null
+          }
+          return l.step(o)
+        } }
+      }
+      await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 5, checkpointEveryMs: undefined }, deps: {
+        createLearner, onEvent: e => { if (e.type === "checkup") due = e.result.level },
+      } })
+      expect(checked).toEqual([8, 16, 32, 64, 128])
+      expect(levelsOf(await logsOf(idb))).toEqual([8, 16, 32, 64, 128])
+    })
+
+    it("a recoverable error while saving right after a checkup: the run resumes from the older checkpoint, the level reruns once, and the logs hold it once", async () => {
+      class Lost extends Error {}
+      // 2 CU a step, a sleep every 5: the 8 CU file and its checkpoint at step 4; the 8 CU checkup at step 5, then its save throws.
+      let thrown = false
+      const onSave = (steps: number) => { if (steps === 5 && !thrown) { thrown = true; throw new Lost("device lost") } }
+      const idb = new IDBFactory()
+      const events: SessionEvent[] = []
+      const deps = { recoverable: (e: unknown) => e instanceof Lost, onEvent: (e: SessionEvent) => events.push(e) }
+      await expect(grow(idb, { stub: { onSave }, deps })).rejects.toBeInstanceOf(Lost)
+      const c = (await loadCheckpoint(idb, ID))!
+      expect(c.steps).toBe(4)
+      expect(c.checkups).toMatchObject({ lastLevel: 0, tail: [] })
+      await grow(idb, { stub: { onSave }, deps })
+      expect(checkupEvents(events).filter(e => e[1] === 8)).toEqual([["start", 8], ["done", 8, 5], ["start", 8], ["done", 8, 5]])
+      const logs = await logsOf(idb)
+      expect(levelsOf(logs)).toEqual([8, 16, 32])
       gateAccepts(logs)
     })
 

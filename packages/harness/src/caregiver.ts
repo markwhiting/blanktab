@@ -62,6 +62,11 @@ export interface CaregiverState {
   /** Carries (and where to) since the last takeSummary. */
   carries: number
   to: Record<string, number>
+  /**
+   * Carries since the last takeSummary that restores threw away (decision 0017): they went with the learner's state
+   * the restore discarded, so they are no longer in `carries`. Absent (as in states from before it) when there are none.
+   */
+  lost?: number
 }
 
 export interface Caregiver {
@@ -71,12 +76,14 @@ export interface Caregiver {
   decide(current: string, rooms: readonly string[]): string | null
   /** After each completed checkup. */
   onCheckup(passed: readonly string[]): void
-  /** Carries since the last take (then reset). */
+  /** Carries since the last take, with `lostCarries` when some were lost (then both reset). */
   takeSummary(): CaregiverSummary
+  /** Adds `n` (an integer >= 0; RangeError otherwise) carries lost to a restore to `lost`. */
+  noteLost(n: number): void
   state(): CaregiverState
 }
 
-const STATE_KEYS = ["version", "settings", "rng", "rooms", "sinceDecision", "stuckFor", "m6Streak", "safetyNet", "carries", "to"]
+const STATE_KEYS = ["version", "settings", "rng", "rooms", "sinceDecision", "stuckFor", "m6Streak", "safetyNet", "carries", "to", "lost"]
 const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every(k => keys.includes(k))
 const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
@@ -100,6 +107,7 @@ export function checkCaregiverState(v: unknown): asserts v is CaregiverState {
     if (!isRec(e) || !onlyKeys(e, ["fast", "slow"]) || !isFiniteNum(e.fast) || !isFiniteNum(e.slow)) fail(`rooms.${room.slice(0, 80)} must be { fast, slow }, finite numbers`)
   }
   for (const k of ["sinceDecision", "stuckFor", "m6Streak"]) if (!isNonNegInt(r[k])) fail(`${k} must be a non-negative integer`)
+  if ("lost" in r && !isNonNegInt(r.lost)) fail("lost must be a non-negative integer when present")
   const summary = parseCaregiver({ carries: r.carries, to: r.to, safetyNet: r.safetyNet })
   if (typeof summary === "string") fail(summary)
 }
@@ -169,10 +177,17 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
       if (st.m6Streak >= 2) st.safetyNet = true
     },
     takeSummary() {
-      const out: CaregiverSummary = { carries: st.carries, to: st.to, safetyNet: st.safetyNet }
+      const lost = st.lost ?? 0
+      const out: CaregiverSummary = { carries: st.carries, to: st.to, safetyNet: st.safetyNet, ...(lost > 0 ? { lostCarries: lost } : {}) }
       st.carries = 0
       st.to = {}
+      delete st.lost
       return out
+    },
+    noteLost(n) {
+      if (!(Number.isInteger(n) && n >= 0)) throw new RangeError(`caregiver.noteLost: ${n} is not an integer >= 0`)
+      const lost = (st.lost ?? 0) + n
+      if (lost > 0) st.lost = lost
     },
     state() {
       st.rng = rng.getState()

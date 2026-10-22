@@ -105,7 +105,8 @@ describe("checkpoints", () => {
 
   it("checkups and caregiver (Plan 04b) are optional, and checked when present: RangeError when malformed", async () => {
     const idb = new IDBFactory()
-    const base = { ...cp(A, 5000), cu: 100 }
+    // A tail needs the learner's evalCU (Plan 04c): the stub state carries stats.evalCU.
+    const base = { ...cp(A, 5000), cu: 100, learnerState: { w: Float32Array.of(1), stats: { evalCU: 0.5 } } }
     const result = { level: 64, steps: 4000, passed: ["M1"], measures: { M1: 0.5, M2: null, M3: 1, M4: 0, M5: 1, M6: 0 }, evalCU: 0.1 }
     const caregiver = createCaregiver({ settings: CAREGIVER_DEFAULTS, seed: 3 })
     caregiver.observe("crib", 0.5)
@@ -128,6 +129,39 @@ describe("checkpoints", () => {
       await saveCheckpoint(idb, { ...base, ...bad } as unknown as Checkpoint)
       await expect(loadCheckpoint(idb, A), JSON.stringify(bad)).rejects.toThrow(RangeError)
     }
+  })
+
+  describe("checkups.suiteVersion and the tail's evalCU (Plan 04c)", () => {
+    const base = { ...cp(A, 5000), cu: 100, learnerState: { w: Float32Array.of(1), stats: { evalCU: 0.5 } } }
+    const result = { level: 64, steps: 4000, passed: ["M1"], measures: { M1: 0.5, M2: null, M3: 1, M4: 0, M5: 1, M6: 0 }, evalCU: 0.1 }
+    it("a pre-04c checkpoint (no suiteVersion) loads as suite 1", async () => {
+      const idb = new IDBFactory()
+      await saveCheckpoint(idb, { ...base, checkups: { lastLevel: 64, tail: [result] } })
+      const c = (await loadCheckpoint(idb, A))!
+      expect(c.checkups).toEqual({ lastLevel: 64, tail: [result] })
+      // Suite 1's ids are the rule: a 7th id is not in it.
+      await saveCheckpoint(idb, { ...base, checkups: { lastLevel: 64, tail: [{ ...result, measures: { ...result.measures, M7: 1 } }] } })
+      await expect(loadCheckpoint(idb, A)).rejects.toThrow(RangeError)
+      await saveCheckpoint(idb, { ...base, checkups: { lastLevel: 64, tail: [result], suiteVersion: 1 } })
+      expect((await loadCheckpoint(idb, A))!.checkups).toEqual({ lastLevel: 64, tail: [result], suiteVersion: 1 })
+    })
+    it("unknown suiteVersion is a RangeError", async () => {
+      const idb = new IDBFactory()
+      for (const suiteVersion of [2, 0, -1, 1.5, "1", null]) {
+        await saveCheckpoint(idb, { ...base, checkups: { lastLevel: 64, tail: [], suiteVersion } } as unknown as Checkpoint)
+        await expect(loadCheckpoint(idb, A), String(suiteVersion)).rejects.toThrow(RangeError)
+      }
+    })
+    it("a non-empty tail without the learner's evalCU is a RangeError", async () => {
+      const idb = new IDBFactory()
+      for (const learnerState of [{ w: 1 }, { stats: {} }, { stats: { evalCU: -1 } }, { stats: { evalCU: Number.NaN } }, { stats: { evalCU: "1" } }, null]) {
+        await saveCheckpoint(idb, { ...base, learnerState, checkups: { lastLevel: 64, tail: [result] } } as unknown as Checkpoint)
+        await expect(loadCheckpoint(idb, A), JSON.stringify(learnerState)).rejects.toThrow("checkups.tail without the learner's evalCU")
+        // An empty tail needs none (a stub, or an older state).
+        await saveCheckpoint(idb, { ...base, learnerState, checkups: { lastLevel: 64, tail: [] } } as unknown as Checkpoint)
+        await expect(loadCheckpoint(idb, A)).resolves.toBeDefined()
+      }
+    })
   })
 
   it("upgrades a v1 database (outbox only): queued logs survive and the checkpoint store appears", async () => {

@@ -7,7 +7,7 @@ import { clampCaregiverSettings, createCaregiver, type Caregiver, type Caregiver
 import { runCheckup } from "./checkup"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CURVE_POINTS, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CHECKUPS_PER_FILE, MAX_CURVE_POINTS, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
 import type { Milestone } from "./milestones"
 import { openQueue } from "./queue"
 // The log schedule lives in log.ts (browser-safe, shared with the gate); re-exported for existing callers.
@@ -328,7 +328,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   let birth: Birth | undefined
   let knowledgeSha = cfg.knowledgeSha
   let sessionsSeenAtBirth = cfg.sessionsSeenAtBirth
-  let live: (() => { steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; stats: Pick<LearnerStats, "cu" | "skippedUpdates" | "evalCU"> }) | undefined
+  let live: (() => {
+    steps: number; seq: number; curve: CurvePoint[]; restores: number; lostCU: number; lostSkips: number; caregiver: CaregiverState | undefined
+    stats: Pick<LearnerStats, "cu" | "skippedUpdates" | "evalCU">
+  }) | undefined
 
   /** The final log file of a life that failed (see runSession), or null if there is nothing to put on the record. */
   const failedLog = async (): Promise<LogFileV2 | null> => {
@@ -372,12 +375,22 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         lostCU: cp.lostCU + Math.max(0, (lived?.stats.cu ?? cp.cu) - cp.cu),
         skippedUpdates: cp.lostSkips + Math.max(savedSkips, lived?.stats.skippedUpdates ?? 0),
       })
-      // The checkpoint's checkups not yet logged, billed inside the file's evalCU (so only with one).
-      if (cp.checkups && f.evalCU !== undefined) {
-        f.checkups = cp.checkups.tail.map(c => structuredClone(c))
+      // The checkpoint's checkups not yet logged, under the suite they were recorded in, billed inside the file's evalCU.
+      // A checkpoint with a tail always has the learner's evalCU (checkCheckpoint), so a tail is never dropped here.
+      const ck = cp.checkups
+      if (ck && ck.tail.length > 0) {
+        if (f.evalCU === undefined) throw new Error("final log: a checkup tail without evalCU")
+        f.checkups = ck.tail.map(c => structuredClone(c))
+        f.milestoneSuiteVersion = ck.suiteVersion ?? 1
+      } else if (ck && f.evalCU !== undefined) {
+        f.checkups = []
         f.milestoneSuiteVersion = MILESTONE_SUITE_VERSION
       }
-      if (cp.caregiver) f.caregiver = { carries: cp.caregiver.carries, to: { ...cp.caregiver.to }, safetyNet: cp.caregiver.safetyNet }
+      if (cp.caregiver) {
+        // The carries made since the checkpoint are thrown away with the life, as are those its restores threw away.
+        const lost = Math.max(0, (lived?.caregiver?.carries ?? cp.caregiver.carries) - cp.caregiver.carries) + (cp.caregiver.lost ?? 0)
+        f.caregiver = { carries: cp.caregiver.carries, to: { ...cp.caregiver.to }, safetyNet: cp.caregiver.safetyNet, ...(lost > 0 ? { lostCarries: lost } : {}) }
+      }
       return f
     }
     if (prior) {
@@ -447,8 +460,12 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     // Checkups (decision 0016): the highest level checked (0: none yet) and the results the next log file carries. A
     // checkpoint from before checkups has neither: lastLevel 0.
-    const checkupsOf = (c: Checkpoint | undefined) => ({ lastLevel: c?.checkups?.lastLevel ?? 0, tail: (c?.checkups?.tail ?? []).map(r => structuredClone(r)) })
-    let { lastLevel, tail } = checkupsOf(cp)
+    // `tailSuite` is the suite the tail was recorded under (decision 0017: a checkpoint from before it has suite 1's);
+    // it matters only while the tail is non-empty.
+    const checkupsOf = (c: Checkpoint | undefined) => ({
+      lastLevel: c?.checkups?.lastLevel ?? 0, tail: (c?.checkups?.tail ?? []).map(r => structuredClone(r)), tailSuite: c?.checkups?.suiteVersion ?? 1,
+    })
+    let { lastLevel, tail, tailSuite } = checkupsOf(cp)
     /** Checkpoints carry the checkups' state once a life has had them configured. */
     const keepCheckups = deps.checkups !== undefined || cp?.checkups !== undefined
     // The caregiver (a harness component; it acts on the world only, through bringToFront): its checkpoint's state, else
@@ -474,21 +491,23 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       let lostSkips = cp?.lostSkips ?? 0
       let lastSavedAt = clock.now()
       const resumedFrom = cp ? cp.steps : null
-      live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, stats: learner.stats() })
+      live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, caregiver: caregiver?.state(), stats: learner.stats() })
       if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)) })
 
       const checkpointNow = async (): Promise<Checkpoint> => ({
         learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
         restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha,
-        ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)) } } : {}),
+        ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), suiteVersion: tail.length > 0 ? tailSuite : MILESTONE_SUITE_VERSION } } : {}),
         ...(caregiver ? { caregiver: caregiver.state() } : {}),
         learnerState: await learner.save(),
       })
       const checkupsOn = () => deps.checkups !== undefined && typeof learner.frozenRun === "function"
       /** The log file of this moment. It takes the checkup results and the caregiver's carries since the last file. */
       const logFile = (final: boolean): LogFileV2 => {
+        // checkupAtSleep never lets the tail grow past this; a file with more would be refused by the gate.
+        if (tail.length > MAX_CHECKUPS_PER_FILE) throw new Error(`log file: ${tail.length} checkups, more than ${MAX_CHECKUPS_PER_FILE}`)
         const st = learner.stats()
-        const checked = checkupsOn() || tail.length > 0 ? { checkups: tail, milestoneSuiteVersion: MILESTONE_SUITE_VERSION } : {}
+        const checked = checkupsOn() || tail.length > 0 ? { checkups: tail, milestoneSuiteVersion: tail.length > 0 ? tailSuite : MILESTONE_SUITE_VERSION } : {}
         tail = []
         return {
           schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
@@ -522,12 +541,15 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       /**
        * At a clean sleep: the checkup for the highest log level due and not yet checked, if any (one per sleep). True
        * if one finished (its result waits in `tail` for the next log file; the caller saves a checkpoint at once). A halt
-       * asked meanwhile abandons it: the level stays pending. Its frozen steps are paced like the life's own.
+       * asked meanwhile abandons it: the level stays pending. Its frozen steps are paced like the life's own. The level
+       * also stays pending while the tail is full (MAX_CHECKUPS_PER_FILE) or holds another suite's results (a resumed
+       * tail: one file carries one suite), until the next log file takes the tail.
        */
       const checkupAtSleep = async (): Promise<boolean> => {
         const c = deps.checkups
         const l = learner
         if (!c || !l.frozenRun) return false
+        if (tail.length >= MAX_CHECKUPS_PER_FILE || (tail.length > 0 && tailSuite !== MILESTONE_SUITE_VERSION)) return false
         const st = l.stats()
         if (st.consecutiveSkips !== 0) return false
         const level = levelAtOrBelow(st.cu)
@@ -541,6 +563,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         })
         if (out.status !== "done") return false
         tail.push(out.result)
+        tailSuite = MILESTONE_SUITE_VERSION
         lastLevel = level
         emit({ type: "checkup", result: out.result })
         caregiver?.onCheckup(out.result.passed) // after the checkup event: it takes no part in the checkup itself
@@ -595,10 +618,18 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           lostSkips += st.skippedUpdates - now_.skippedUpdates
           // On the record at once, so a reload before the next save does not forget the restore.
           // Checkups and caregiver go back with it (a checkpoint from before them: as this run began).
-          ;({ lastLevel, tail } = checkupsOf(back))
-          if (careInit) caregiver = createCaregiver(back.caregiver ? { state: back.caregiver } : careInit)
+          ;({ lastLevel, tail, tailSuite } = checkupsOf(back))
+          if (careInit) {
+            // The carries made since that checkpoint are thrown away with the learner's state: on the record as lost
+            // (decision 0017), with those earlier restores since the last file threw away (`lost`, kept by checkpoints).
+            const was = caregiver!.state()
+            const thrown = Math.max(0, was.carries - (back.caregiver?.carries ?? 0))
+            caregiver = createCaregiver(back.caregiver ? { state: back.caregiver } : careInit)
+            caregiver.noteLost(thrown + (was.lost ?? 0) - (back.caregiver?.lost ?? 0))
+          }
           prevRoom = undefined // the restored learner's last frame is not this one
-          cp = restorePoint = { ...back, restores, lostCU, lostSkips }
+          // The restored caregiver (with its lost count) is saved, so a reload right after keeps the count.
+          cp = restorePoint = { ...back, restores, lostCU, lostSkips, ...(caregiver ? { caregiver: caregiver.state() } : {}) }
           await saveCheckpoint(idb, cp)
           lastSavedAt = clock.now()
           emit({ type: "restored", fromSteps: steps, toSteps: back.steps, restores, lostCU })

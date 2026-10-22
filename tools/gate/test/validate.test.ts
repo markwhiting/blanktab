@@ -349,6 +349,20 @@ describe("validateSessionPr v2: checkups (decision 0016)", () => {
   })
 })
 
+describe("validateSessionPr v2: caregiver.lostCarries (Plan 04c)", () => {
+  const cg = (seq: number, caregiver: unknown) => ({ ...logV2(seq), caregiver }) as LogFileV2
+  it("a PR whose files carry lostCarries validates; a bad lostCarries is rejected through the parser", () => {
+    const good = [cg(0, { carries: 2, to: { crib: 2 }, safetyNet: false }), cg(1, { carries: 0, to: {}, safetyNet: false, lostCarries: 3 }), cg(2, { carries: 1, to: { toys: 1 }, safetyNet: false, lostCarries: 1 })]
+    expect(errs(good.map(f => file(f))).errors).toEqual([])
+    expect(errs([file(good[1]!)], [good[0]!]).ok).toBe(true)
+    for (const bad of [0, -1, 1.5, "2", null]) {
+      const r = errs([file(cg(0, { carries: 0, to: {}, safetyNet: false, lostCarries: bad }))])
+      expect(r.ok, String(bad)).toBe(false)
+      expect(msg(r)).toContain("lostCarries")
+    }
+  })
+})
+
 // Node-only (reads the repo), so it lives here under the root tsconfig, not in packages/harness (browser-typed).
 describe("committed logs", () => {
   it("every committed log under data/runs still parses", () => {

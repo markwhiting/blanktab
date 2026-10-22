@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { MAX_CHECKUPS_PER_FILE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { MAX_CHECKUPS_PER_FILE, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 
 const ID = "lrn_0123456789abcdef"
@@ -112,5 +112,29 @@ describe("parseSessionRow checkupScore", () => {
       expect(parseSessionRow({ ...row, checkupScore: bad })!.checkupScore, JSON.stringify(bad)).toBeNull()
     }
     expect(parseSessionRow(row)!.checkupScore).toBeNull()
+  })
+  it("parseSessionRow: checkupScore off the log schedule (level 12), score 7, a negative or fractional score → null; level 512 score 6 kept", () => {
+    expect(MAX_SUITE_SIZE).toBe(6)
+    for (const bad of [{ level: 12, score: 1 }, { level: 64, score: 7 }, { level: 64, score: -1 }, { level: 64, score: 0.5 }, { level: 0, score: 0 }]) {
+      expect(parseSessionRow({ ...row, checkupScore: bad })!.checkupScore, JSON.stringify(bad)).toBeNull()
+    }
+    expect(parseSessionRow({ ...row, checkupScore: { level: 512, score: 6 } })!.checkupScore).toEqual({ level: 512, score: 6 })
+    expect(parseSessionRow({ ...row, checkupScore: { level: 2048, score: 0 } })!.checkupScore).toEqual({ level: 2048, score: 0 })
+  })
+})
+
+describe("caregiver.lostCarries", () => {
+  it("caregiver.lostCarries: absent or an integer ≥ 1; 0, −1, 1.5 and '2' rejected; not in the to-sum", () => {
+    const cg = (c: Record<string, unknown>) => parseLogFile(v2({ caregiver: { carries: 2, to: { a: 2 }, safetyNet: false, ...c } }))
+    const r = cg({ lostCarries: 3 })
+    expect(r.ok).toBe(true)
+    if (r.ok && r.value.schemaVersion === 2) expect(r.value.caregiver).toEqual({ carries: 2, to: { a: 2 }, safetyNet: false, lostCarries: 3 })
+    expect(cg({ lostCarries: 1 }).ok).toBe(true)
+    const none = cg({})
+    expect(none.ok && none.value.schemaVersion === 2 && "lostCarries" in none.value.caregiver!).toBe(false)
+    for (const bad of [0, -1, 1.5, "2", null, Number.NaN]) expect(cg({ lostCarries: bad }).ok, String(bad)).toBe(false)
+    // Not part of the to-sum: carries 2 with lost 3 needs to summing to 2, not 5.
+    expect(parseLogFile(v2({ caregiver: { carries: 5, to: { a: 2 }, safetyNet: false, lostCarries: 3 } })).ok).toBe(false)
+    expect(parseLogFile(v2({ caregiver: { carries: 0, to: {}, safetyNet: false, lostCarries: 3 } })).ok).toBe(true)
   })
 })

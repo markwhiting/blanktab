@@ -106,6 +106,8 @@ export function levelAtOrBelow(cu: number): number | null {
 /** The milestone suite (decision 0016): version -> milestone ids in suite order. */
 export const MILESTONE_SUITE_VERSION = 1
 export const MILESTONE_IDS: Readonly<Record<number, readonly string[]>> = { 1: ["M1", "M2", "M3", "M4", "M5", "M6"] }
+/** The largest suite size of any known suite (summary rows carry no suite version). */
+export const MAX_SUITE_SIZE: number = Math.max(...Object.values(MILESTONE_IDS).map(ids => ids.length))
 /** At most this many checkups per log file. */
 export const MAX_CHECKUPS_PER_FILE = 8
 
@@ -119,8 +121,12 @@ export interface CheckupResult {
   error?: true // a milestone threw; it counts as not passed
 }
 
-/** What the caregiver did since the previous file: `carries` in all, `to` by destination, whether the safety net fired. */
-export interface CaregiverSummary { carries: number; to: Record<string, number>; safetyNet: boolean }
+/**
+ * What the caregiver did since the previous file: `carries` in all, `to` by destination, whether the safety net fired.
+ * `lostCarries` (decision 0017): carries made since the previous file and then thrown away by a restore or a failed
+ * life (they are not in `carries` or `to`). An integer >= 1 when present; absent when none were lost.
+ */
+export interface CaregiverSummary { carries: number; to: Record<string, number>; safetyNet: boolean; lostCarries?: number }
 
 /** Bound on LogFileV2.restores. */
 export const MAX_RESTORES = 1000
@@ -183,7 +189,9 @@ export function parseSessionRow(v: unknown): SessionRow | null {
     cu: isNum(cu) && cu >= 0 ? cu : null,
     lossRatio: isNum(lossRatio) && lossRatio >= 0 ? lossRatio : null,
     heldOutRatio: isNum(heldOutRatio) && heldOutRatio >= 0 ? heldOutRatio : null,
-    checkupScore: isObj(checkupScore) && isNonNegInt(checkupScore.level) && isNonNegInt(checkupScore.score)
+    // A log-schedule level and a score no suite can exceed (the row carries no suite version).
+    checkupScore: isObj(checkupScore) && isNonNegInt(checkupScore.level) && isLogLevel(checkupScore.level)
+      && isNonNegInt(checkupScore.score) && checkupScore.score <= MAX_SUITE_SIZE
       ? { level: checkupScore.level, score: checkupScore.score } : null,
   }
 }
@@ -200,7 +208,7 @@ const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
 const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss", "heldOut"]
 const HELD_OUT_KEYS = ["loss", "baseline"]
 const CHECKUP_KEYS = ["level", "steps", "passed", "measures", "evalCU", "error"]
-const CAREGIVER_KEYS = ["carries", "to", "safetyNet"]
+const CAREGIVER_KEYS = ["carries", "to", "safetyNet", "lostCarries"]
 const CARE_DEST_RE = /^[a-z]{1,16}$/
 const MAX_CARE_DESTS = 16
 const unknownKey = (o: Record<string, unknown>, allowed: readonly string[], where: string): string | null => {
@@ -410,5 +418,10 @@ export function parseCaregiver(v: unknown): CaregiverSummary | string {
     sum += n
   }
   if (sum !== v.carries) return "caregiver.to values must sum to carries"
-  return { carries: v.carries, to: { ...(v.to as Record<string, number>) }, safetyNet: v.safetyNet }
+  // Written only when some were lost (0 is never written: files without loss stay as they were).
+  if ("lostCarries" in v && !(isNonNegInt(v.lostCarries) && v.lostCarries >= 1)) return "caregiver.lostCarries must be an integer >= 1 when present"
+  return {
+    carries: v.carries, to: { ...(v.to as Record<string, number>) }, safetyNet: v.safetyNet,
+    ...("lostCarries" in v ? { lostCarries: v.lostCarries as number } : {}),
+  }
 }

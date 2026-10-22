@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { buildSummary } from "../summary.ts"
-import type { LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
+import { parseSessionRow, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
 
 const A = "lrn_aaaaaaaaaaaaaaaa"
 const B = "lrn_bbbbbbbbbbbbbbbb"
@@ -109,5 +109,14 @@ describe("buildSummary", () => {
     const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
     expect(rows[A]!.checkupScore).toEqual({ level: 128, score: 2 })
     expect(rows[B]!.checkupScore).toBeNull()
+    // What the gate writes, the page keeps (parseSessionRow's bounds: a log level, a score within the suite).
+    for (const r of buildSummary(dir).sessions) expect(parseSessionRow(JSON.parse(JSON.stringify(r)))!.checkupScore).toEqual(rows[r.learnerId]!.checkupScore)
+  })
+  it("a full score at a large level survives the page's parser (score 6 of suite 1, level 3072)", () => {
+    const ck = { level: 3072, steps: 1, passed: ["M1", "M2", "M3", "M4", "M5", "M6"], measures: { M1: 1, M2: 1, M3: 1, M4: 1, M5: 1, M6: 1 }, evalCU: 0 }
+    put({ ...log(A, 0), schemaVersion: 2, cu: 4000, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, curve: [], skippedUpdates: 0, restores: 0, lostCU: 0, milestoneSuiteVersion: 1, checkups: [ck], evalCU: 0 })
+    const row = buildSummary(dir).sessions[0]!
+    expect(row.checkupScore).toEqual({ level: 3072, score: 6 })
+    expect(parseSessionRow(JSON.parse(JSON.stringify(row)))!.checkupScore).toEqual({ level: 3072, score: 6 })
   })
 })
