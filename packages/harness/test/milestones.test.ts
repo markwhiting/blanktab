@@ -286,7 +286,7 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
       expect(pages, `seed ${seed}`).toBeGreaterThanOrEqual(M5_MIN_PAGES)
       expect(judge(m, dfs.trace, ref).passed, `seed ${seed}: ${pages} pages, ref ${ref}`).toBe(true)
     }
-    // The reference's clickers, recorded with observations (as a checkup would): their mean is exactly the reference,
+    // The reference's clickers, recorded blind (the blind-run test checks blind and observed traces agree): their mean is exactly the reference,
     // and they rarely pass against it (a lucky clicker reaching 4+ pages can).
     let lucky = 0
     for (const seed of [1, 2]) {
