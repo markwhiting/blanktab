@@ -1243,8 +1243,10 @@ describe("session v2", { timeout: 60_000 }, () => {
         expect(log.slice(s + 1, end)).toEqual([])
         expect(log[end + 1]).toBe("onCheckup") // told the result once it is in
       }
-      expect(log.filter(x => x === "observe").length).toBe(70) // non-vacuous: it watched every step
+      // Non-vacuous: it decided every step and watched every one within a room (all but the first and each after a carry).
+      const carries = log.filter(x => x === "event:carried").length
       expect(log.filter(x => x === "decide").length).toBe(70)
+      expect(log.filter(x => x === "observe").length).toBe(70 - 1 - carries)
     })
 
     it("the caregiver carries through world.bringToFront: focus events with source caregiver, counted in the log's caregiver summary; its settings are in the log's settings", async () => {
@@ -1257,7 +1259,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         drainTrace: () => { const t = world.drainTrace(); trace.push(...t); return t },
       }
       const events: SessionEvent[] = []
-      await grow(idb, { checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE }, stub: { cuPerStep: 0.5 }, deps: { world: traced, onEvent: e => events.push(e) } })
+      await grow(idb, { checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE }, stub: { cuPerStep: 0.125 }, deps: { world: traced, onEvent: e => events.push(e) } })
       trace.push(...world.drainTrace()) // a carry at the last step
       const carried = events.flatMap(e => (e.type === "carried" ? [e] : []))
       const focus = trace.filter(e => e.kind === "focus" && e.source === "caregiver")
@@ -1270,10 +1272,37 @@ describe("session v2", { timeout: 60_000 }, () => {
       const byRoom: Record<string, number> = {}
       for (const e of carried) byRoom[e.to] = (byRoom[e.to] ?? 0) + 1
       expect(to).toEqual(byRoom)
-      // Carries only at sleeps here (the period, 50 steps, is longer than a sleep interval).
-      for (const e of carried) expect(e.steps % 5).toBe(0)
+      // Carries only on the period (50 steps), not at the sleeps in between (decision 0016).
+      for (const e of carried) expect(e.steps % 50).toBe(0)
       for (const f of logs) expect(f.settings).toMatchObject(clampCaregiverSettings(CARE))
       gateAccepts(logs)
+    })
+
+    it("the caregiver observes a loss only when the previous frame was seen in the same room: not the first transition after a carry, nor a run's first", async () => {
+      cgSpy.log.length = 0
+      const world = createWorld({ seed: 7, canvas: canvas() })
+      const rooms: string[] = [] // the room of each step's frame, as the session reads it
+      const watched = { observe: () => { rooms.push(world.state().room); return world.observe() }, state: () => world.state(), rooms: () => world.rooms(), bringToFront: (k: Parameters<typeof world.bringToFront>[0]) => world.bringToFront(k), act: (a: Action) => world.act(a), drainTrace: () => world.drainTrace() }
+      await grow(new IDBFactory(), { checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE }, stub: { cuPerStep: 0.125 }, deps: { world: watched, onEvent: e => cgSpy.log.push(`event:${e.type}`) } })
+      // Per step: [observe] decide [event:carried].
+      const perStep: { observed: boolean; carried: boolean }[] = []
+      let observed = false
+      for (const x of cgSpy.log) {
+        if (x === "observe") observed = true
+        else if (x === "decide") { perStep.push({ observed, carried: false }); observed = false }
+        else if (x === "event:carried") perStep.at(-1)!.carried = true
+      }
+      expect(perStep).toHaveLength(512)
+      expect(perStep[0]!.observed).toBe(false)
+      const afterCarry = perStep.flatMap((p, i) => (p.carried && i + 2 < perStep.length ? [i] : []))
+      expect(afterCarry.length).toBeGreaterThan(3)
+      for (const i of afterCarry) {
+        expect(rooms[i + 1], `step ${i + 2}`).not.toBe(rooms[i])
+        expect(perStep[i + 1]!.observed, `step ${i + 2}: across the carry`).toBe(false)
+        expect(perStep[i + 2]!.observed, `step ${i + 3}: within the new room`).toBe(true)
+      }
+      // And in general: observed exactly when the frame before was in the same room.
+      perStep.forEach((p, i) => expect(p.observed, `step ${i + 1}`).toBe(i > 0 && rooms[i] === rooms[i - 1]))
     })
 
     it("a failed life's final file carries its checkpoint's checkup tail; one rebuilt from the latest file does not repeat its checkups", async () => {
@@ -1463,8 +1492,9 @@ describe("session v2", { timeout: 60_000 }, () => {
         createLearner: spyLearner, inbox, onEvent: (e: SessionEvent) => events.push(e),
         onTick: ({ steps }: { steps: number }) => { if (steps === 3) inbox.setKnowledge(knowledgeWith("e".repeat(64))); if (steps === stopAt) throw new Error("reload") },
       })
-      await expect(grow(idb, { cfg: { caregiver: CARE }, deps: deps(12) })).rejects.toThrow("reload")
-      await grow(idb, { cfg: { caregiver: CARE }, deps: deps() })
+      // 120 steps: long enough for the caregiver's period (50 steps).
+      await expect(grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps(12) })).rejects.toThrow("reload")
+      await grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps() })
       // Non-vacuous: checkups ran, the caregiver carried, knowledge was handed over, and a resume created from state.
       expect(events.some(e => e.type === "checkup")).toBe(true)
       expect(events.some(e => e.type === "carried")).toBe(true)

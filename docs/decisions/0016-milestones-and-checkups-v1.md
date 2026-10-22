@@ -40,7 +40,7 @@ The budgets are M1 300, M2–M5 400 each and M6 500: 2,400 steps per suite, plus
 Why these lengths:
 - Each budget lets a cursor that moves at most 16 px per step cross the 320×200 screen many times.
 - M6 gets 500 because three switches need repeated trips to the 16 px taskbar strip.
-- At the ~26 learning steps/s seen live, a suite would take ~92 s. Frozen steps are forward-only (~40 steps/s, ~60 s), but they obey the same `maxStepsPerSec` cap as learning steps, as a courtesy to the visitor's machine. So expect up to ~80 s per suite.
+- At the ~26 learning steps/s seen live, a suite would take ~92 s. Frozen steps are forward-only, so they should be faster: ~40 steps/s (~60 s a suite) is an unmeasured estimate, not a measurement. They obey the same `maxStepsPerSec` cap as learning steps, as a courtesy to the visitor's machine. So expect up to ~80 s per suite.
 - Early life is checkup-heavy (seven levels by 512 CU) by design: the developmental curve is densest where change is fastest.
 
 ### Tightening after the random check (controller rulings; agent's calls)
@@ -93,7 +93,7 @@ An untrained learner is not a uniform-random policy. Its fixed initial biases ca
 - **M1:** every newborn scored exactly 1, the on-device baseline ruling at work.
 - **Cost:** a checkup cost ~7.3 evalCU on average at `CPU_WIDTHS`.
 
-**How to read a pass.** This corrects the "Random behaviour scores ~0" expectation under Consequences: a newborn scores 1 or more on ~42 % of learners.
+**How to read a pass.** A newborn is not a random policy: it scores 1 or more on ~42 % of learners (the Expected results line under Consequences says so).
 - A single milestone pass counts as evidence of learning only when it is above this base rate. For example, it holds across learners at a rate clearly above the newborn row, or it is sustained across a learner's later checkups.
 - The first checkup, at 8 CU, is each learner's own baseline. Later checkups are read against it.
 - Thresholds are unchanged.
@@ -112,6 +112,9 @@ An untrained learner is not a uniform-random policy. Its fixed initial biases ca
 ### Caregiver (§7.3)
 - **Relative learning progress.** LP per room is `(EMA_slow(loss) − EMA_fast(loss)) / max(EMA_slow, 1e-6)`, rather than the raw difference, so rooms whose loss scales differ compete fairly (Task 5).
 - **Settings source.** While the picker still samples randomly, caregiver settings come from `knowledge/caregiver-prior.json` (spec §9.1).
+- **When it decides: every `caregiverPeriod` steps, and only then** (final-review ruling; agent's call). This deviates from §7.3's "and after each sleep". With sleeps every 250 steps, a decision after each sleep also reset the period count, so any `caregiverPeriod` ≥ 250 (the default is 500) never took effect and the setting was inert. Now a decision falls exactly every `caregiverPeriod` steps (in safety-net mode, after `caregiverStuckSteps` stuck steps, as before).
+- **Which losses it observes: transitions within one room only** (final-review ruling; agent's call). A frame pair that spans two rooms (after a carry, or the learner's own taskbar switch) has a loss about 3× a normal one, and was billed to the new room, seeding both its EMAs and biasing its LP. The session now observes a loss only when the previous frame was seen in the same room as the current one; it also skips a run's first transition and the first after a restore.
+- **Carries on the record.** Carries since the last checkpoint are lost from the record when the life restores from that checkpoint or fails (its final file is built from the checkpoint), as its curve points are. The log's carry counts are a lower bound on the carries that happened.
 
 ### Module signature (amends §8.1)
 - `makeVariant(seed, canvas)` takes the canvas to draw on.
@@ -130,6 +133,7 @@ An untrained learner is not a uniform-random policy. Its fixed initial biases ca
 
 ## Consequences
 - **Score.** A checkup score is the number passed of M1–M6. Results compare only within `milestoneSuiteVersion` 1; changing any row above needs a new decision and a version bump.
-- **Expected results.** A curve of zeros is an acceptable first result (spec §2). Random behaviour scores ~0, with M4 and M5 occasionally passing by luck (about 1 in 10 each).
+- **Expected results.** A curve of zeros is an acceptable first result (spec §2). A uniform-random policy scores ~0 (M4 and M5 pass by luck about 1 in 10 each), but an untrained newborn does not: it scores 1 or more on ~42 % of learners (Newborn base rate, above). Read early passes against that base rate and the learner's own 8 CU checkup.
 - **Cost.** Checkups cost up to ~80 s per suite at the speed cap, plus ~6,400 cheap world-only steps for the M5 reference.
 - **Still open.** The thresholds are initial (spec §8.2: "tune once real data exists"), and so are the M2/M5 floors.
+- **Still open.** The M2 and M5 tightenings (the ≥ 50 % in-view floor; the 16-clicker reference and ≥ 4 page floor) were made by the agent under controller rulings, not yet confirmed by the user.

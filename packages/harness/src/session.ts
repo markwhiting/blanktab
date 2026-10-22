@@ -290,8 +290,10 @@ function birthOf(state: unknown, id: string): Birth {
  *   saved at once. A halt asked during one abandons it (the level stays pending, so it runs once after the reload); a
  *   recoverable error inside one is rethrown as any other. Checkpoints carry the last level and the pending results.
  * - The caregiver (on with `cfg.caregiver` or a checkpoint's caregiver, in a world with state, rooms and
- *   bringToFront): after every step it observes the learner's last loss in the room that step's frame was seen in and
- *   may carry the learner to another room through world.bringToFront (never during a checkup). Nothing it reads or
+ *   bringToFront): after every step it observes the learner's last loss in the room that step's frame was seen in, when
+ *   the frame before was seen in the same room (decision 0016: a transition across a carry or a taskbar switch is not a
+ *   room's loss; nor is the first one of a run or after a restore), and every caregiverPeriod steps may carry the learner
+ *   to another room through world.bringToFront (never during a checkup). Nothing it reads or
  *   decides reaches the learner. Its carries go into each log file, its settings into `settings`, its state into checkpoints.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
@@ -457,6 +459,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       : cfg.caregiver ? { settings: clampCaregiverSettings(cfg.caregiver), seed: hashSeed(seed, "caregiver") }
       : undefined
     let caregiver: Caregiver | undefined = careInit ? createCaregiver(careInit) : undefined
+    /** The room the previous frame was seen in (undefined: no previous frame this run, or a restore since). */
+    let prevRoom: string | undefined
     let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed, widths, settings })
     try {
       let steps = cp?.steps ?? 0
@@ -564,8 +568,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           saveNow = await checkupAtSleep()
         }
         if (caregiver) {
-          caregiver.observe(room!, learner.stats().lastLoss)
-          const to = caregiver.decide(world.state!().room, world.rooms!(), checkpointDue)
+          if (room === prevRoom) caregiver.observe(room!, learner.stats().lastLoss) // within one room only
+          prevRoom = room
+          const to = caregiver.decide(world.state!().room, world.rooms!())
           if (to !== null) {
             world.bringToFront!(to as RoomKind)
             emit({ type: "carried", to, steps })
@@ -592,6 +597,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           // Checkups and caregiver go back with it (a checkpoint from before them: as this run began).
           ;({ lastLevel, tail } = checkupsOf(back))
           if (careInit) caregiver = createCaregiver(back.caregiver ? { state: back.caregiver } : careInit)
+          prevRoom = undefined // the restored learner's last frame is not this one
           cp = restorePoint = { ...back, restores, lostCU, lostSkips }
           await saveCheckpoint(idb, cp)
           lastSavedAt = clock.now()

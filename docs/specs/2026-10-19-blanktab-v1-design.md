@@ -205,7 +205,7 @@ Picture books, tools, games and the mini-web come later. The shell and generator
 ### 7.2 Privileged trace
 Each tick, the world emits to the harness only: element under the cursor and whether it responded; scroll extents and revealed fraction; active room and page; widget state changes. Detectors and the caregiver use this trace. It never crosses into the learner.
 
-### 7.3 Caregiver [agent; the user called this "a meta-learner landscape"; **amended by 0016**: relative LP, settings from caregiver-prior.json while the picker is random]
+### 7.3 Caregiver [agent; the user called this "a meta-learner landscape"; **amended by 0016**: relative LP, settings from caregiver-prior.json while the picker is random, decides every `caregiverPeriod` steps only (not also after each sleep), observes only transitions within one room]
 - **Learning progress per room:** `LP(room) = EMA_slow(loss) − EMA_fast(loss)`, computed from the learner's prediction loss while in that room.
 - **When to move:** every `caregiverPeriod` steps (and after each sleep), the caregiver may *carry* the learner. It picks a room by softmax over LP with temperature τ, plus ε-uniform exploration.
 - **How it moves:** by bringing the room's window forward through a harness command. This is logged as a caregiver action, never as a learner action.

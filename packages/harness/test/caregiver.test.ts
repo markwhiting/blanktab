@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import {
-  CAREGIVER_DEFAULTS, CAREGIVER_RANGES, clampCaregiverSettings, createCaregiver, learningProgress, type CaregiverSettings,
+  CAREGIVER_DEFAULTS, CAREGIVER_RANGES, checkCaregiverState, clampCaregiverSettings, createCaregiver, learningProgress, type CaregiverSettings, type CaregiverState,
 } from "../src/caregiver"
 
 const mk = (over: Partial<CaregiverSettings> = {}, seed = 7) => createCaregiver({ settings: { ...CAREGIVER_DEFAULTS, ...over }, seed })
@@ -38,32 +38,52 @@ describe("observe", () => {
 })
 
 describe("decide timing", () => {
-  it("decides after a sleep and every caregiverPeriod steps, otherwise null", () => {
+  it("decides exactly every caregiverPeriod steps (not also after a sleep), otherwise null", () => {
     const c = mk({ caregiverPeriod: 50, caregiverEpsilon: 1 }) // epsilon 1: uniform pick, so a move is likely
     c.observe("a", 1)
     const rooms = ["a", "b", "c", "d"]
     const decided: number[] = []
     for (let i = 1; i <= 200; i++) {
       const before = c.state().sinceDecision
-      c.decide("a", rooms, false)
+      c.decide("a", rooms)
       if (c.state().sinceDecision === 0 && before !== 0) decided.push(i)
     }
     expect(decided).toEqual([50, 100, 150, 200])
-    // after a sleep: decides at once (sinceDecision resets)
-    c.decide("a", rooms, false)
-    expect(c.state().sinceDecision).toBe(1)
-    c.decide("a", rooms, true)
-    expect(c.state().sinceDecision).toBe(0)
   })
   it("returns null between decisions", () => {
     const c = mk({ caregiverPeriod: 50 })
-    for (let i = 1; i < 50; i++) expect(c.decide("a", ["a", "b"], false)).toBeNull()
+    for (let i = 1; i < 50; i++) expect(c.decide("a", ["a", "b"])).toBeNull()
+  })
+  it("periods 250, 500 and 1000 give different decision sequences over 20,000 steps, a decision exactly every period", () => {
+    const rooms = ["a", "b", "c", "d"]
+    const run = (caregiverPeriod: number) => {
+      const c = mk({ caregiverPeriod, caregiverEpsilon: 1 })
+      const at: number[] = []
+      const to: (string | null)[] = []
+      for (let i = 1; i <= 20_000; i++) {
+        c.observe(rooms[i % 4]!, 1 / (1 + (i % 13)))
+        const before = c.state().sinceDecision
+        const t = c.decide("a", rooms)
+        if (c.state().sinceDecision === 0 && before !== 0) { at.push(i); to.push(t) }
+      }
+      return { at, to }
+    }
+    const runs = [250, 500, 1000].map(p => [p, run(p)] as const)
+    for (const [p, r] of runs) expect(r.at, `period ${p}`).toEqual(Array.from({ length: 20_000 / p }, (_, k) => (k + 1) * p))
+    const seqs = runs.map(([, r]) => JSON.stringify(r))
+    expect(new Set(seqs).size).toBe(3)
   })
 })
 
+/** The next decision of a caregiver whose period is 50 (the minimum): 49 null steps, then the decision. */
+const nextDecision = (c: ReturnType<typeof mk>, current: string, rooms: readonly string[]) => {
+  for (let i = 1; i < 50; i++) expect(c.decide(current, rooms)).toBeNull()
+  return c.decide(current, rooms)
+}
+
 describe("pick distribution", () => {
   it("pick frequencies over 10,000 decisions are within 0.02 of (1 − ε)·softmax(LP/τ) + ε/N; unvisited rooms get the max visited LP", () => {
-    const settings = { ...CAREGIVER_DEFAULTS, caregiverTau: 0.3, caregiverEpsilon: 0.1 }
+    const settings = { ...CAREGIVER_DEFAULTS, caregiverTau: 0.3, caregiverEpsilon: 0.1, caregiverPeriod: 50 }
     const c = createCaregiver({ settings, seed: 12345 })
     for (let i = 0; i < 40; i++) c.observe("a", 1) // flat: LP 0
     for (let i = 0; i < 40; i++) c.observe("b", 1)
@@ -82,23 +102,24 @@ describe("pick distribution", () => {
     const counts = new Map<string, number>()
     const N = 10_000
     for (let i = 0; i < N; i++) {
-      const to = c.decide("elsewhere", rooms, true)!
+      const to = nextDecision(c, "elsewhere", rooms)!
       counts.set(to, (counts.get(to) ?? 0) + 1)
     }
     rooms.forEach((r, i) => expect(Math.abs((counts.get(r) ?? 0) / N - expected[i]!), r).toBeLessThan(0.02))
   })
   it("with nothing visited, every room is equally likely", () => {
-    const c = mk({ caregiverEpsilon: 0 }, 3)
+    const c = mk({ caregiverEpsilon: 0, caregiverPeriod: 50 }, 3)
     const counts: Record<string, number> = {}
-    for (let i = 0; i < 3000; i++) { const t = c.decide("x", ["a", "b", "c"], true)!; counts[t] = (counts[t] ?? 0) + 1 }
+    for (let i = 0; i < 3000; i++) { const t = nextDecision(c, "x", ["a", "b", "c"])!; counts[t] = (counts[t] ?? 0) + 1 }
     for (const r of ["a", "b", "c"]) expect(Math.abs(counts[r]! / 3000 - 1 / 3)).toBeLessThan(0.04)
   })
 })
 
 describe("no move", () => {
   it("a pick of the current room returns null and is not counted", () => {
-    const c = mk({ caregiverEpsilon: 0 })
-    for (let i = 0; i < 100; i++) expect(c.decide("only", ["only"], true)).toBeNull()
+    const c = mk({ caregiverEpsilon: 0, caregiverPeriod: 50 })
+    for (let i = 0; i < 100; i++) expect(c.decide("only", ["only"])).toBeNull()
+    expect(c.state().sinceDecision).toBe(0) // it did decide (at 50 and 100)
     expect(c.state().carries).toBe(0)
     expect(c.takeSummary()).toEqual({ carries: 0, to: {}, safetyNet: false })
   })
@@ -118,25 +139,25 @@ describe("safety net", () => {
     c.observe("a", 1)
     c.observe("b", 1)
     const rooms = ["a", "b", "c", "d", "e"]
-    // never decides on a sleep or the period while safety net is on and not stuck long enough
-    for (let i = 1; i < 100; i++) expect(c.decide("a", rooms, i % 10 === 0)).toBeNull()
+    // never decides on the period while safety net is on and not stuck long enough
+    for (let i = 1; i < 100; i++) expect(c.decide("a", rooms)).toBeNull()
     expect(c.state().stuckFor).toBe(99)
     // step 100: stuck long enough -> it decides; from "z" (not in rooms) every pick is a real move
-    expect(c.decide("z", rooms, false)).not.toBeNull()
+    expect(c.decide("z", rooms)).not.toBeNull()
     expect(c.state().stuckFor).toBe(0)
     expect(c.state().carries).toBe(1)
     // and then waits another full stuckSteps
-    for (let i = 1; i < 100; i++) expect(c.decide("a", rooms, true)).toBeNull()
+    for (let i = 1; i < 100; i++) expect(c.decide("a", rooms)).toBeNull()
     expect(c.state().stuckFor).toBe(99)
   })
   it("a room that is learning clears the stuck count", () => {
     const c = mk({ caregiverStuckSteps: 100 })
     c.onCheckup(["M6"]); c.onCheckup(["M6"])
     c.observe("a", 1)
-    for (let i = 0; i < 50; i++) c.decide("a", ["a", "b"], false)
+    for (let i = 0; i < 50; i++) c.decide("a", ["a", "b"])
     expect(c.state().stuckFor).toBe(50)
     for (let i = 0; i < 30; i++) c.observe("a", 0.2) // falling loss: LP high
-    c.decide("a", ["a", "b"], false)
+    c.decide("a", ["a", "b"])
     expect(c.state().stuckFor).toBe(0)
   })
 })
@@ -145,12 +166,12 @@ describe("state", () => {
   it("survives structuredClone: a restored caregiver makes the same next 1,000 decisions", () => {
     const rooms = ["a", "b", "c"]
     const c = mk({ caregiverPeriod: 5 }, 99)
-    for (let i = 0; i < 30; i++) { c.observe(rooms[i % 3]!, 1 / (1 + i)); c.decide("a", rooms, false) }
+    for (let i = 0; i < 30; i++) { c.observe(rooms[i % 3]!, 1 / (1 + i)); c.decide("a", rooms) }
     c.onCheckup(["M6"])
     const copy = createCaregiver({ state: structuredClone(c.state()) })
     const run = (g: typeof c) => {
       const out: (string | null)[] = []
-      for (let i = 0; i < 1000; i++) { g.observe(rooms[i % 3]!, 1 / (1 + (i % 17))); out.push(g.decide(rooms[i % 2]!, rooms, i % 40 === 0)) }
+      for (let i = 0; i < 1000; i++) { g.observe(rooms[i % 3]!, 1 / (1 + (i % 17))); out.push(g.decide(rooms[i % 2]!, rooms)) }
       return out
     }
     expect(run(copy)).toEqual(run(c))
@@ -172,7 +193,8 @@ describe("robustness", () => {
     const c = createCaregiver({ settings: { ...CAREGIVER_DEFAULTS, caregiverTau: 0, caregiverPeriod: NaN, caregiverEpsilon: 9 }, seed: 1 })
     expect(c.state().settings).toMatchObject({ caregiverTau: 0.001, caregiverPeriod: 500, caregiverEpsilon: 1 })
     c.observe("a", 1); for (let i = 0; i < 20; i++) c.observe("a", 0.1)
-    expect(["a", "b"]).toContain(c.decide("z", ["a", "b"], true))
+    for (let i = 1; i < 500; i++) c.decide("z", ["a", "b"])
+    expect(["a", "b"]).toContain(c.decide("z", ["a", "b"]))
     const st = c.state(); st.settings.caregiverTau = 0
     expect(createCaregiver({ state: st }).state().settings.caregiverTau).toBe(0.001)
   })
@@ -182,17 +204,32 @@ describe("robustness", () => {
     expect(() => createCaregiver({ state: { ...st, rooms: { a: { fast: 1, slow: Infinity } } } })).toThrow(RangeError)
     for (const rng of [-1, 1.5, 2 ** 32, NaN]) expect(() => createCaregiver({ state: { ...st, rng } })).toThrow(RangeError)
   })
+  it("checkCaregiverState: RangeError (never TypeError) for malformed rooms entries, and the log parser's rules for carries and to", () => {
+    const st = mk().state()
+    const good = { ...st, carries: 3, to: { crib: 2, toys: 1 } }
+    expect(() => checkCaregiverState(good)).not.toThrow()
+    const many = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`r${"abcdefghijklmnopq"[i]}`, 1]))
+    for (const bad of [
+      null, [], { ...good, extra: 1 }, { ...good, version: 2 }, { ...good, settings: { ...st.settings, caregiverTau: "x" } }, { ...good, settings: { ...st.settings, x: 1 } },
+      { ...good, rooms: { a: null } }, { ...good, rooms: { a: 3 } }, { ...good, rooms: { a: { fast: 1 } } }, { ...good, rooms: { a: { fast: 1, slow: 1, x: 1 } } }, { ...good, rooms: null },
+      { ...good, sinceDecision: -1 }, { ...good, stuckFor: 0.5 }, { ...good, m6Streak: NaN }, { ...good, carries: 1.5 }, { ...good, safetyNet: 1 },
+      { ...good, to: { crib: -1 } }, { ...good, to: { Crib: 3 } }, { ...good, to: { crib: 2 } }, { ...good, to: null }, { ...good, to: many, carries: 17 },
+    ]) {
+      expect(() => checkCaregiverState(bad), JSON.stringify(bad)).toThrow(RangeError)
+      expect(() => createCaregiver({ state: bad as CaregiverState }), JSON.stringify(bad)).toThrow(RangeError)
+    }
+  })
 })
 
 describe("takeSummary", () => {
   it("counts carries per room since the last take, then resets", () => {
-    const c = mk({ caregiverEpsilon: 1 })
+    const c = mk({ caregiverEpsilon: 1, caregiverPeriod: 50 })
     let n = 0
     const to: Record<string, number> = {}
-    while (n < 20) { const t = c.decide("x", ["a", "b"], true); if (t) { n++; to[t] = (to[t] ?? 0) + 1 } }
+    while (n < 20) { const t = nextDecision(c, "x", ["a", "b"]); if (t) { n++; to[t] = (to[t] ?? 0) + 1 } }
     expect(c.takeSummary()).toEqual({ carries: 20, to, safetyNet: false })
     expect(c.takeSummary()).toEqual({ carries: 0, to: {}, safetyNet: false })
-    c.decide("x", ["a"], true)
+    nextDecision(c, "x", ["a"])
     expect(c.takeSummary()).toEqual({ carries: 1, to: { a: 1 }, safetyNet: false })
   })
 })

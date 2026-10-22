@@ -109,7 +109,7 @@ describe("checkpoints", () => {
     const result = { level: 64, steps: 4000, passed: ["M1"], measures: { M1: 0.5, M2: null, M3: 1, M4: 0, M5: 1, M6: 0 }, evalCU: 0.1 }
     const caregiver = createCaregiver({ settings: CAREGIVER_DEFAULTS, seed: 3 })
     caregiver.observe("crib", 0.5)
-    caregiver.decide("crib", ["crib", "toys"], true)
+    for (let i = 0; i < CAREGIVER_DEFAULTS.caregiverPeriod; i++) caregiver.decide("crib", ["crib", "toys"])
     const good = { ...base, checkups: { lastLevel: 64, tail: [result] }, caregiver: caregiver.state() }
     await saveCheckpoint(idb, good)
     expect(await loadCheckpoint(idb, A)).toMatchObject({ checkups: good.checkups, caregiver: good.caregiver })
@@ -122,7 +122,8 @@ describe("checkpoints", () => {
       { checkups: { lastLevel: 64, tail: [{ ...result, steps: 6000 }] } }, { checkups: { lastLevel: 64, tail: {} } }, { checkups: { lastLevel: 64, tail: [], extra: 1 } },
       { caregiver: null }, { caregiver: { ...cg, version: 2 } }, { caregiver: { ...cg, rng: -1 } }, { caregiver: { ...cg, rooms: { crib: { fast: Number.NaN, slow: 1 } } } },
       { caregiver: { ...cg, settings: { ...cg.settings, caregiverTau: "x" } } }, { caregiver: { ...cg, carries: 1.5 } }, { caregiver: { ...cg, safetyNet: 1 } },
-      { caregiver: { ...cg, to: { crib: -1 } } }, { caregiver: { ...cg, extra: 1 } },
+      { caregiver: { ...cg, to: { crib: -1 } } }, { caregiver: { ...cg, extra: 1 } }, { caregiver: { ...cg, rooms: { crib: null } } },
+      { caregiver: { ...cg, to: { Crib: cg.carries } } }, { caregiver: { ...cg, to: {}, carries: cg.carries + 1 } },
     ]) {
       await saveCheckpoint(idb, { ...base, ...bad } as unknown as Checkpoint)
       await expect(loadCheckpoint(idb, A), JSON.stringify(bad)).rejects.toThrow(RangeError)

@@ -343,8 +343,8 @@ export function parseLogFile(json: unknown): ParseResult {
   }
 }
 
-/** Relative float tolerance for the checkups' evalCU sum against the file's evalCU. */
-const EVAL_CU_TOLERANCE = 1e-9
+/** Relative float tolerance for the checkups' evalCU sum against the file's evalCU (and, in the gate, its increase). */
+export const EVAL_CU_TOLERANCE = 1e-9
 
 /**
  * The checkups array, or the error string. Strict like the curve: unknown keys, bad values and bad order all fail.
@@ -393,7 +393,8 @@ export function parseCheckups(v: unknown, suiteVersion: number | undefined, cu: 
   return out
 }
 
-function parseCaregiver(v: unknown): CaregiverSummary | string {
+/** A caregiver summary (as in a log file, and as a caregiver state's carries/to/safetyNet), or what is wrong with it. */
+export function parseCaregiver(v: unknown): CaregiverSummary | string {
   if (!isObj(v)) return "caregiver must be an object"
   const uk = unknownKey(v, CAREGIVER_KEYS, "caregiver")
   if (uk) return uk

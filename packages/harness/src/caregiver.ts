@@ -2,10 +2,10 @@
 // periodically carries it to the room where it is learning fastest, via the world's bringToFront. Pure and deterministic
 // given its seed; browser-safe. The carry is the harness's choice, the learner never sees it (AGENTS.md invariants 2, 4).
 import { createRng } from "@blanktab/tensor"
-import type { CaregiverSummary } from "./log"
+import { parseCaregiver, type CaregiverSummary } from "./log"
 
 export interface CaregiverSettings {
-  /** Steps between decisions (a sleep also triggers one). */
+  /** Steps between decisions (decision 0016: not also after each sleep, which would make any period ≥ the sleep interval inert). */
   caregiverPeriod: number
   /** Softmax temperature over learning progress. */
   caregiverTau: number
@@ -67,8 +67,8 @@ export interface CaregiverState {
 export interface Caregiver {
   /** The loss of the transition just learned from, seen in `room`. NaN and ±Infinity are ignored. */
   observe(room: string, loss: number): void
-  /** Once per learner step, after observe: a room to carry the learner to, or null. */
-  decide(current: string, rooms: readonly string[], afterSleep: boolean): string | null
+  /** Once per learner step, after observe: a room to carry the learner to, or null. Decides every caregiverPeriod steps (safety net: after caregiverStuckSteps stuck steps). */
+  decide(current: string, rooms: readonly string[]): string | null
   /** After each completed checkup. */
   onCheckup(passed: readonly string[]): void
   /** Carries since the last take (then reset). */
@@ -76,15 +76,36 @@ export interface Caregiver {
   state(): CaregiverState
 }
 
-/** A restored state must not smuggle a non-finite learning progress or a bad RNG state into pick(). */
-function validateState(s: CaregiverState): void {
-  if (!(Number.isInteger(s.rng) && s.rng >= 0 && s.rng < 2 ** 32)) throw new RangeError(`caregiver state: rng must be a uint32, got ${s.rng}`)
-  for (const [room, r] of Object.entries(s.rooms))
-    if (!Number.isFinite(r.fast) || !Number.isFinite(r.slow)) throw new RangeError(`caregiver state: non-finite loss average for room ${room}`)
+const STATE_KEYS = ["version", "settings", "rng", "rooms", "sinceDecision", "stuckFor", "m6Streak", "safetyNet", "carries", "to"]
+const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every(k => keys.includes(k))
+const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
+const isNonNegInt = (v: unknown) => Number.isInteger(v) && (v as number) >= 0
+
+/**
+ * Throws RangeError unless `v` is a caregiver state (from a checkpoint, so untrusted): a restored state must not smuggle
+ * a non-finite learning progress or a bad RNG state into pick(), nor carries a log file would refuse (log.ts parseCaregiver).
+ */
+export function checkCaregiverState(v: unknown): asserts v is CaregiverState {
+  const fail = (what: string): never => { throw new RangeError(`caregiver state: ${what}`) }
+  if (!isRec(v) || !onlyKeys(v, STATE_KEYS)) fail("not a caregiver state")
+  const r = v as Record<string, unknown>
+  if (r.version !== 1) fail("version must be 1")
+  const st = r.settings
+  const settingKeys = Object.keys(CAREGIVER_DEFAULTS)
+  if (!isRec(st) || !onlyKeys(st, settingKeys) || !settingKeys.every(k => isFiniteNum(st[k]))) fail("settings must hold the five caregiver settings as finite numbers")
+  if (!(Number.isInteger(r.rng) && (r.rng as number) >= 0 && (r.rng as number) < 2 ** 32)) fail(`rng must be a uint32, got ${String(r.rng)}`)
+  if (!isRec(r.rooms)) fail("rooms must be an object")
+  for (const [room, e] of Object.entries(r.rooms as Record<string, unknown>)) {
+    if (!isRec(e) || !onlyKeys(e, ["fast", "slow"]) || !isFiniteNum(e.fast) || !isFiniteNum(e.slow)) fail(`rooms.${room.slice(0, 80)} must be { fast, slow }, finite numbers`)
+  }
+  for (const k of ["sinceDecision", "stuckFor", "m6Streak"]) if (!isNonNegInt(r[k])) fail(`${k} must be a non-negative integer`)
+  const summary = parseCaregiver({ carries: r.carries, to: r.to, safetyNet: r.safetyNet })
+  if (typeof summary === "string") fail(summary)
 }
 
 export function createCaregiver(init: { settings: CaregiverSettings; seed: number } | { state: CaregiverState }): Caregiver {
-  if ("state" in init) validateState(init.state)
+  if ("state" in init) checkCaregiverState(init.state)
   const rng = createRng("state" in init ? init.state.rng : init.seed)
   const st: CaregiverState = "state" in init
     ? structuredClone(init.state)
@@ -122,7 +143,7 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
         r.slow += LP_SLOW_ALPHA * (loss - r.slow)
       }
     },
-    decide(current, rooms, afterSleep) {
+    decide(current, rooms) {
       st.sinceDecision++
       let go: boolean
       if (st.safetyNet) {
@@ -132,7 +153,7 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
         go = st.stuckFor >= st.settings.caregiverStuckSteps
         if (go) st.stuckFor = 0
       } else {
-        go = afterSleep || st.sinceDecision >= st.settings.caregiverPeriod
+        go = st.sinceDecision >= st.settings.caregiverPeriod
       }
       if (!go || rooms.length === 0) return null
       st.sinceDecision = 0
