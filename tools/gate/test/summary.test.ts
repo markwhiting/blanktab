@@ -97,4 +97,17 @@ describe("buildSummary", () => {
     expect(rows[C]!.heldOutRatio).toBeNull()
     expect(rows[D]!.heldOutRatio).toBeNull()
   })
+  it("checkupScore is the latest checkup's level and passed.length; null without checkups", () => {
+    const v2 = (id: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => ({
+      ...log(id, seq), schemaVersion: 2, cu: 1000 * (seq + 1), condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 },
+      curve: [], skippedUpdates: 0, restores: 0, lostCU: 0, ...over,
+    })
+    const ck = (level: number, passed: string[]) => ({ level, steps: 1, passed, measures: { M1: 1, M2: 1, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0 })
+    put(v2(A, 0, { milestoneSuiteVersion: 1, checkups: [ck(64, ["M1"]), ck(128, ["M1", "M2"])] }))
+    put(v2(A, 1)) // newest file has none: the latest checkup on record stands
+    put(v2(B, 0)); put(log(B, 1))
+    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    expect(rows[A]!.checkupScore).toEqual({ level: 128, score: 2 })
+    expect(rows[B]!.checkupScore).toBeNull()
+  })
 })

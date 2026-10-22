@@ -61,7 +61,7 @@ describe("loadKnowledge", () => {
     ]
     const k = await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 1, sessions: [bad[0], good, ...bad.slice(1), oddTime] } }).fn)
     expect(k.offline).toBe(false)
-    expect(k.summary.sessions).toEqual([{ ...good, cu: null, lossRatio: null, heldOutRatio: null }, { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: null, lossRatio: null, heldOutRatio: null }])
+    expect(k.summary.sessions).toEqual([{ ...good, cu: null, lossRatio: null, heldOutRatio: null, checkupScore: null }, { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: null, lossRatio: null, heldOutRatio: null, checkupScore: null }])
   })
   it("reads a row's cu and lossRatio as numbers >= 0 or null (never drops the row for them)", async () => {
     const rows = [

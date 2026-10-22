@@ -319,3 +319,18 @@ describe("validateSessionPr v2: the held-out check's optional fields (decision 0
     expect(errs([file(logV2(1))], [logV2(0)]).ok).toBe(true)
   })
 })
+const msg = (r: { errors: string[] }) => r.errors.join("\n")
+describe("validateSessionPr v2: checkups (decision 0016)", () => {
+  const ck = (level: number) => ({ level, steps: 10, passed: ["M1"], measures: { M1: 1, M2: null, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0.01 })
+  const withCk = (seq: number, levels: number[], over: Partial<LogFileV2> = {}) =>
+    logV2(seq, { cu: 1000 * (seq + 1), stepsTotal: 400_000 * (seq + 1), curve: [], milestoneSuiteVersion: 1, checkups: levels.map(ck), ...over })
+  it("accepts increasing levels across the files on main and the PR", () => {
+    expect(errs([file(withCk(1, [128, 256]))], [withCk(0, [32, 64])]).ok).toBe(true)
+    expect(errs([file(withCk(1, []))], [withCk(0, [64])]).ok).toBe(true)
+  })
+  it("checkup levels strictly increase across the files on main and the PR", () => {
+    expect(msg(errs([file(withCk(1, [64]))], [withCk(0, [64])]))).toContain("checkup level 64 is not above 64")
+    expect(msg(errs([file(withCk(0, [64])), file(withCk(1, [64]))]))).toContain("checkup level 64 is not above 64")
+    expect(msg(errs([file(withCk(1, [32]))], [withCk(0, [64])]))).toContain("checkup level 32 is not above 64")
+  })
+})

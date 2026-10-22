@@ -66,6 +66,9 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   for (const p of prevSorted) if (p.schemaVersion === 2) for (const k of MONOTONIC) lastV2[k] = Math.max(lastV2[k], p[k])
   let lastEvalCU = -Infinity
   for (const p of prevSorted) if (p.schemaVersion === 2 && p.evalCU !== undefined) lastEvalCU = Math.max(lastEvalCU, p.evalCU)
+  // Checkup levels strictly increase across files (each file's own are checked by the parser): a level is checked once.
+  let lastLevel = -Infinity
+  for (const p of prevSorted) if (p.schemaVersion === 2) for (const c of p.checkups ?? []) lastLevel = Math.max(lastLevel, c.level)
   const reported = new Set<number>()
   for (const { path, log } of sorted) {
     if (reported.has(log.seq)) continue // duplicate already reported
@@ -87,6 +90,10 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
         lastEvalCU = Math.max(lastEvalCU, log.evalCU)
       } else if (lastEvalCU > -Infinity) {
         errors.push(`${path}: evalCU missing after a file that has it`)
+      }
+      for (const c of log.checkups ?? []) {
+        if (c.level <= lastLevel) errors.push(`${path}: checkup level ${c.level} is not above ${lastLevel}`)
+        lastLevel = Math.max(lastLevel, c.level)
       }
     }
   }

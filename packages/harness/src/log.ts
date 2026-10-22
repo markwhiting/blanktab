@@ -57,7 +57,70 @@ export interface LogFileV2 extends Omit<LogFileV1, "schemaVersion"> {
    * before it existed have none); finite, >= 0, and never decreasing across seq when present.
    */
   evalCU?: number
+  /** Milestone checkups run since the previous file (strictly increasing levels, each on the log schedule and <= cu). */
+  checkups?: CheckupResult[]
+  /** Which suite the checkups used (MILESTONE_IDS key). Required when `checkups` is present. */
+  milestoneSuiteVersion?: number
+  /** The caregiver's activity since the previous file. */
+  caregiver?: CaregiverSummary
 }
+
+/** The log schedule: the first threshold (2^3 CU: a young life writes no log files in a burst). */
+export const FIRST_LOG_CU = 8
+/** Doubling stops here (2^9 CU); from then on a log is written at every multiple of LOG_STEP_CU, forever. */
+export const LAST_DOUBLING_CU = 512
+/** About 8 logs an hour at the speed cap. */
+export const LOG_STEP_CU = 1024
+
+/** The log schedule, forever: 8, 16, ..., 512, then 1024, 2048, 3072, ... (every LOG_STEP_CU). */
+export function* logThresholds(): Iterable<number> {
+  let t = FIRST_LOG_CU
+  for (; t <= LAST_DOUBLING_CU; t *= 2) yield t
+  for (; ; t += LOG_STEP_CU) yield t
+}
+
+/** The first threshold of logThresholds() above `cu` (the next log crossing). */
+export function nextCrossing(cu: number): number {
+  if (cu >= LAST_DOUBLING_CU) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
+  let t = FIRST_LOG_CU
+  while (t <= cu) t *= 2
+  return t
+}
+
+/** Whether `n` is one of logThresholds(). */
+export function isLogLevel(n: number): boolean {
+  if (!Number.isInteger(n) || n < FIRST_LOG_CU) return false
+  if (n <= LAST_DOUBLING_CU) return (n & (n - 1)) === 0 // a power of two from 8 to 512
+  return n % LOG_STEP_CU === 0
+}
+
+/** The highest log level <= cu, or null below FIRST_LOG_CU. */
+export function levelAtOrBelow(cu: number): number | null {
+  if (!(cu >= FIRST_LOG_CU)) return null
+  if (cu >= LAST_DOUBLING_CU) return Math.floor(cu / LOG_STEP_CU) * LOG_STEP_CU || LAST_DOUBLING_CU
+  let t = FIRST_LOG_CU
+  while (t * 2 <= cu) t *= 2
+  return t
+}
+
+/** The milestone suite (decision 0016): version -> milestone ids in suite order. */
+export const MILESTONE_SUITE_VERSION = 1
+export const MILESTONE_IDS: Readonly<Record<number, readonly string[]>> = { 1: ["M1", "M2", "M3", "M4", "M5", "M6"] }
+/** At most this many checkups per log file. */
+export const MAX_CHECKUPS_PER_FILE = 8
+
+/** A milestone checkup run at a log-schedule level (decision 0016). */
+export interface CheckupResult {
+  level: number // the log-schedule CU threshold it is for
+  steps: number // the learner's steps when it ran
+  passed: string[] // ids passed, in suite order; score = passed.length
+  measures: Record<string, number | null> // each milestone's measured value; null if not finite
+  evalCU: number // what it cost (inside the file's evalCU)
+  error?: true // a milestone threw; it counts as not passed
+}
+
+/** What the caregiver did since the previous file: `carries` in all, `to` by destination, whether the safety net fired. */
+export interface CaregiverSummary { carries: number; to: Record<string, number>; safetyNet: boolean }
 
 /** Bound on LogFileV2.restores. */
 export const MAX_RESTORES = 1000
@@ -85,6 +148,8 @@ export interface SessionRow {
    * null without one. Absent in older summaries.
    */
   heldOutRatio?: number | null
+  /** The latest checkup: its level and how many milestones it passed, or null without one. Absent in older summaries. */
+  checkupScore?: { level: number; score: number } | null
 }
 
 /** knowledge/summary.json, what the next tab reads. */
@@ -110,7 +175,7 @@ export function parseSessionRow(v: unknown): SessionRow | null {
   if (!isObj(v) || typeof v.learnerId !== "string" || !LEARNER_ID_RE.test(v.learnerId)) return null
   if (!isObj(v.settings) || !isObj(v.hostSig) || !isNum(v.hostSig.cores) || typeof v.hostSig.webgpu !== "boolean") return null
   if (!isNum(v.stepsTotal) || !isNum(v.sessionsSeenAtBirth) || typeof v.final !== "boolean") return null
-  const { lastWrittenAt, cu, lossRatio, heldOutRatio, ...rest } = v
+  const { lastWrittenAt, cu, lossRatio, heldOutRatio, checkupScore, ...rest } = v
   return {
     ...(rest as unknown as SessionRow),
     ...(isIso(lastWrittenAt) ? { lastWrittenAt } : {}),
@@ -118,6 +183,8 @@ export function parseSessionRow(v: unknown): SessionRow | null {
     cu: isNum(cu) && cu >= 0 ? cu : null,
     lossRatio: isNum(lossRatio) && lossRatio >= 0 ? lossRatio : null,
     heldOutRatio: isNum(heldOutRatio) && heldOutRatio >= 0 ? heldOutRatio : null,
+    checkupScore: isObj(checkupScore) && isNonNegInt(checkupScore.level) && isNonNegInt(checkupScore.score)
+      ? { level: checkupScore.level, score: checkupScore.score } : null,
   }
 }
 
@@ -127,11 +194,15 @@ const MAX_SETTING_KEYS = 50
 const MAX_WIDTH = 65_536
 export const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const LOG_KEYS_V1 = ["schemaVersion", "learnerId", "seq", "codeSha", "knowledgeSha", "writtenAt", "stepsTotal", "settings", "hostSig", "sessionsSeenAtBirth", "final"]
-const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates", "restores", "lostCU", "evalCU"]
+const LOG_KEYS_V2 = [...LOG_KEYS_V1, "cu", "condition", "widths", "curve", "skippedUpdates", "restores", "lostCU", "evalCU", "checkups", "milestoneSuiteVersion", "caregiver"]
 const HOST_KEYS = ["cores", "deviceMemoryGb", "webgpu", "tabsOnMachine"]
 const WIDTH_KEYS = ["conv1", "conv2", "enc", "hidden"] as const
 const CURVE_KEYS = ["cu", "steps", "predLoss", "baselineLoss", "heldOut"]
 const HELD_OUT_KEYS = ["loss", "baseline"]
+const CHECKUP_KEYS = ["level", "steps", "passed", "measures", "evalCU", "error"]
+const CAREGIVER_KEYS = ["carries", "to", "safetyNet"]
+const CARE_DEST_RE = /^[a-z]{1,16}$/
+const MAX_CARE_DESTS = 16
 const unknownKey = (o: Record<string, unknown>, allowed: readonly string[], where: string): string | null => {
   const k = Object.keys(o).find(key => !allowed.includes(key))
   return k === undefined ? null : `unknown key ${JSON.stringify(k.slice(0, 80))} in ${where}`
@@ -226,6 +297,24 @@ export function parseLogFile(json: unknown): ParseResult {
   if (!(isNonNegInt(json.restores) && json.restores <= MAX_RESTORES)) return fail(`restores must be an integer in [0, ${MAX_RESTORES}]`)
   if (!isNonNeg(json.lostCU)) return fail("lostCU must be a finite number >= 0")
   if ("evalCU" in json && !isNonNeg(json.evalCU)) return fail("evalCU must be a finite number >= 0")
+  let checkups: CheckupResult[] | undefined
+  let suiteVersion: number | undefined
+  if ("milestoneSuiteVersion" in json) {
+    const sv = json.milestoneSuiteVersion
+    if (!(isNonNegInt(sv) && Object.hasOwn(MILESTONE_IDS, sv))) return fail("milestoneSuiteVersion is not a known suite")
+    suiteVersion = sv
+  }
+  if ("checkups" in json) {
+    const r = parseCheckups(json.checkups, suiteVersion, cu, json.stepsTotal)
+    if (typeof r === "string") return fail(r)
+    checkups = r
+  }
+  let caregiver: CaregiverSummary | undefined
+  if ("caregiver" in json) {
+    const r = parseCaregiver(json.caregiver)
+    if (typeof r === "string") return fail(r)
+    caregiver = r
+  }
   return {
     ok: true,
     value: {
@@ -239,6 +328,72 @@ export function parseLogFile(json: unknown): ParseResult {
       restores: json.restores,
       lostCU: json.lostCU,
       ...("evalCU" in json ? { evalCU: json.evalCU as number } : {}),
+      ...(checkups ? { checkups } : {}),
+      ...(suiteVersion !== undefined ? { milestoneSuiteVersion: suiteVersion } : {}),
+      ...(caregiver ? { caregiver } : {}),
     },
   }
+}
+
+/** The checkups array, or the error string. Strict like the curve: unknown keys, bad values and bad order all fail. */
+function parseCheckups(v: unknown, suiteVersion: number | undefined, cu: number, stepsTotal: number): CheckupResult[] | string {
+  if (!Array.isArray(v)) return "checkups must be an array"
+  if (v.length > MAX_CHECKUPS_PER_FILE) return `checkups may have at most ${MAX_CHECKUPS_PER_FILE} entries (has ${v.length})`
+  if (suiteVersion === undefined) return "checkups need a milestoneSuiteVersion"
+  const ids = MILESTONE_IDS[suiteVersion]!
+  const out: CheckupResult[] = []
+  for (const [i, c] of (v as unknown[]).entries()) {
+    const at = `checkups[${i}]`
+    if (!isObj(c)) return `${at} must be an object`
+    const uk = unknownKey(c, CHECKUP_KEYS, at)
+    if (uk) return uk
+    if (!isNonNegInt(c.level) || !isLogLevel(c.level)) return `${at}.level must be a log-schedule level`
+    if (c.level > cu) return `${at}.level is ahead of the file's cu`
+    const prev = out[i - 1]
+    if (prev && c.level <= prev.level) return `${at}.level must be above the previous checkup's`
+    if (!isNonNegInt(c.steps) || c.steps > stepsTotal) return `${at}.steps must be a non-negative integer no more than stepsTotal`
+    if (!Array.isArray(c.passed)) return `${at}.passed must be an array`
+    let last = -1
+    for (const id of c.passed as unknown[]) {
+      const idx = typeof id === "string" ? ids.indexOf(id) : -1
+      if (idx < 0) return `${at}.passed has an id outside the suite`
+      if (idx <= last) return `${at}.passed must be in suite order without duplicates`
+      last = idx
+    }
+    const meas = c.measures
+    if (!isObj(meas)) return `${at}.measures must be an object`
+    const mk = unknownKey(meas, ids, `${at}.measures`)
+    if (mk) return mk
+    for (const id of ids) {
+      const m = meas[id]
+      if (!(m === null || isNum(m))) return `${at}.measures.${id} must be a finite number or null`
+    }
+    if (!isNonNeg(c.evalCU)) return `${at}.evalCU must be a finite number >= 0`
+    if ("error" in c && c.error !== true) return `${at}.error must be true when present`
+    out.push({
+      level: c.level, steps: c.steps, passed: [...(c.passed as string[])],
+      measures: Object.fromEntries(ids.map(id => [id, meas[id] as number | null])),
+      evalCU: c.evalCU, ...(c.error === true ? { error: true as const } : {}),
+    })
+  }
+  return out
+}
+
+function parseCaregiver(v: unknown): CaregiverSummary | string {
+  if (!isObj(v)) return "caregiver must be an object"
+  const uk = unknownKey(v, CAREGIVER_KEYS, "caregiver")
+  if (uk) return uk
+  if (!isNonNegInt(v.carries)) return "caregiver.carries must be a non-negative integer"
+  if (typeof v.safetyNet !== "boolean") return "caregiver.safetyNet must be a boolean"
+  if (!isObj(v.to)) return "caregiver.to must be an object"
+  const entries = Object.entries(v.to)
+  if (entries.length > MAX_CARE_DESTS) return `caregiver.to may have at most ${MAX_CARE_DESTS} keys`
+  let sum = 0
+  for (const [k, n] of entries) {
+    if (!CARE_DEST_RE.test(k)) return `caregiver.to key ${JSON.stringify(k.slice(0, 80))} is not allowed (must match ${CARE_DEST_RE})`
+    if (!isNonNegInt(n)) return `caregiver.to.${k} must be a non-negative integer`
+    sum += n
+  }
+  if (sum !== v.carries) return "caregiver.to values must sum to carries"
+  return { carries: v.carries, to: { ...(v.to as Record<string, number>) }, safetyNet: v.safetyNet }
 }

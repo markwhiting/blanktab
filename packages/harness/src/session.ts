@@ -4,8 +4,10 @@ import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CURVE_POINTS, MAX_RESTORES, isCurveLoss, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MAX_RESTORES, isCurveLoss, nextCrossing, type CurvePoint, type LogFileV2 } from "./log"
 import { openQueue } from "./queue"
+// The log schedule lives in log.ts (browser-safe, shared with the gate); re-exported for existing callers.
+export { FIRST_LOG_CU, LAST_DOUBLING_CU, LOG_STEP_CU, logThresholds, nextCrossing } from "./log"
 
 export const DEFAULT_SLEEP_INTERVAL = 250
 export const DEFAULT_MAX_STEPS_PER_SEC = 30
@@ -15,13 +17,6 @@ export const RESTORE_AFTER_SKIPS = 20
 export const MAX_RESTORES_PER_CHECKPOINT = 3
 /** Five minutes: a GPU checkpoint is tens of MB, too much to write at every sleep. */
 export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
-/** The first log crossing, 2^3 CU: a young life writes no log files (and their checkpoints) in a burst. */
-export const FIRST_LOG_CU = 8
-/** Doubling stops here; from then on a log is written at every multiple of this many CU, forever (about 8 an hour at the speed cap). */
-export const LOG_STEP_CU = 1024
-/** The last doubling threshold: 2^9 CU. */
-export const LAST_DOUBLING_CU = 512
-
 export interface SessionConfig {
   learnerId: string
   codeSha: string
@@ -172,21 +167,6 @@ export function createPacer(maxStepsPerSec: number, clock: Clock = realClock): (
     await clock.sleep(Math.max(0, last + interval - clock.now()))
     last = clock.now()
   }
-}
-
-/** The log schedule, forever: 8, 16, ..., 512, then 1024, 2048, 3072, ... (every LOG_STEP_CU). */
-export function* logThresholds(): Iterable<number> {
-  let t = FIRST_LOG_CU
-  for (; t <= LAST_DOUBLING_CU; t *= 2) yield t
-  for (; ; t += LOG_STEP_CU) yield t
-}
-
-/** The first threshold of logThresholds() above `cu` (the next log crossing). */
-export function nextCrossing(cu: number): number {
-  if (cu >= LAST_DOUBLING_CU) return (Math.floor(cu / LOG_STEP_CU) + 1) * LOG_STEP_CU
-  let t = FIRST_LOG_CU
-  while (t <= cu) t *= 2
-  return t
 }
 
 /** An error thrown by the caller's own callback (onTick, onEvent): the caller stopping the life, not the life failing. */
