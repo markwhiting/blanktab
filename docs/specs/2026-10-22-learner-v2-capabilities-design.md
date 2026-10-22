@@ -285,7 +285,7 @@ That is 108 lives in all. A "v1" arm in the new code keeps the implementation fi
 | addition | FLOPs per step | readbacks |
 |---|---|---|
 | EMA target encoder forward on o_t | ≈ 8 M | 0 (scalars join the existing reads) |
-| EMA weight update of the target (~1.1 M params; could run every 2–4 steps) | ≈ 3 M | 0 |
+| EMA weight update of the target (~2.19 M params; could run every 2–4 steps) | ≈ 3 M | 0 |
 | key encoder: forward on o_t, plus its EMA update at τ_key (could run every 4 steps, at τ_key⁴) | ≈ 8 M + 3 M | 0 |
 | dropped-action predictor forward and backward | ≈ 4–5 M | 0 (L_drop is read with L_before) |
 | latent head, per-term value outputs | < 1 M | 0 |
