@@ -12,8 +12,11 @@ if (!repo || !Number.isInteger(n) || n <= 0) { console.error("REPO and PR_NUMBER
 if (isShallow()) { console.error("::error::the checkout of main is shallow (validate.yml needs fetch-depth 0)"); process.exit(2) }
 
 const loaded = loadPrViaGit(repo, n)
-// A newer push started its own run (which cancels this one); this one validated nothing, so it does not pass.
-if (loaded.moved) { console.error(`::error::PR #${n}'s head moved while this run read it; the run for the new head validates it`); process.exit(1) }
+// Neutral: a newer push started its own run (concurrency cancels this one), and this check is advisory; the gate
+// validates every head itself before merging, pinned to it. This run's commit is no longer the PR's head.
+if (loaded.moved) { console.log(`::warning::PR #${n}'s head moved while this run read it: not validated here; the run for the new head validates it`); process.exit(0) }
+// Fails: this is the PR's current head, and it could not be validated against the checkout (re-run the check).
+if (loaded.stale) { console.error(`::error::PR #${n} is based on a main newer than this run's checkout; re-run this check`); process.exit(1) }
 const ids = [...new Set(loaded.files.map(f => /^data\/runs\/(lrn_[0-9a-f]{16})\//.exec(f.path)?.[1]).filter((x): x is string => !!x))]
 const previous = ids.flatMap(id => { try { return readLearnerLogs(join("data/runs", id)) } catch { return [] } })
 const v = validateSessionPr(loaded.files, previous)

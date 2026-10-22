@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { boundAuthor, bytesToContent, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_FILES } from "../github.ts"
+import { boundAuthor, bytesToContent, GIT_TIMEOUT_MS, gitRunner, isShallow, statusErrors, listOpenPrs, loadPrViaGit, mergePr, MAX_OWNER_WALK, MAX_PR_COMMITS, MAX_PR_FILES } from "../github.ts"
 import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import { validateSessionPr } from "../validate.ts"
 
@@ -162,7 +162,7 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
     }
     return { fn, calls }
   }
-  const missing = (oid: string) => { try { fx.git(["cat-file", "-e", oid], { GIT_NO_LAZY_FETCH: "1" }); return false } catch { return true } }
+  const missing = (oid: string) => { try { fx.git(["--no-lazy-fetch", "cat-file", "-e", oid]); return false } catch { return true } }
 
   it("loadPrViaGit: added and modified files with exact bytes; one gh call", () => {
     fx.commitMain({ [`${D}/0.json`]: "{\"seq\":0}\n" })
@@ -211,8 +211,44 @@ describe("loadPrViaGit (a local origin over file://)", { timeout: 60_000 }, () =
     expect(r.loadErrors).toEqual([`${D}/0.json: file exceeds 1 MB`])
     // Exactly 1 MiB is within the limit (the validator's rule is "> 1 MB"), so it is fetched and read.
     expect(r.files.map(f => [f.path, f.content.length])).toEqual([[`${D}/1.json`, 1_048_576]])
-    const big = fx.git(["rev-parse", `${head}:${D}/0.json`]).toString().trim()
+    const big = fx.git(["--no-lazy-fetch", "rev-parse", `${head}:${D}/0.json`]).toString().trim()
     expect(missing(big)).toBe(true)
+    // The flag is what keeps it out: git without it fetches the blob on demand from the promisor remote.
+    expect(fx.git(["cat-file", "-s", big]).toString().trim()).toBe(String(2 * 1_048_576))
+    expect(missing(big)).toBe(false)
+  })
+
+  it("every git call runs with --no-lazy-fetch; the fetch recurses into no submodules; the diff ignores no submodule", () => {
+    const head = fx.pr(5, { [`${D}/0.json`]: "a" })
+    const calls: string[][] = []
+    const r = loadPrViaGit("o/r", 5, ghFor(5, head).fn, (a, env) => { calls.push(a); return fx.git(a, env) })
+    expect(r.loadErrors).toEqual([])
+    expect(calls.length).toBeGreaterThan(0)
+    for (const c of calls) expect(c[0]).toBe("--no-lazy-fetch")
+    expect(calls.find(c => c[1] === "fetch")).toContain("--no-recurse-submodules")
+    expect(calls.find(c => c[1] === "diff")).toContain("--ignore-submodules=none")
+  })
+
+  it("more than MAX_PR_COMMITS commits: rejected from the PR object; nothing is fetched", () => {
+    expect(MAX_PR_COMMITS).toBe(64)
+    const never = () => { throw new Error("must not run git") }
+    expect(loadPrViaGit("o/r", 8, ghFor(8, "a".repeat(40), { commits: MAX_PR_COMMITS + 1 }).fn, never).loadErrors).toEqual([`PR has ${MAX_PR_COMMITS + 1} commits (limit ${MAX_PR_COMMITS})`])
+    for (const commits of [undefined, -1, 1.5, "3"]) expect(loadPrViaGit("o/r", 8, ghFor(8, "a".repeat(40), { commits }).fn, never).loadErrors).toEqual(["PR commit count is unavailable"])
+  })
+
+  it("a PR based on a main newer than the checkout: stale, no files (main's newer commits are never taken for the PR's)", () => {
+    fx.commitMain({ "other/file.txt": "main moved on" }, [], false) // origin's main moves; the checkout does not
+    const head = fx.pr(10, { [`${D}/0.json`]: "a" })
+    const r = loadPrViaGit("o/r", 10, ghFor(10, head).fn, fx.git)
+    expect(r.stale).toBe(true)
+    expect(r.files).toEqual([])
+    expect(r.loadErrors).toEqual([])
+  })
+
+  it("a git call that runs past its timeout throws (the caller leaves that PR for the next run)", () => {
+    const head = fx.pr(11, { [`${D}/0.json`]: "a" })
+    expect(() => loadPrViaGit("o/r", 11, ghFor(11, head).fn, gitRunner({ cwd: fx.work, timeoutMs: 1 }))).toThrow(/ETIMEDOUT|timed out/i)
+    expect(GIT_TIMEOUT_MS).toBe(120_000)
   })
 
   it("invalid UTF-8 is a load error", () => {

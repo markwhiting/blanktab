@@ -134,8 +134,9 @@ export interface GateDeps {
 /**
  * One gate run over the open `run: ` PRs; resolves to the number merged. Aborts before deciding anything if the
  * checkout of main is shallow (who owns a learner needs main's full history). A PR that cannot be decided safely
- * (no head commit or author, a head that moved since it was read, an owner lookup or load that failed) is logged and
- * left open for the next run.
+ * (no head commit or author, a head that moved since it was read, a base newer than the checkout, an owner lookup or
+ * a load that failed or timed out) is logged and left open for the next run. The checkout (HEAD) is the one main the
+ * whole run uses: merge bases, earlier logs (its working tree) and owners (its history).
  */
 export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
   if (isShallow(deps.git)) throw new Error("the checkout of main is shallow: who owns a learner cannot be told (gate.yml needs fetch-depth 0)")
@@ -151,6 +152,7 @@ export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
       const loaded = loadPrViaGit(repo, listed.number, ghFn, deps.gitBuf)
       if (loaded.headSha === undefined) { deps.error(`PR #${listed.number}: GitHub gave no head commit; leaving it for the next run`); continue }
       if (loaded.moved) { deps.log(`PR #${listed.number}: its head moved since it was read; leaving it for the next run`); continue }
+      if (loaded.stale) { deps.log(`PR #${listed.number}: it is based on a main newer than this run's checkout; leaving it for the next run`); continue }
       if (loaded.author === undefined) { deps.error(`PR #${listed.number}: GitHub gave no author; leaving it for the next run`); continue }
       const ids = learnersIn(loaded.files)
       const previous = ids.flatMap(id => { try { return readLearnerLogs(join(runsDir, id)) } catch { return [] } })

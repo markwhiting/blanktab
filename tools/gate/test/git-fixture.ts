@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { gitRunner } from "../github.ts"
 
 /** A file's content, or a symlink to a target, or a submodule (gitlink) at a commit. */
 export type Entry = string | Buffer | { symlink: string } | { submodule: string }
@@ -18,8 +19,8 @@ export interface Fixture {
   work: string
   /** git in `work`, as loadPrViaGit's gitFn. */
   git(args: string[], env?: Record<string, string>): Buffer
-  /** Commits to main on origin and pulls it into `work`; resolves to the new main commit. */
-  commitMain(files: Record<string, Entry>, remove?: string[]): string
+  /** Commits to main on origin and (unless `pull` is false) pulls it into `work`; resolves to the new main commit. */
+  commitMain(files: Record<string, Entry>, remove?: string[], pull?: boolean): string
   /** Sets refs/pull/<n>/head on origin to a commit on top of main; resolves to that commit. */
   pr(n: number, files: Record<string, Entry>, remove?: string[]): string
   cleanup(): void
@@ -52,12 +53,12 @@ export function makeFixture(): Fixture {
   run(dir, "clone", "-q", `file://${bare}`, work)
   return {
     work,
-    git: (args, env) => execFileSync("git", args, { cwd: work, env: { ...process.env, ...ENV, ...env }, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }),
-    commitMain(files, remove = []) {
+    git: gitRunner({ cwd: work }),
+    commitMain(files, remove = [], pull = true) {
       run(src, "checkout", "-q", "main")
       const sha = apply(files, remove)
       run(src, "push", "-q", "origin", "main")
-      run(work, "pull", "-q", "--ff-only")
+      if (pull) run(work, "pull", "-q", "--ff-only")
       return sha
     },
     pr(n, files, remove = []) {
@@ -73,5 +74,5 @@ export function makeFixture(): Fixture {
 
 /** A fake `gh` answering `api repos/o/r/pulls/<n>` with the given head commit; anything else goes to `other`. */
 export function prObject(n: number, head: string, over: Record<string, unknown> = {}): Buffer {
-  return Buffer.from(JSON.stringify({ number: n, base: { ref: "main" }, head: { sha: head, ref: `run/x${n}`, repo: { full_name: "o/r" } }, changed_files: 1, user: { login: "ann" }, ...over }))
+  return Buffer.from(JSON.stringify({ number: n, base: { ref: "main" }, head: { sha: head, ref: `run/x${n}`, repo: { full_name: "o/r" } }, changed_files: 1, commits: 1, user: { login: "ann" }, ...over }))
 }

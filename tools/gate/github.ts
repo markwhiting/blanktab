@@ -9,6 +9,15 @@ const MAX_BYTES = 1_048_576
 export const MAX_PR_FILES = 16
 /** How many of the commits touching a learner's dir (oldest first) boundAuthor asks GitHub about. */
 export const MAX_OWNER_WALK = 20
+/**
+ * A PR with more commits is rejected from the PR object, before anything is fetched (decision 0017). A tab makes one
+ * commit per send, and a send with nothing new makes none (contributor.ts commitFiles), so every commit adds or changes
+ * a file; with at most 16 files that is about 16 commits, and 64 leaves room for re-sends. The cap bounds what one
+ * fetch of refs/pull/N/head can bring: the PR's own commits, whose blobs over 1 MB the filter leaves out.
+ */
+export const MAX_PR_COMMITS = 64
+/** Every git the gate runs is killed after this long; a fetch that hangs or is huge fails that PR's load, not the run. */
+export const GIT_TIMEOUT_MS = 120_000
 
 let ghCallCount = 0
 export function gh(args: string[]): Buffer {
@@ -41,10 +50,16 @@ export function bytesToContent(raw: Buffer): { content: string } | { error: stri
   try { return { content: new TextDecoder("utf-8", { fatal: true }).decode(raw) } } catch { return { error: "file is not valid UTF-8" } }
 }
 
-/** git, run in the current directory (the checkout of main), returning raw bytes; `env` is added to the process env. */
+/** git, returning raw bytes; `env` is added to the process env. */
 export interface Git { (args: string[], env?: Record<string, string>): Buffer }
-export const gitBuf: Git = (args, env) =>
-  execFileSync("git", args, { maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], env: env ? { ...process.env, ...env } : process.env })
+/** A Git running in `cwd` (default: the current directory, the checkout of main), killed after `timeoutMs`. */
+export function gitRunner(opts: { cwd?: string; timeoutMs?: number } = {}): Git {
+  return (args, env) => execFileSync("git", args, {
+    cwd: opts.cwd, timeout: opts.timeoutMs ?? GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"], env: env ? { ...process.env, ...env } : process.env,
+  })
+}
+export const gitBuf: Git = gitRunner()
 
 const SHA_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/
 /** git's raw diff status letters, named as the REST API names them (so load errors read as they always have). */
@@ -52,35 +67,47 @@ const STATUS: Record<string, string> = { A: "added", M: "modified", D: "removed"
 const REGULAR = new Set(["100644", "100755"])
 
 /**
- * Reads PR <n>'s files with git (decision 0017): one gh call (pulls/N), then a partial fetch of refs/pull/N/head and
- * main into refs/gate/. Blobs over 1 MB are filtered out by the fetch and, with lazy fetching off, never downloaded:
- * one that is missing reads as "file exceeds 1 MB". Files are the diff from the merge base with main to the head, at
- * the head commit pulls/N named; if the fetched head is another commit, the PR is `moved` and has no files. Nothing
- * from the PR is run: fetch runs no hooks from it, and the diff runs no external diff or textconv.
+ * Reads PR <n>'s files with git (decision 0017). One gh call (pulls/N); a PR over MAX_PR_FILES files or MAX_PR_COMMITS
+ * commits is rejected from it, before any fetch. Then a partial fetch of refs/pull/N/head into refs/gate/pr-N leaves
+ * out blobs over 1 MB, and every git call runs with `--no-lazy-fetch`, so such a blob is never downloaded: one that is
+ * missing reads as "file exceeds 1 MB". Files are the diff from the merge base with the checkout of main (HEAD) to the
+ * head commit pulls/N named. If the fetched head is another commit, the PR is `moved`. If HEAD..head is not the PR's
+ * commit count, the checkout of main is not the main GitHub compares the PR with (it is older than the PR's base, or
+ * GitHub has not caught up): `stale`. Either way it has no files and is left for the next run. Nothing from the PR is
+ * run: fetch runs no hooks from it and recurses into no submodules; the diff runs no external diff or textconv.
+ *
+ * HEAD is the one main used throughout a gate run: the merge base here, the earlier logs (read from its working tree)
+ * and the owner (boundAuthor's git log) all come from it.
  */
-export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => Buffer = gh, gitFn: Git = gitBuf): LoadedPr & { moved?: true } {
+export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => Buffer = gh, gitFn: Git = gitBuf): LoadedPr & { moved?: true; stale?: true } {
   if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`not a PR number: ${n}`)
-  const pr = JSON.parse(ghFn(["api", `repos/${repo}/pulls/${n}`]).toString("utf8")) as { base: { ref: string }; head: { sha?: unknown; ref: string }; changed_files?: unknown; user?: { login?: unknown } | null }
+  const pr = JSON.parse(ghFn(["api", `repos/${repo}/pulls/${n}`]).toString("utf8")) as { base: { ref: string }; head: { sha?: unknown; ref: string }; changed_files?: unknown; commits?: unknown; user?: { login?: unknown } | null }
   const headSha = typeof pr.head.sha === "string" && SHA_RE.test(pr.head.sha) ? pr.head.sha : undefined
   const login = pr.user?.login
   const base = { headRef: pr.head.ref, baseRef: pr.base.ref, headSha, author: typeof login === "string" && login !== "" ? login : undefined }
   // Files are read at the head commit; without one there is nothing to read them at (the gate leaves such a PR alone).
   if (headSha === undefined) return { ...base, files: [], loadErrors: ["head commit is unavailable"] }
   // Budget first, from the PR object alone: an oversized PR is never fetched.
-  const count = pr.changed_files
-  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return { ...base, files: [], loadErrors: ["PR file count is unavailable"] }
+  const isCount = (c: unknown): c is number => typeof c === "number" && Number.isInteger(c) && c >= 0
+  const count = pr.changed_files, commits = pr.commits
+  if (!isCount(count)) return { ...base, files: [], loadErrors: ["PR file count is unavailable"] }
   if (count > MAX_PR_FILES) return { ...base, files: [], loadErrors: [`PR changes ${count} files (limit ${MAX_PR_FILES})`] }
+  if (!isCount(commits)) return { ...base, files: [], loadErrors: ["PR commit count is unavailable"] }
+  if (commits > MAX_PR_COMMITS) return { ...base, files: [], loadErrors: [`PR has ${commits} commits (limit ${MAX_PR_COMMITS})`] }
 
-  const env = { GIT_NO_LAZY_FETCH: "1" } // a blob the filter left out is never fetched on demand
+  // --no-lazy-fetch on every call (git >= 2.44 refuses an unknown option, so an older git fails loudly): a blob the
+  // filter left out is never fetched on demand.
+  const g = (args: string[]) => gitFn(["--no-lazy-fetch", ...args])
+  const text = (args: string[]) => g(args).toString("utf8").trim()
   const ref = `refs/gate/pr-${n}`
   // Limit MAX_BYTES + 1: the filter omits blobs of *at least* the limit, and a file of exactly 1 MB is allowed.
-  gitFn(["fetch", "--quiet", "--no-tags", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+refs/pull/${n}/head:${ref}`, "+refs/heads/main:refs/gate/main"], env)
-  const fetched = gitFn(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], env).toString("utf8").trim()
-  if (fetched !== headSha) return { ...base, files: [], loadErrors: [], moved: true }
-  const mergeBase = gitFn(["merge-base", "refs/gate/main", headSha], env).toString("utf8").trim()
+  g(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", `--filter=blob:limit=${MAX_BYTES + 1}`, "origin", `+refs/pull/${n}/head:${ref}`])
+  if (text(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]) !== headSha) return { ...base, files: [], loadErrors: [], moved: true }
+  if (text(["rev-list", "--count", `HEAD..${headSha}`]) !== String(commits)) return { ...base, files: [], loadErrors: [], stale: true }
+  const mergeBase = text(["merge-base", "HEAD", headSha])
   if (!SHA_RE.test(mergeBase)) throw new Error(`no merge base of ${headSha} with main`)
   // --raw gives each file's status, head-side mode and blob id in one call, pinned to headSha (not to a ref).
-  const raw = gitFn(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--raw", "-z", "--no-abbrev", mergeBase, headSha], env)
+  const raw = g(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none", "--raw", "-z", "--no-abbrev", mergeBase, headSha])
   const changed = parseRawDiff(raw)
   const loadErrors: string[] = []
   loadErrors.push(...statusErrors(changed.map(c => ({ filename: c.path, status: STATUS[c.status] ?? c.status }))))
@@ -90,9 +117,9 @@ export function loadPrViaGit(repo: string, n: number, ghFn: (args: string[]) => 
     if (c.status !== "A" && c.status !== "M") continue
     if (!REGULAR.has(c.mode)) { loadErrors.push(`${c.path}: not a regular file`); continue }
     let size: number
-    try { size = Number(gitFn(["cat-file", "-s", c.oid], env).toString("utf8").trim()) } catch { size = Infinity } // filtered out: over 1 MB
+    try { size = Number(text(["cat-file", "-s", c.oid])) } catch { size = Infinity } // filtered out: over 1 MB
     if (!(size <= MAX_BYTES)) { loadErrors.push(`${c.path}: file exceeds 1 MB`); continue }
-    const r = bytesToContent(gitFn(["cat-file", "blob", c.oid], env))
+    const r = bytesToContent(g(["cat-file", "blob", c.oid]))
     if ("error" in r) loadErrors.push(`${c.path}: ${r.error}`)
     else files.push({ path: c.path, content: r.content })
   }
@@ -121,7 +148,7 @@ function parseRawDiff(raw: Buffer): { status: string; mode: string; oid: string;
 
 /** Runs git in the gate's checkout of main (no shell). */
 export function git(args: string[]): string {
-  return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] })
+  return execFileSync("git", args, { encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] })
 }
 
 /** True if the checkout has only part of main's history (then who owns a learner cannot be told: the gate stops). */
@@ -133,7 +160,7 @@ export function isShallow(gitFn: (args: string[]) => string = git): boolean {
 
 /**
  * Who a learner belongs to (decisions 0014, 0017): the GitHub author of the first merged PR among the commits on main
- * touching data/runs/<learnerId>/, oldest first, at most MAX_OWNER_WALK of them (needs main's full history: the caller
+ * (HEAD, the checkout of main) touching data/runs/<learnerId>/, oldest first, at most MAX_OWNER_WALK of them (needs main's full history: the caller
  * checks isShallow). Commits with no merged PR (direct pushes) are skipped. Null if none of them has one: the learner
  * is unbound, and the first author to get a PR merged claims it. Throws if a lookup fails (a gh error, a malformed
  * answer, a merged PR without a login): the caller must not decide that learner's PRs then.
@@ -141,7 +168,7 @@ export function isShallow(gitFn: (args: string[]) => string = git): boolean {
 export function boundAuthor(repo: string, learnerId: string, gitFn: (args: string[]) => string = git, ghFn: (args: string[]) => Buffer = gh): string | null {
   if (!LEARNER_ID_RE.test(learnerId)) throw new Error(`not a learnerId: ${JSON.stringify(learnerId.slice(0, 40))}`)
   // --reverse applies after any limit, so the oldest are taken here rather than with -n.
-  const commits = gitFn(["log", "--reverse", "--format=%H", "--", `:(top,literal)data/runs/${learnerId}/`]).split("\n").map(l => l.trim()).filter(l => l !== "")
+  const commits = gitFn(["--no-lazy-fetch", "log", "--reverse", "--format=%H", "--", `:(top,literal)data/runs/${learnerId}/`]).split("\n").map(l => l.trim()).filter(l => l !== "")
   for (const sha of commits.slice(0, MAX_OWNER_WALK)) {
     if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`git gave no commit for ${learnerId}`)
     const pulls = JSON.parse(ghFn(["api", `repos/${repo}/commits/${sha}/pulls`]).toString("utf8")) as unknown

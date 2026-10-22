@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect } from "vitest"
 import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import { act, decide, memoBound, runGate, type GateDeps, type GateOps, type OpenPr } from "../gate.ts"
-import { MAX_PR_FILES } from "../github.ts"
+import { gitRunner, MAX_PR_FILES } from "../github.ts"
 import { makeFixture, prObject, type Fixture } from "./git-fixture.ts"
 import type { PrFile } from "../validate.ts"
 import type { LogFile, LogFileV1 } from "@blanktab/harness/log"
@@ -184,7 +184,7 @@ describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }
         throw new Error(`unexpected gh call: ${j}`)
       },
       git: a => execFileSync("git", a, { cwd: workDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-      gitBuf: (a, env) => execFileSync("git", a, { cwd: workDir, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }),
+      gitBuf: gitRunner({ cwd: workDir }),
       log: m => void logs.push(m), error: m => void logs.push(`error ${m}`),
     }
     return { d, calls, logs }
@@ -214,6 +214,30 @@ describe("runGate (a local origin over file://, a fake gh)", { timeout: 60_000 }
     expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(0)
     expect(calls.filter(c => c.startsWith("pr ") && !c.startsWith("pr list"))).toEqual([]) // no close, no merge
     expect(logs.some(l => l.includes("PR #1") && l.includes("moved") && l.includes("next run"))).toBe(true)
+  })
+
+  it("a git fetch that times out fails that PR's load, not the run: it stays open and the next PR is decided", () => {
+    const h1 = fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
+    const h2 = fx.pr(2, { [`${D}/0.json`]: json(log(0)) })
+    const { d, calls, logs } = deps({ 1: h1, 2: h2 })
+    const real = d.gitBuf
+    d.gitBuf = (a, env) => {
+      if (a.includes("fetch") && a.some(x => x.startsWith("+refs/pull/1/"))) return gitRunner({ cwd: fx.work, timeoutMs: 1 })(a, env)
+      return real(a, env)
+    }
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(1)
+    expect(logs.some(l => l.startsWith("error PR #1: could not load") && l.includes("next run"))).toBe(true)
+    expect(calls.filter(c => /^pr (close|merge|ready) 1 /.test(c))).toEqual([])
+    expect(calls).toContain(`pr merge 2 --repo o/r --squash --delete-branch --match-head-commit ${h2}`)
+  })
+
+  it("a PR based on a main newer than the gate's checkout: left open for the next run", () => {
+    fx.commitMain({ "other/file.txt": "x" }, [], false)
+    const head = fx.pr(1, { [`${D}/0.json`]: json(log(0)) })
+    const { d, calls, logs } = deps({ 1: head })
+    expect(runGate("o/r", join(fx.work, "data/runs"), d)).toBe(0)
+    expect(calls.filter(c => c.startsWith("pr ") && !c.startsWith("pr list"))).toEqual([])
+    expect(logs.some(l => l.includes("PR #1") && l.includes("next run"))).toBe(true)
   })
 
   it("a shallow checkout aborts the run before deciding anything", () => {
