@@ -94,13 +94,19 @@
     }
 
     /* LEARNER */
-    .learner-grid { display: grid; grid-template-columns: max-content minmax(260px, 420px); gap: 24px 32px; align-items: start; }
-    .view { display: flex; gap: 16px; align-items: flex-start; }
+    /* Narrow screens: one scrolling column (the wrappers dissolve; order puts the views, then the numbers, then the charts).
+       Wide screens (below): the window, in two columns that fill it. */
+    .learner-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+    @media (max-width: 1099px) {
+      .stage, .lower, .side { display: contents; }
+      .periphery-fig { order: 1; } .fovea-fig { order: 2; } .side > * { order: 3; } .side > .learning { order: 4; } .grown { order: 5; }
+    }
     figure { margin: 0; }
     figcaption { margin-top: 6px; font-size: 11px; font-weight: 500; color: var(--muted); }
-    canvas { display: block; image-rendering: pixelated; background: #000; border: 1px solid var(--hairline); border-radius: 6px; }
-    #periphery { width: 560px; height: 350px; }
-    #fovea { width: 160px; height: 160px; }
+    canvas { display: block; box-sizing: border-box; image-rendering: pixelated; background: #000; border: 1px solid var(--hairline); border-radius: 6px; }
+    /* The learner's views scale with their column, nearest-neighbour, at their own aspect ratio. */
+    #periphery { width: 100%; height: auto; aspect-ratio: 8 / 5; }
+    #fovea { width: 160px; height: auto; aspect-ratio: 1; }
     #curve { width: 100%; height: 96px; background: transparent; image-rendering: auto; border: 0; border-radius: 0; }
     #milestones { width: 100%; height: 64px; background: transparent; image-rendering: auto; border: 0; border-radius: 0; }
     .swatch.bar { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--accent-green); }
@@ -109,7 +115,6 @@
     .swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--curve-pred); }
     .swatch.base { border-top: 2px dashed var(--curve-base); }
     .axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 2px; }
-    .side { display: grid; gap: 16px; min-width: 0; }
     dl.stats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-family: var(--mono); font-size: 12px; }
     dl.stats dt { color: var(--muted); font-weight: 500; }
     dl.stats dd { margin: 0; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
@@ -138,9 +143,16 @@
       color: var(--accent-link); cursor: pointer;
     }
     button.link:hover { text-decoration: underline; }
+    /* The token form, folded into one line under the stats. */
+    .share { border-top: 1px solid var(--hairline); padding-top: 10px; }
+    .share[hidden] { display: none; }
+    .share summary { cursor: pointer; font-size: 12px; font-weight: 650; color: var(--accent-link); }
+    .share summary .muted { font-weight: 500; }
+    .share-body p, .share-body ol { margin: 6px 0; }
+    .share-body ol { padding-left: 18px; }
 
     /* HISTORY */
-    .table-wrap { overflow-x: auto; max-width: 900px; }
+    .table-wrap { overflow: auto; }
     table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
     th {
       text-align: left; font-family: var(--sans); font-size: 11px; font-weight: 650; letter-spacing: 0.06em;
@@ -151,6 +163,7 @@
     td.num { text-align: right; }
     th.num { text-align: right; }
     .empty { margin: 0; padding: 14px; color: var(--muted); }
+    td[data-label="Setting"] { white-space: normal; min-width: 360px; }
 
     /* ABOUT */
     .about { max-width: 620px; }
@@ -164,13 +177,35 @@
     footer a { color: var(--muted); }
     footer a:hover { color: var(--text); }
 
-    @media (max-width: 980px) {
-      .learner-grid { grid-template-columns: 1fr; }
+    /* A laptop or desktop window: the page is the window, nothing scrolls but (if it must) the inside of a column or the
+       HISTORY table. Left: the periphery as large as the height allows, and under it the fovea beside "Has it grown up?".
+       Right: the numbers, the token line and "Is it learning?", whose chart takes the height left. */
+    @media (min-width: 1100px) {
+      #app { height: 100vh; height: 100dvh; min-height: 0; }
+      main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding-bottom: 4px; }
+      main > [role="tabpanel"]:not([hidden]) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+      .learner-grid {
+        --chrome: 118px; /* header, footer and main's padding: what the window's height loses before the columns */
+        --lower: clamp(240px, calc((100dvh - var(--chrome)) * 0.38), 380px);
+        flex: 1 1 auto; min-height: 0; align-items: stretch; gap: 22px; grid-template-rows: minmax(0, 1fr);
+        /* The left column is as wide as a periphery whose height is what the lower row leaves (8:5), within limits. */
+        grid-template-columns: minmax(560px, min(calc((100dvh - var(--chrome) - var(--lower) - 40px) * 1.6), 64%)) minmax(380px, 1fr);
+      }
+      .stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; container-type: size; overflow-y: auto; }
+      .side { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; }
+      #periphery { width: min(100cqw, (100cqh - var(--lower) - 40px) * 1.6); }
+      .lower { display: flex; gap: 16px; flex: 1 0 auto; min-height: var(--lower); }
+      .fovea-fig { flex: none; }
+      #fovea { width: calc(var(--lower) - 26px); }
+      .panel.grown, .panel.learning { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; }
+      #curve, #milestones { flex: 1 1 0; height: auto; min-height: 48px; }
+      .table-wrap { max-height: 100%; }
+      th { position: sticky; top: 0; background: var(--surface-strong); }
+      /* ABOUT: the prose at a reading width, its links beside it. */
+      .about { flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: none; display: grid; grid-template-columns: minmax(0, 640px) max-content; column-gap: 64px; align-content: start; }
+      .about-links h2 { margin-top: 2px; }
     }
     @media (max-width: 760px) {
-      .view { flex-direction: column; }
-      .view figure:first-child { width: 100%; }
-      #periphery { width: 100%; height: auto; aspect-ratio: 8 / 5; }
       /* HISTORY as stacked cards: one row per learner, each value labelled. */
       table thead { display: none; }
       table tr { display: block; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
@@ -180,7 +215,7 @@
         content: attr(data-label); font-family: var(--sans); font-size: 11px; font-weight: 650; letter-spacing: 0.06em;
         text-transform: uppercase; color: var(--muted); text-align: left;
       }
-      #fovea { width: 128px; height: 128px; }
+      #fovea { width: 128px; }
       .build { margin-left: 0; flex-basis: 100%; }
     }
   </style>
@@ -200,15 +235,30 @@
   <main>
     <section role="tabpanel" id="panel-learner" aria-labelledby="tab-learner">
       <div class="learner-grid">
-        <div class="view" aria-label="What the learner sees">
-          <figure>
+        <div class="stage">
+          <figure class="periphery-fig">
             <canvas id="periphery" width="80" height="50"></canvas>
             <figcaption>Periphery · the whole screen, 80×50 pixels</figcaption>
           </figure>
-          <figure>
-            <canvas id="fovea" width="32" height="32"></canvas>
-            <figcaption>Fovea · 32×32 around the cursor</figcaption>
-          </figure>
+          <div class="lower">
+            <figure class="fovea-fig">
+              <canvas id="fovea" width="32" height="32"></canvas>
+              <figcaption>Fovea · 32×32 around the cursor</figcaption>
+            </figure>
+
+            <section class="panel surface grown" aria-labelledby="grown-title">
+              <h2 id="grown-title">Has it grown up?</h2>
+              <p class="muted">From about 8 CU, at doubling amounts of compute and then every 1,024 CU, it gets a checkup: six
+                short tests in fresh rooms it has never seen, with its learning paused. Each bar is how many it passed.</p>
+              <canvas id="milestones" data-testid="milestones" data-bars="0" width="360" height="64" role="img"
+                aria-label="Milestone checkups: one bar per checkup, its height how many of the six tests it passed"></canvas>
+              <div class="axis" aria-hidden="true"><span>first checkup</span><span>latest →</span></div>
+              <ul class="legend">
+                <li><span class="swatch bar"></span>tests passed (the dashed line is all six)</li>
+              </ul>
+              <p data-testid="milestone-text" style="margin: 8px 0 0; font-family: var(--mono); font-size: 12px; font-weight: 600">no checkup yet (the first comes soon after it has lived 8 CU)</p>
+            </section>
+          </div>
         </div>
 
         <div class="side">
@@ -226,10 +276,29 @@
             <dt>Contribution</dt><dd><span data-testid="contribution">…</span> <button type="button" class="link" data-testid="change-token" hidden>change token</button></dd>
           </dl>
 
+          <!-- The token form, folded to one line until it is opened: the learner runs either way. -->
+          <details class="share" data-testid="token-panel" hidden>
+            <summary>Share this learner's logs <span class="muted">· add a GitHub token</span></summary>
+            <div class="share-body">
+              <p>The learner runs either way. Without a GitHub token its logs wait in this browser; with one, they are sent to
+                <code data-repo>the repo</code> as a pull request, where the next tab can learn from them.</p>
+              <ol>
+                <li><a href="https://github.com/settings/tokens/new?scopes=public_repo&amp;description=learner" target="_blank" rel="noopener noreferrer">Create a classic token with the <code>public_repo</code> scope</a> (the link fills it in).</li>
+                <li>Paste it below. It is kept only in this browser's localStorage and sent only to api.github.com.</li>
+              </ol>
+              <div class="row">
+                <label for="token">GitHub token</label>
+                <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…">
+                <button type="button" id="token-save">Check &amp; save</button>
+              </div>
+              <p class="error" id="token-error" role="status"></p>
+            </div>
+          </details>
+
           <p class="life" data-testid="life" role="status" hidden></p>
           <p class="life" data-testid="update" role="status" hidden></p>
 
-          <section class="panel surface" aria-labelledby="learning-title">
+          <section class="panel surface learning" aria-labelledby="learning-title">
             <h2 id="learning-title">Is it learning?</h2>
             <p class="muted">At every step it guesses what it will see next. Here those guesses are scored
               <strong data-testid="heldout-label">on a fixed test it never trains on</strong>: 64 moments of a differently laid-out
@@ -245,35 +314,6 @@
               <dt>Ratio</dt><dd data-testid="ratio">no guesses measured yet</dd>
             </dl>
             <p class="muted" data-testid="own-ratio" style="margin: 6px 0 0"></p>
-          </section>
-
-          <section class="panel surface" aria-labelledby="grown-title">
-            <h2 id="grown-title">Has it grown up?</h2>
-            <p class="muted">From about 8 CU, at doubling amounts of compute and then every 1,024 CU, it gets a checkup: six
-              short tests in fresh rooms it has never seen, with its learning paused. Each bar is how many it passed.</p>
-            <canvas id="milestones" data-testid="milestones" data-bars="0" width="360" height="64" role="img"
-              aria-label="Milestone checkups: one bar per checkup, its height how many of the six tests it passed"></canvas>
-            <div class="axis" aria-hidden="true"><span>first checkup</span><span>latest →</span></div>
-            <ul class="legend">
-              <li><span class="swatch bar"></span>tests passed (the dashed line is all six)</li>
-            </ul>
-            <p data-testid="milestone-text" style="margin: 8px 0 0; font-family: var(--mono); font-size: 12px; font-weight: 600">no checkup yet (the first comes soon after it has lived 8 CU)</p>
-          </section>
-
-          <section class="panel surface" data-testid="token-panel" aria-labelledby="token-title" hidden>
-            <h2 id="token-title">Share this learner's logs</h2>
-            <p>The learner runs either way. Without a GitHub token its logs wait in this browser; with one, they are sent to
-              <code data-repo>the repo</code> as a pull request, where the next tab can learn from them.</p>
-            <ol>
-              <li><a href="https://github.com/settings/tokens/new?scopes=public_repo&amp;description=learner" target="_blank" rel="noopener noreferrer">Create a classic token with the <code>public_repo</code> scope</a> (the link fills it in).</li>
-              <li>Paste it below. It is kept only in this browser's localStorage and sent only to api.github.com.</li>
-            </ol>
-            <div class="row">
-              <label for="token">GitHub token</label>
-              <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…">
-              <button type="button" id="token-save">Check &amp; save</button>
-            </div>
-            <p class="error" id="token-error" role="status"></p>
           </section>
         </div>
       </div>
@@ -291,23 +331,27 @@
 
     <section role="tabpanel" id="panel-about" aria-labelledby="tab-about" hidden>
       <div class="about" data-testid="about">
-        <p>A learner lives in this tab. It starts from nothing, with no pretrained knowledge. It sees only pixels of a small
-          screen and acts only through a cursor. When its life ends, what happened is sent back to GitHub, so later learners
-          can start from what earlier ones found and, over time, do better.</p>
-        <p>It learns to predict what it sees: at every step it guesses its next view of the screen, and it learns from how
-          wrong the guess was. It seeks out what it can learn, moving where its guesses are getting better.
-          A caregiver carries it between rooms, toward where it is learning fastest, until it uses the taskbar
-          itself; now and then it gets a checkup in rooms it has never seen. Its life is measured in compute (1 CU is a billion arithmetic operations), and the
-          LEARNER tab shows its guesses against the lazy guess that nothing changes.</p>
-        <p>It runs on this machine's GPU through WebGPU when there is one, otherwise on the CPU at half the size. A reload
-          resumes it from its last checkpoint, saved in this browser.</p>
-        <p>To help, leave the tab open, and add a GitHub token so its logs can be shared. Without a token the learner still
-          runs and its logs wait in this browser.</p>
-        <p>Privacy: the token is kept only in this browser and is sent only to <code>api.github.com</code>. The logs hold the
-          learner's settings, step and compute counts, its loss curve and a coarse description of the machine (cores, memory, WebGPU, open tabs). The
-          pull request is opened under the token's GitHub account.</p>
-        <h2>Links</h2>
-        <ul data-links></ul>
+        <div class="prose">
+          <p>A learner lives in this tab. It starts from nothing, with no pretrained knowledge. It sees only pixels of a small
+            screen and acts only through a cursor. When its life ends, what happened is sent back to GitHub, so later learners
+            can start from what earlier ones found and, over time, do better.</p>
+          <p>It learns to predict what it sees: at every step it guesses its next view of the screen, and it learns from how
+            wrong the guess was. It seeks out what it can learn, moving where its guesses are getting better.
+            A caregiver carries it between rooms, toward where it is learning fastest, until it uses the taskbar
+            itself; now and then it gets a checkup in rooms it has never seen. Its life is measured in compute (1 CU is a billion arithmetic operations), and the
+            LEARNER tab shows its guesses against the lazy guess that nothing changes.</p>
+          <p>It runs on this machine's GPU through WebGPU when there is one, otherwise on the CPU at half the size. A reload
+            resumes it from its last checkpoint, saved in this browser.</p>
+          <p>To help, leave the tab open, and add a GitHub token so its logs can be shared. Without a token the learner still
+            runs and its logs wait in this browser.</p>
+          <p>Privacy: the token is kept only in this browser and is sent only to <code>api.github.com</code>. The logs hold the
+            learner's settings, step and compute counts, its loss curve and a coarse description of the machine (cores, memory, WebGPU, open tabs). The
+            pull request is opened under the token's GitHub account.</p>
+        </div>
+        <nav class="about-links" aria-label="Links">
+          <h2>Links</h2>
+          <ul data-links></ul>
+        </nav>
       </div>
     </section>
   </main>

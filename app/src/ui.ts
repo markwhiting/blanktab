@@ -189,7 +189,7 @@ export interface Ui {
 export function createUi(): Ui {
   const paintPeriphery = painter($("#periphery"), PERIPHERY.width, PERIPHERY.height)
   const paintFovea = painter($("#fovea"), FOVEA.width, FOVEA.height)
-  const panel = byTest("token-panel"), input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
+  const panel = byTest("token-panel") as HTMLDetailsElement, input = $<HTMLInputElement>("#token"), button = $<HTMLButtonElement>("#token-save"), err = $("#token-error")
   const life = byTest("life"), change = byTest("change-token") as HTMLButtonElement
   const curveCanvas = byTest("curve") as HTMLCanvasElement
   const milestonesCanvas = byTest("milestones") as HTMLCanvasElement
@@ -291,12 +291,14 @@ export function createUi(): Ui {
     },
     tokenPanel(visible) {
       panel.hidden = !visible
+      if (!visible) panel.open = false // folded again the next time it is offered
     },
     changeToken(visible) {
       change.hidden = !visible
     },
     onChangeToken(handler) {
-      change.addEventListener("click", handler)
+      // Asking to change the token opens the form at once.
+      change.addEventListener("click", () => { panel.open = true; handler() })
     },
     onTokenSubmit(handler) {
       const submit = async () => {

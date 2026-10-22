@@ -131,9 +131,12 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   await expect(page.getByTestId("curve-legend")).toContainText("how wrong its guesses are")
   await expect(page.getByTestId("curve-legend")).toContainText("the lazy guess: nothing changes")
 
-  // No token: the panel explains how to get one; nothing has gone to GitHub.
+  // No token: the panel is offered as one folded line; opened, it explains how to get one; nothing has gone to GitHub.
   const panel = page.getByTestId("token-panel")
   await expect(panel).toBeVisible()
+  await expect(panel.getByLabel(/GitHub token/i)).toBeHidden()
+  await panel.getByText("Share this learner's logs").click()
+  await expect(panel.getByLabel(/GitHub token/i)).toBeVisible()
   await expect(page.getByTestId("change-token")).toBeHidden()
   await page.screenshot({ path: test.info().outputPath("page-notoken.png"), fullPage: true })
   await expect(panel.getByRole("link")).toHaveAttribute("href", "https://github.com/settings/tokens/new?scopes=public_repo&description=learner")
@@ -241,6 +244,7 @@ test("token stored: a small 'change token' control clears it and brings the pane
   await page.screenshot({ path: test.info().outputPath("page-token.png"), fullPage: true })
   await change.click()
   await expect(panel).toBeVisible()
+  await expect(panel.getByLabel(/GitHub token/i)).toBeVisible() // asking to change the token opens the form
   await expect(change).toBeHidden()
   expect(await page.evaluate(() => localStorage.getItem("blanktab:githubToken"))).toBeNull()
   await expect(page.getByTestId("contribution")).toContainText(/token/i)
@@ -265,6 +269,7 @@ test("an unexpected failure while checking a token shows an error instead of han
   })
   await page.goto(LONG)
   const panel = page.getByTestId("token-panel")
+  await panel.getByText("Share this learner's logs").click()
   await panel.getByLabel(/GitHub token/i).fill(TOKEN)
   await panel.getByRole("button", { name: "Check & save" }).click()
   await expect(page.locator("#token-error")).toHaveText(/went wrong/i)
@@ -627,6 +632,65 @@ test("charts redraw on resize: the curve and milestones canvases' width attribut
   await expect.poll(async () => (await widths()).map(w => w.attr === w.css && w.css > 0 && w.css !== wide[0]!.css)).toEqual([true, true])
 })
 
+/** Standard laptop and desktop windows: the page is the window. */
+const DESKTOPS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }, { width: 1536, height: 864 }, { width: 1920, height: 1080 }]
+
+test("on a laptop or desktop window each tab fits it: no page scroll either way, and the panels fill it", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.goto(LONG)
+  await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  const fit = () => page.evaluate(() => {
+    const se = document.scrollingElement!
+    const panel = document.querySelector<HTMLElement>('[role="tabpanel"]:not([hidden])')!
+    const boxes = [...panel.querySelectorAll<HTMLElement>(".stage, .side, .table-wrap, .about")].map(e => e.getBoundingClientRect())
+    const inner = [...panel.querySelectorAll<HTMLElement>(".stage, .side")].map(e => e.scrollHeight - e.clientHeight)
+    return {
+      vScroll: se.scrollHeight - innerHeight, hScroll: se.scrollWidth - innerWidth,
+      widthShare: (Math.max(...boxes.map(b => b.right)) - Math.min(...boxes.map(b => b.left))) / innerWidth,
+      bottomGap: innerHeight - Math.max(...boxes.map(b => b.bottom)), innerOverflow: Math.max(0, ...inner),
+    }
+  })
+  for (const size of DESKTOPS) {
+    await page.setViewportSize(size)
+    for (const name of ["Learner", "History", "About"]) {
+      await page.getByRole("tab", { name }).click()
+      const f = await fit()
+      const at = `${name} at ${size.width}x${size.height}`
+      expect(f.vScroll, at).toBeLessThanOrEqual(0)
+      expect(f.hScroll, at).toBeLessThanOrEqual(0)
+      expect(f.widthShare, at).toBeGreaterThanOrEqual(name === "About" ? 0.5 : 0.85)
+      if (name === "Learner") {
+        expect(f.bottomGap, at).toBeLessThanOrEqual(44) // only the footer's links under the panels
+        expect(f.innerOverflow, at).toBe(0) // and neither column scrolls inside either
+      }
+    }
+    await page.getByRole("tab", { name: "Learner" }).click()
+    // The learner's views fill their column at their own aspect ratio, scaled up nearest-neighbour.
+    const views = await page.evaluate(() => ["#periphery", "#fovea"].map(s => {
+      const c = document.querySelector<HTMLCanvasElement>(s)!
+      return { w: c.clientWidth, h: c.clientHeight, ratio: c.width / c.height, rendering: getComputedStyle(c).imageRendering }
+    }))
+    expect(views[0]!.w).toBeGreaterThan(size.width * 0.4)
+    for (const v of views) {
+      expect(Math.abs(v.w / v.h - v.ratio)).toBeLessThan(0.02)
+      expect(v.rendering).toBe("pixelated")
+    }
+  }
+})
+
+test("on a phone the LEARNER tab is one scrolling column", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(LONG)
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  const ids = ["#periphery", "#fovea", '[data-testid="learner-id"]', '[data-testid="curve"]', '[data-testid="milestones"]']
+  const boxes = await page.evaluate(sel => sel.map(s => document.querySelector(s)!.getBoundingClientRect()).map(b => ({ left: b.left, right: b.right, top: b.top, bottom: b.bottom })), ids)
+  for (let i = 1; i < boxes.length; i++) expect(boxes[i]!.top, `${ids[i]} under ${ids[i - 1]}`).toBeGreaterThanOrEqual(boxes[i - 1]!.bottom)
+  for (const b of boxes) { expect(b.left).toBeGreaterThanOrEqual(0); expect(b.right).toBeLessThanOrEqual(390) }
+  expect(await page.evaluate(() => document.scrollingElement!.scrollWidth)).toBeLessThanOrEqual(390)
+  expect(await page.evaluate(() => document.scrollingElement!.scrollHeight)).toBeGreaterThan(844) // the page scrolls
+})
+
 test.describe("on a 2x display", () => {
   test.use({ deviceScaleFactor: 2 })
   test("charts drawn while LEARNER is hidden keep their size, and are drawn again when it is shown", async ({ page }) => {
@@ -637,6 +701,12 @@ test.describe("on a 2x display", () => {
       const c = document.querySelector<HTMLCanvasElement>(`[data-testid="${id}"]`)!
       return [c.width, c.height]
     }))
+    // The charts flex with the text around them (e.g. the ratio line), so wait until they are drawn at their laid-out size.
+    const settled = () => page.evaluate(() => ["curve", "milestones"].every(id => {
+      const c = document.querySelector<HTMLCanvasElement>(`[data-testid="${id}"]`)!
+      return c.clientWidth > 0 && c.width === Math.round(c.clientWidth * devicePixelRatio) && c.height === Math.round(c.clientHeight * devicePixelRatio)
+    }))
+    await expect.poll(settled).toBe(true)
     const shown = await sizes()
     await page.getByRole("tab", { name: "History" }).click()
     // A curve point arrives at every sleep (every 5 steps): several draws while the canvases are hidden.
