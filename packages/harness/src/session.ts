@@ -284,6 +284,10 @@ function birthOf(state: unknown, id: string): Birth {
  *   widths and settings from its learnerState, knowledgeSha and sessionsSeenAtBirth from the checkpoint; the config's
  *   are for newborns only); a learner with log files but
  *   no checkpoint cannot be resumed and throws, as does a checkpoint whose seq does not follow the latest log file.
+ * - The world's room (decision 0017): each checkpoint records the room in front (when the world has state()). On a
+ *   resume and on a restore, that room is brought to the front before the next frame, through
+ *   world.bringToFront(room, "harness"): not a carry (no carried event, not in the caregiver's counts) and not a learner
+ *   switch. The cursor and the rooms' own state are not restored. An older checkpoint, or a room the world lacks: as is.
  * - Checkups (decision 0016; on with `deps.checkups` and a learner with frozenRun): at a clean sleep, if the highest
  *   log level at or below cu has not been checked, the milestone suite runs on it through frozen runs (paced like the
  *   life, billed to evalCU only). One per sleep; its result goes into the next log file written and the checkpoint is
@@ -482,6 +486,17 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     let caregiver: Caregiver | undefined = careInit ? createCaregiver(careInit) : undefined
     /** The room the previous frame was seen in (undefined: no previous frame this run, or a restore since). */
     let prevRoom: string | undefined
+    /**
+     * Brings the checkpoint's room to the front (decision 0017), so the learner's first frame after a resume or restore
+     * is seen in the room its checkpointed last frame was. A harness focus, not a carry (the caregiver is not told, and
+     * no carried event) nor a learner switch (M6 counts source "learner" only). The learner sees only the frames that
+     * follow. Nothing without cp.world (an older checkpoint) or for a room this world does not have.
+     */
+    const restoreRoom = (c: Checkpoint | undefined) => {
+      const room = c?.world?.room
+      if (room === undefined || typeof world.rooms !== "function" || typeof world.bringToFront !== "function") return
+      if (world.rooms().includes(room as RoomKind)) world.bringToFront(room as RoomKind, "harness")
+    }
     let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed, widths, settings })
     try {
       let steps = cp?.steps ?? 0
@@ -496,6 +511,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       let lastSavedAt = clock.now()
       const resumedFrom = cp ? cp.steps : null
       live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, stats: learner.stats() })
+      restoreRoom(cp)
       if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)) })
 
       const checkpointNow = async (): Promise<Checkpoint> => {
@@ -504,6 +520,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha,
           ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), suiteVersion: tail.length > 0 ? tailSuite : MILESTONE_SUITE_VERSION } } : {}),
           ...(caregiver ? { caregiver: caregiver.state() } : {}),
+          ...(typeof world.state === "function" ? { world: { room: world.state().room } } : {}),
           learnerState: await learner.save(),
         }
         // Never write a checkpoint that would not load (checkCheckpoint): a tail is billed inside the learner's evalCU.
@@ -639,6 +656,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           }
           carriesSinceSave = 0 // in the restored caregiver's lost count now
           prevRoom = undefined // the restored learner's last frame is not this one
+          restoreRoom(back)
           // The restored caregiver (with its lost count) is saved, so a reload right after keeps the count.
           cp = restorePoint = { ...back, restores, lostCU, lostSkips, ...(caregiver ? { caregiver: caregiver.state() } : {}) }
           await saveCheckpoint(idb, cp)

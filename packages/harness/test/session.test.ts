@@ -1718,40 +1718,29 @@ describe("session v2", { timeout: 60_000 }, () => {
       gateAccepts(await logsOf(idb))
     })
 
-    it("Privileged wall: the learner gets observations, birth facts, its own state and manifests, nothing caregiver- or checkup-derived", async () => {
-      const idb = new IDBFactory()
+    /** A learner factory that records every call made to the learner it makes (its frozen runs' too) and every init. */
+    const spyFactory = (inner: (init: LearnerInit) => Promise<SessionLearner>) => {
       const calls: [string, unknown[]][] = []
       const inits: LearnerInit[] = []
-      const inner = stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 }, knowledge: [] })
-      const spyLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+      const createLearner = async (init: LearnerInit): Promise<SessionLearner> => {
         inits.push(init)
         const l = await inner(init)
         const wrap = <A extends unknown[], R>(name: string, f: (...a: A) => R) => (...a: A): R => { calls.push([name, a]); return f(...a) }
         return {
           step: wrap("step", l.step), sleep: wrap("sleep", l.sleep), save: wrap("save", l.save), stats: wrap("stats", l.stats), dispose: wrap("dispose", l.dispose),
-          onKnowledge: wrap("onKnowledge", l.onKnowledge!),
-          frozenRun: wrap("frozenRun", (fo: FrozenRunOptions): FrozenRun => {
+          ...(l.onKnowledge ? { onKnowledge: wrap("onKnowledge", l.onKnowledge) } : {}),
+          ...(l.frozenRun ? { frozenRun: wrap("frozenRun", (fo: FrozenRunOptions): FrozenRun => {
             const r = l.frozenRun!(fo)
             return { step: wrap("frozen.step", r.step), result: wrap("frozen.result", r.result), dispose: wrap("frozen.dispose", r.dispose) }
-          }),
+          }) } : {}),
         }
       }
-      const inbox = new SessionInbox()
-      const events: SessionEvent[] = []
-      const deps = (stopAt?: number) => ({
-        createLearner: spyLearner, inbox, onEvent: (e: SessionEvent) => events.push(e),
-        onTick: ({ steps }: { steps: number }) => { if (steps === 3) inbox.setKnowledge(knowledgeWith("e".repeat(64))); if (steps === stopAt) throw new Error("reload") },
-      })
-      // 120 steps: long enough for the caregiver's period (50 steps).
-      await expect(grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps(12) })).rejects.toThrow("reload")
-      await grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps() })
-      // Non-vacuous: checkups ran, the caregiver carried, knowledge was handed over, and a resume created from state.
-      expect(events.some(e => e.type === "checkup")).toBe(true)
-      expect(events.some(e => e.type === "carried")).toBe(true)
-      expect(calls.some(([n]) => n === "onKnowledge")).toBe(true)
-      expect(inits.some(i => "state" in i)).toBe(true)
+      return { calls, inits, createLearner }
+    }
+    /** The Privileged wall (AGENTS.md invariant 2): what the learner was handed holds nothing privileged. */
+    const expectWall = (calls: [string, unknown[]][], inits: LearnerInit[]) => {
       const observations = calls.filter(([n]) => n === "step" || n === "frozen.step")
-      expect(observations.filter(([n]) => n === "frozen.step").length).toBeGreaterThan(0)
+      expect(observations.length).toBeGreaterThan(0)
       const strings: string[] = []
       const noStrings = (v: unknown, path: string) => {
         if (typeof v === "string") strings.push(path)
@@ -1772,8 +1761,9 @@ describe("session v2", { timeout: 60_000 }, () => {
         for (const k of Object.keys(args[0] as object)) expect(["knowledgeSha", "codeSha", "learnerStateVersion"]).toContain(k)
         expect((args[0] as Manifest).knowledgeSha).toMatch(/^[0-9a-f]{64}$/)
       }
-      // No TraceEvent (kind, room), PrivilegedState (room, hovered), CheckupResult (passed) or CaregiverState (m6Streak).
-      const FORBIDDEN = ["kind", "room", "hovered", "passed", "m6Streak"]
+      // No TraceEvent (kind, room, source), PrivilegedState (room, hovered), CheckupResult (passed), CaregiverState
+      // (m6Streak) or Checkpoint.world (world, room).
+      const FORBIDDEN = ["kind", "room", "source", "hovered", "passed", "m6Streak", "world"]
       const found: string[] = []
       const seen = new Set<object>()
       const scan = (v: unknown, path: string) => {
@@ -1787,6 +1777,176 @@ describe("session v2", { timeout: 60_000 }, () => {
       calls.forEach(([n, args], i) => scan(args, `${n}#${i}`))
       inits.forEach((x, i) => scan(x, `init#${i}`))
       expect(found).toEqual([])
+    }
+
+    it("Privileged wall: the learner gets observations, birth facts, its own state and manifests, nothing caregiver- or checkup-derived", async () => {
+      const idb = new IDBFactory()
+      const { calls, inits, createLearner: spyLearner } = spyFactory(stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 }, knowledge: [] }))
+      const inbox = new SessionInbox()
+      const events: SessionEvent[] = []
+      const deps = (stopAt?: number) => ({
+        createLearner: spyLearner, inbox, onEvent: (e: SessionEvent) => events.push(e),
+        onTick: ({ steps }: { steps: number }) => { if (steps === 3) inbox.setKnowledge(knowledgeWith("e".repeat(64))); if (steps === stopAt) throw new Error("reload") },
+      })
+      // 120 steps: long enough for the caregiver's period (50 steps).
+      await expect(grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps(12) })).rejects.toThrow("reload")
+      await grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps() })
+      // Non-vacuous: checkups ran, the caregiver carried, knowledge was handed over, and a resume created from state.
+      expect(events.some(e => e.type === "checkup")).toBe(true)
+      expect(events.some(e => e.type === "carried")).toBe(true)
+      expect(calls.some(([n]) => n === "onKnowledge")).toBe(true)
+      expect(inits.some(i => "state" in i)).toBe(true)
+      expect(calls.filter(([n]) => n === "frozen.step").length).toBeGreaterThan(0)
+      expectWall(calls, inits)
+    })
+
+    describe("world continuity: a resumed or restored learner wakes up in its checkpoint's room (Plan 04c)", () => {
+      /** A real world whose drained trace is kept, and the room each frame was seen in (read as the session observes). */
+      const tracedWorld = () => {
+        const world = createWorld({ seed: 7, canvas: canvas() })
+        const trace: TraceEvent[][] = [] // one entry per drain (one per step)
+        const rooms: string[] = []
+        const w = {
+          observe: () => { rooms.push(world.state().room); return world.observe() }, act: (a: Action) => world.act(a),
+          state: () => world.state(), rooms: () => world.rooms(),
+          bringToFront: (k: Parameters<typeof world.bringToFront>[0], s?: Parameters<typeof world.bringToFront>[1]) => world.bringToFront(k, s),
+          drainTrace: () => { const t = world.drainTrace(); trace.push(t); return t },
+        }
+        return { world, w, trace, rooms }
+      }
+      // 2 CU a step, a sleep every 5, a carry decision every 50 steps, no checkups. The first life is stopped (a reload)
+      // at step 57: its checkpoint is the one at step 55, after the carry at step 50.
+      const LIFE = { lifetimeCU: 240, sleepInterval: 5, caregiver: CARE }
+      const firstLife = async (idb: IDBFactory, events: SessionEvent[]) => {
+        const t = tracedWorld()
+        await expect(grow(idb, { checkups: false, cfg: LIFE, deps: { world: t.w, onEvent: e => events.push(e), onTick: ({ steps }) => { if (steps === 57) throw new Error("reload") } } })).rejects.toThrow("reload")
+        const c = (await loadCheckpoint(idb, ID))!
+        expect(c.steps).toBe(55)
+        return { ...t, cp: c }
+      }
+
+      it("a resumed life starts in its checkpoint's room", async () => {
+        const idb = new IDBFactory()
+        const events: SessionEvent[] = []
+        const first = await firstLife(idb, events)
+        const carried = events.flatMap(e => (e.type === "carried" ? [e] : []))
+        expect(carried.map(e => e.steps)).toEqual([50])
+        expect(first.world.state().room).toBe(carried[0]!.to)
+        expect(carried[0]!.to).not.toBe("crib") // non-vacuous: a fresh world starts in the crib
+        expect(first.cp.world).toEqual({ room: carried[0]!.to })
+        // Resume on a fresh world (in the crib): before the first step, it is in the checkpoint's room.
+        const second = tracedWorld()
+        expect(second.world.state().room).toBe("crib")
+        let atFirstStep: string | undefined
+        const inner = stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 } })
+        const createLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+          const l = await inner(init)
+          return { ...l, step: async o => { atFirstStep ??= second.world.state().room; return l.step(o) } }
+        }
+        await grow(idb, { checkups: false, cfg: LIFE, deps: { world: second.w, createLearner } })
+        expect(atFirstStep).toBe(carried[0]!.to)
+        expect(second.rooms[0]).toBe(carried[0]!.to)
+      })
+
+      it("the restore is not a carry and not a learner switch", async () => {
+        const idb = new IDBFactory()
+        const events: SessionEvent[] = []
+        const first = await firstLife(idb, events)
+        const room = first.cp.world!.room
+        const { calls, inits, createLearner } = spyFactory(stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 } }))
+        const second = tracedWorld()
+        const resumed: SessionEvent[] = []
+        await grow(idb, { checkups: false, cfg: LIFE, deps: { world: second.w, createLearner, onEvent: e => { events.push(e); resumed.push(e) } } })
+        // No carried event for it: the resumed run's carries are the caregiver's own, on its period (step 100).
+        expect(resumed.filter(e => e.type === "carried").map(e => (e as Extract<SessionEvent, { type: "carried" }>).steps)).toEqual([100])
+        // The files' carries and to are the carried events, once each: the restored room is in neither.
+        const carried = events.flatMap(e => (e.type === "carried" ? [e] : []))
+        const logs = await logsOf(idb)
+        expect(logs.reduce((a, f) => a + f.caregiver!.carries + (f.caregiver!.lostCarries ?? 0), 0)).toBe(carried.length)
+        const to: Record<string, number> = {}
+        for (const f of logs) for (const [k, n] of Object.entries(f.caregiver!.to)) to[k] = (to[k] ?? 0) + n
+        const byRoom: Record<string, number> = {}
+        for (const e of carried) byRoom[e.to] = (byRoom[e.to] ?? 0) + 1
+        expect(to).toEqual(byRoom)
+        // The next file (at step 64) holds the step-50 carry only, as it would without the reload.
+        const next = logs.find(f => f.stepsTotal === 64)!
+        expect(next.caregiver).toMatchObject({ carries: 1, to: { [room]: 1 } })
+        // The first drained trace of the resumed run has the restore as a focus with source harness, and no other focus.
+        const focus = second.trace.flat().filter(e => e.kind === "focus")
+        expect(second.trace[0]!.filter(e => e.kind === "focus")).toEqual([{ tick: 0, room, kind: "focus", source: "harness" }])
+        expect(focus.filter(e => e.source === "harness")).toHaveLength(1)
+        expect(focus.filter(e => e.source === "learner")).toHaveLength(0) // M6 counts these only
+        expect(focus.filter(e => e.source === "caregiver").map(e => e.room)).toEqual(resumed.flatMap(e => (e.type === "carried" ? [e.to] : [])))
+        // The learner was handed nothing but what it always is.
+        expect(inits.some(i => "state" in i)).toBe(true)
+        expectWall(calls, inits)
+        gateAccepts(logs)
+      })
+
+      it("a checkpoint without world (pre-04c) resumes where the world starts", async () => {
+        const idb = new IDBFactory()
+        const first = await firstLife(idb, [])
+        const { world: _w, ...old } = first.cp
+        void _w
+        expect(first.cp.world!.room).not.toBe("crib")
+        await saveCheckpoint(idb, old)
+        expect("world" in ((await readCheckpointRecord(idb, ID)) as object)).toBe(false)
+        const second = tracedWorld()
+        await grow(idb, { checkups: false, cfg: LIFE, deps: { world: second.w } })
+        expect(second.rooms[0]).toBe("crib")
+        expect(second.trace.flat().filter(e => e.kind === "focus" && e.source === "harness")).toEqual([])
+        gateAccepts(await logsOf(idb))
+      })
+
+      it("a checkpoint's room this world does not have is skipped, not an error", async () => {
+        const idb = new IDBFactory()
+        const first = await firstLife(idb, [])
+        const room = first.cp.world!.room
+        const kinds = createWorld({ seed: 7, canvas: canvas() }).rooms().filter(k => k !== room)
+        const world = createWorld({ seed: 7, canvas: canvas(), rooms: kinds })
+        const seen: string[] = []
+        await grow(idb, { checkups: false, cfg: LIFE, deps: { world, onTick: () => void seen.push(world.state().room) } })
+        expect(seen[0]).toBe(kinds[0])
+      })
+
+      it("an in-life restore brings the checkpoint's room back", async () => {
+        // 0.5 CU a step, a sleep every 10, carries decided at steps 50 and 100: skips from step 95 restore at 114 to the
+        // checkpoint at 90. Before the restore the test moves the world to another room than the checkpoint's.
+        const idb = new IDBFactory()
+        const t = tracedWorld()
+        let poisoned = true, justRestored = false
+        let back: Awaited<ReturnType<typeof loadCheckpoint>>
+        let before: string | undefined, after: string | undefined
+        const events: SessionEvent[] = []
+        await grow(idb, {
+          checkups: false,
+          cfg: { lifetimeCU: 64, sleepInterval: 10, caregiver: CARE }, stub: { cuPerStep: 0.5, skip: n => poisoned && n >= 95 },
+          deps: {
+            world: t.w,
+            onEvent: e => { events.push(e); if (e.type === "restored") { poisoned = false; justRestored = true } },
+            onTick: async ({ steps }) => {
+              if (steps === 113 && poisoned) { // the first time only: after the restore, step 113 comes again
+                back = await loadCheckpoint(idb, ID)
+                const other = t.world.rooms().find(k => k !== back!.world!.room)!
+                t.world.bringToFront(other)
+                before = other
+              }
+              if (justRestored) { justRestored = false; after = t.rooms.at(-1) }
+            },
+          },
+        })
+        expect(back!.steps).toBe(90)
+        expect(before).not.toBe(back!.world!.room)
+        expect(events.some(e => e.type === "restored")).toBe(true)
+        // The first frame after the restore was seen in the checkpoint's room.
+        expect(after).toBe(back!.world!.room)
+        const harness = t.trace.flat().filter(e => e.kind === "focus" && e.source === "harness")
+        expect(harness.map(e => e.room)).toEqual([back!.world!.room])
+        // Not a carry: the files' carries and lostCarries are the carried events, once each.
+        const logs = await logsOf(idb)
+        expect(logs.reduce((a, f) => a + f.caregiver!.carries + (f.caregiver!.lostCarries ?? 0), 0)).toBe(events.filter(e => e.type === "carried").length)
+        gateAccepts(logs)
+      })
     })
   })
 })

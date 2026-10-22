@@ -30,7 +30,7 @@ export interface TraceEvent {
   kind: "hover" | "click" | "respond" | "scroll" | "reveal" | "navigate" | "widget" | "focus"
   elementId?: string
   value?: number | string
-  source?: "learner" | "caregiver" // only on "focus"
+  source?: "learner" | "caregiver" | "harness" // only on "focus"
   interactive?: boolean // only, and always, on "hover" and "click"
   responsive?: boolean // only, and always, on "hover" and "click"
 }
@@ -59,7 +59,11 @@ export interface World extends WorldView {
   drainTrace(): TraceEvent[]
   state(): PrivilegedState
   rooms(): readonly RoomKind[] // taskbar order
-  bringToFront(kind: RoomKind): void // the caregiver "carries" the learner; emits focus/source "caregiver"
+  /**
+   * Brings a room to the front; emits focus with `source` (default "caregiver": the caregiver "carries" the learner;
+   * "harness": the harness restores a checkpoint's room on resume). Nothing when the room is already in front.
+   */
+  bringToFront(kind: RoomKind, source?: "caregiver" | "harness"): void
 }
 
 export type { Context2DLike }
@@ -180,7 +184,7 @@ export function createWorld(opts: {
     slot.sawInside = here
   }
 
-  const focus = (i: number, source: "learner" | "caregiver") => {
+  const focus = (i: number, source: "learner" | "caregiver" | "harness") => {
     active = i
     const t: TraceEvent = { tick, room: slots[i]!.kind, kind: "focus", source }
     if (source === "learner") t.elementId = taskbarId(slots[i]!.kind)
@@ -299,11 +303,12 @@ export function createWorld(opts: {
 
     rooms: () => [...kinds],
 
-    bringToFront(kind: RoomKind) {
+    bringToFront(kind: RoomKind, source: "caregiver" | "harness" = "caregiver") {
+      if (source !== "caregiver" && source !== "harness") throw new RangeError(`bringToFront: unknown source "${String(source)}"`)
       const i = kinds.indexOf(kind)
       if (i < 0) throw new RangeError(`room "${kind}" is not in this world`)
       if (i !== active) {
-        focus(i, "caregiver")
+        focus(i, source)
         checkHover() // the element now under the cursor gets its hover trace this tick
       }
     },

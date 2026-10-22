@@ -46,8 +46,16 @@ export interface Checkpoint<S = LearnerState> {
   checkups?: { lastLevel: number; tail: CheckupResult[]; suiteVersion?: number }
   /** The caregiver's state, when the life has one. Absent in older checkpoints (and lives without one). */
   caregiver?: CaregiverState
+  /**
+   * The world as the save left it (decision 0017): the room in front (WORLD_ROOM_RE), restored on resume and on a
+   * restore. Absent in checkpoints written before it and in lives whose world has no state().
+   */
+  world?: { room: string }
   learnerState: S
 }
+
+/** A room kind as a checkpoint stores it. */
+export const WORLD_ROOM_RE = /^[a-z]{1,16}$/
 
 const isNonNegInt = (v: unknown) => Number.isInteger(v) && (v as number) >= 0
 const isNonNeg = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0
@@ -77,6 +85,10 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e))
     }
+  }
+  if (r.world !== undefined) {
+    const w = r.world
+    if (!isRec(w) || !onlyKeys(w, ["room"]) || !(typeof w.room === "string" && WORLD_ROOM_RE.test(w.room))) fail("world must be { room } with room matching /^[a-z]{1,16}$/")
   }
   if (!("learnerState" in r)) fail("no learnerState")
 }

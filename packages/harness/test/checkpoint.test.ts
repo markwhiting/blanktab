@@ -28,6 +28,20 @@ describe("checkpoints", () => {
     await expect(loadCheckpoint(idb, A)).rejects.toThrow(/codeSha/)
   })
 
+  it("world.room is optional, matches /^[a-z]{1,16}$/; 'Toys', '' and 1 are RangeError", async () => {
+    const idb = new IDBFactory()
+    await saveCheckpoint(idb, cp(A, 1))
+    expect((await loadCheckpoint(idb, A))!.world).toBeUndefined()
+    for (const room of ["toys", "a", "a".repeat(16)]) {
+      await saveCheckpoint(idb, { ...cp(A, 1), world: { room } })
+      expect((await loadCheckpoint(idb, A))!.world).toEqual({ room })
+    }
+    for (const world of [{ room: "Toys" }, { room: "" }, { room: 1 }, { room: "a".repeat(17) }, {}, { room: "toys", x: 1 }, "toys", null]) {
+      await saveCheckpoint(idb, { ...cp(A, 1), world: world as unknown as { room: string } })
+      await expect(loadCheckpoint(idb, A), JSON.stringify(world)).rejects.toThrow(RangeError)
+    }
+  })
+
   it("hasCheckpoint says whether a learner has one, without reading it", async () => {
     const idb = new IDBFactory()
     expect(await hasCheckpoint(idb, A)).toBe(false)

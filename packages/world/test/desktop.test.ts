@@ -187,6 +187,22 @@ describe("desktop: taskbar", () => {
     expect(w.drainTrace()).toEqual([])
     expect(() => w.bringToFront("places")).toThrow(RangeError)
   })
+  it("bringToFront(kind, 'harness') emits focus with source harness and no elementId; the default source stays caregiver; an M6 trace with it counts 0", () => {
+    const { w } = two()
+    moveTo(w, 1, 1)
+    w.drainTrace()
+    w.bringToFront("toys", "harness")
+    expect(w.state().room).toBe("toys")
+    const t = w.drainTrace()
+    expect(t).toEqual([{ tick: w.tick, room: "toys", kind: "focus", source: "harness" }])
+    // M6's rule (packages/harness/src/milestones/m6.ts): only focus events with source "learner" count.
+    expect(t.filter(e => e.kind === "focus" && e.source === "learner")).toHaveLength(0)
+    w.bringToFront("crib")
+    expect(w.drainTrace()).toEqual([{ tick: w.tick, room: "crib", kind: "focus", source: "caregiver" }])
+    // Only the learner's own taskbar click makes a "learner" focus.
+    expect(() => w.bringToFront("toys", "learner" as never)).toThrow(RangeError)
+    expect(w.state().room).toBe("crib")
+  })
 })
 
 describe("desktop: input routing", () => {

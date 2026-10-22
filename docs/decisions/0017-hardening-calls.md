@@ -31,6 +31,11 @@ Plan 04c fixes problems deferred from Plans 04a–04b: robustness, record-keepin
 - **Rejected: deferring the actor-critic read to the next step.** It would save another round trip, but it shifts `consecutiveSkips` (which drives the restore after 20 skips), `cu` and `onUpdate` by one step. That is not bit-identical at the harness level, so it is not done.
 - **The live speed cap stays 30 steps/s.** A live run can show the gain only up to the cap; the uncapped harness above is the real measure. *(Controller's resolution.)*
 
+### World continuity (Task 5)
+- **A resumed learner wakes up in the room it was in.** A checkpoint records `world: { room }`, the room in front at the save (`/^[a-z]{1,16}$/`; absent in older checkpoints and in worlds without `state()`). On a resume (a reload, an adoption, a GPU-loss rerun) and on an in-life restore, the harness brings that room to the front before the next observation. The learner's checkpointed last frame was seen there, so the first resumed transition stays in the same world.
+- **Labelled `source: "harness"`.** It goes through `World.bringToFront(kind, "harness")`, a `focus` trace event with `source: "harness"` (the default source stays `"caregiver"`). Neither the learner nor the caregiver chose it. It is not a carry: the caregiver is not called, no `carried` event is emitted and no count in a log file changes. It is not a learner switch: M6 counts only `source: "learner"`.
+- **What is not restored:** the cursor and the rooms' own state (scroll, pages, widgets). They are re-created from the seed, as before. A checkpoint without `world`, or with a room the world does not have, resumes where the world starts (skipped, not an error).
+
 ### Resolutions the controller made for later tasks (recorded here; those tasks add their own lines)
 - **Folder ownership.** A `data/runs/<learnerId>/` folder that only direct pushes have changed is unbound until a PR merges. The author of the first merged PR claims it.
 - **Orphaned checkpoints.** A stale or surplus orphan gets a final log file, as a failed life does; its record does not end on a non-final file.
