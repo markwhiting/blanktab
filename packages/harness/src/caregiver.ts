@@ -119,7 +119,7 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
     ? structuredClone(init.state)
     : { version: 1, settings: init.settings, rng: rng.getState(), rooms: {}, sinceDecision: 0, stuckFor: 0, m6Streak: 0, safetyNet: false, carries: 0, to: {} }
   st.settings = clampCaregiverSettings(st.settings) // tau 0 etc. must not reach the softmax
-  
+
   /** Learning progress per room; an unvisited room is as promising as the best visited one (0 if none is visited). */
   function progress(rooms: readonly string[]): number[] {
     const visited = Object.values(st.rooms).map(learningProgress)

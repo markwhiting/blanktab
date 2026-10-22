@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 import { BUILD_INPUTS, buildManifest, codeShaOf, computeKnowledgeSha, resolveCodeSha } from "../manifest.ts"
 
@@ -37,12 +38,12 @@ describe("computeKnowledgeSha", () => {
 })
 
 describe("the committed knowledge directory", () => {
-  it("adding caregiver-prior.json changes computeKnowledgeSha (expected: one boundary log per running tab)", () => {
-    writeFileSync(join(dir, "settings-space.json"), "S")
-    writeFileSync(join(dir, "consolidation-prior.json"), "C")
-    const without = computeKnowledgeSha(dir)
-    writeFileSync(join(dir, "caregiver-prior.json"), readFileSync(new URL("../../../knowledge/caregiver-prior.json", import.meta.url), "utf8"))
-    expect(computeKnowledgeSha(dir)).not.toBe(without)
+  it("the committed knowledge/caregiver-prior.json is a hashed prior", () => {
+    const committed = fileURLToPath(new URL("../../../knowledge", import.meta.url))
+    cpSync(committed, dir, { recursive: true })
+    const withIt = computeKnowledgeSha(dir)
+    rmSync(join(dir, "caregiver-prior.json"))
+    expect(computeKnowledgeSha(dir)).not.toBe(withIt)
   })
 })
 

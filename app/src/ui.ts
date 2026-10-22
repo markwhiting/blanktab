@@ -3,7 +3,7 @@ import { FOVEA, PERIPHERY } from "@blanktab/interface"
 import { REPO, type CheckupResult, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
 import { appendPoints, fitCanvas, ownStreamText, ratioText, sparkline } from "./curve"
 import { appendCheckups, milestoneBars, milestoneText } from "./milestones"
-import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
+import { HISTORY_COLUMNS, buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel)
@@ -140,14 +140,11 @@ function renderHistory(k: Knowledge): void {
     const tr = document.createElement("tr")
     const a = document.createElement("a")
     a.href = r.href; a.textContent = r.learnerId; a.target = "_blank"; a.rel = "noopener noreferrer"
-    const cells: [string, string | Node][] = [
-      ["Learner", a], ["Steps", r.steps], ["CU", r.cu], ["Held-out ratio", r.heldOutRatio], ["Own-stream ratio", r.lossRatio], ["Milestones", r.milestones],
-      ["Final", r.final],
-      ["Setting", r.setting], ["Host", r.host],
-    ]
-    for (const [i, [label, c]] of cells.entries()) {
+    const values: (string | Node)[] = [a, r.steps, r.cu, r.heldOutRatio, r.lossRatio, r.milestones, r.final, r.setting, r.host]
+    for (const [i, c] of values.entries()) {
+      const { label, numeric } = HISTORY_COLUMNS[i]!
       const td = document.createElement("td")
-      if (i >= 1 && i <= 4) td.className = "num"
+      if (numeric) td.className = "num"
       td.dataset.label = label // the stacked mobile layout shows it
       td.append(c)
       tr.append(td)
@@ -200,10 +197,19 @@ export function createUi(): Ui {
   let curve: CurvePoint[] = []
   let checkups: CheckupResult[] = []
   // Charts are not drawn while their tab is hidden (they have no size then): drawn again when it is shown.
-  setupTabs(() => {
+  const redraw = () => {
     drawCurve(curveCanvas, curve)
     drawMilestones(milestonesCanvas, checkups)
+  }
+  setupTabs(redraw)
+  // A resize changes the canvases' CSS boxes: redraw at the new size (coalesced to one frame; a hidden canvas has no size and is skipped).
+  let frame = 0
+  const ro = new ResizeObserver(() => {
+    if (frame) return
+    frame = requestAnimationFrame(() => { frame = 0; redraw() })
   })
+  ro.observe(curveCanvas)
+  ro.observe(milestonesCanvas)
   renderStatic()
 
   return {

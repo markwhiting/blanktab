@@ -3,12 +3,10 @@ import { createHash } from "node:crypto"
 import { readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS } from "@blanktab/interface"
-import type { Action } from "@blanktab/interface"
-import { createCpuBackend, createRng } from "@blanktab/tensor"
+import { createCpuBackend } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, createLearner } from "../src/learner"
-import type { HeldOutSet, UpdateInfo } from "../src/learner"
-import { createSyntheticStream } from "./synthetic"
+import type { UpdateInfo } from "../src/learner"
+import { createSyntheticStream, heldOutSet } from "./synthetic"
 
 // Pins the learner's CPU trajectory (Plan 04c Task 2): the fixture was recorded on the learner code from before the
 // step-speed change (5658165), and any later change that is meant to leave learning untouched must keep this hash.
@@ -17,20 +15,6 @@ import { createSyntheticStream } from "./synthetic"
 const FIXTURE = fileURLToPath(new URL("./fixtures/golden-cpu.json", import.meta.url))
 const STEPS = 400
 const SLEEP_EVERY = 100
-
-/** The GPU parity test's held-out recipe (test/gpu/learning.gpu.test.ts heldOutSet). */
-function heldOutSet(): HeldOutSet {
-  const w = createSyntheticStream({ start: { x: 60, y: 60 } })
-  const rnd = createRng(5)
-  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
-  const obs = [w.observe()]
-  const actions: Action[] = []
-  for (let i = 0; i < 16; i++) {
-    const a = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
-    w.act(a); actions.push(a); obs.push(w.observe())
-  }
-  return { obs, actions }
-}
 
 /** Feeds numbers to the hash as float64 bytes (so NaN, −0 and every last bit count). */
 function numbers(h: ReturnType<typeof createHash>, xs: number[]) {

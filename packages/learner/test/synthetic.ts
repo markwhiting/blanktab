@@ -1,5 +1,8 @@
 import { FOVEA, PERIPHERY, WORLD, decodeMove, emptyObservation } from "@blanktab/interface"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS } from "@blanktab/interface"
 import type { Action, Observation } from "@blanktab/interface"
+import { createRng } from "@blanktab/tensor"
+import type { HeldOutSet } from "../src/learner"
 
 /** Side of the bright block, in screen (world) pixels: 2x2 periphery pixels, one 40x25 target cell. */
 export const BLOCK = 8
@@ -54,4 +57,18 @@ export function createSyntheticStream(opts: { background?: number; block?: numbe
   }
 
   return { observe, act }
+}
+
+/** A held-out trajectory of the synthetic stream under uniformly random actions (decision 0015 §3); shared by the GPU parity and golden tests. */
+export function heldOutSet(): HeldOutSet {
+  const w = createSyntheticStream({ start: { x: 60, y: 60 } })
+  const rnd = createRng(5)
+  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
+  const obs = [w.observe()]
+  const actions: Action[] = []
+  for (let i = 0; i < 16; i++) {
+    const a = { move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) }
+    w.act(a); actions.push(a); obs.push(w.observe())
+  }
+  return { obs, actions }
 }

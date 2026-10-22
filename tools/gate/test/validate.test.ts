@@ -321,7 +321,7 @@ describe("validateSessionPr v2: the held-out check's optional fields (decision 0
     expect(errs([file(logV2(1))], [logV2(0)]).ok).toBe(true)
   })
 })
-const msg = (r: { errors: string[] }) => r.errors.join("\n")
+const joined = (r: { errors: string[] }) => r.errors.join("\n")
 describe("validateSessionPr v2: checkups (decision 0016)", () => {
   const ck = (level: number) => ({ level, steps: 10, passed: ["M1"], measures: { M1: 1, M2: null, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0.01 })
   const withCk = (seq: number, levels: number[], over: Partial<LogFileV2> = {}) =>
@@ -331,19 +331,19 @@ describe("validateSessionPr v2: checkups (decision 0016)", () => {
     expect(errs([file(withCk(1, []))], [withCk(0, [64])]).ok).toBe(true)
   })
   it("checkup levels strictly increase across the files on main and the PR", () => {
-    expect(msg(errs([file(withCk(1, [64]))], [withCk(0, [64])]))).toContain("checkup level 64 is not above 64")
-    expect(msg(errs([file(withCk(0, [64])), file(withCk(1, [64]))]))).toContain("checkup level 64 is not above 64")
-    expect(msg(errs([file(withCk(1, [32]))], [withCk(0, [64])]))).toContain("checkup level 32 is not above 64")
+    expect(joined(errs([file(withCk(1, [64]))], [withCk(0, [64])]))).toContain("checkup level 64 is not above 64")
+    expect(joined(errs([file(withCk(0, [64])), file(withCk(1, [64]))]))).toContain("checkup level 64 is not above 64")
+    expect(joined(errs([file(withCk(1, [32]))], [withCk(0, [64])]))).toContain("checkup level 32 is not above 64")
   })
   it("a file's checkups fit in its own evalCU increase over the file before (on main or in the PR), within 1e-9 relative", () => {
     // Each checkup costs 0.01; withCk files rise by 1 evalCU a file.
     const over = (seq: number, ev: number, levels = [64, 128]) => withCk(seq, levels, { evalCU: ev })
-    expect(msg(errs([file(over(1, 1.015))], [over(0, 1, [32])]))).toContain("checkups' evalCU (0.02) exceeds this file's evalCU increase")
-    expect(msg(errs([file(over(0, 1, [32])), file(over(1, 1.015))]))).toContain("exceeds this file's evalCU increase")
+    expect(joined(errs([file(over(1, 1.015))], [over(0, 1, [32])]))).toContain("checkups' evalCU (0.02) exceeds this file's evalCU increase")
+    expect(joined(errs([file(over(0, 1, [32])), file(over(1, 1.015))]))).toContain("exceeds this file's evalCU increase")
     expect(errs([file(over(1, 1.02))], [over(0, 1, [32])]).ok).toBe(true) // exactly its increase
     expect(errs([file(over(1, 1 + 0.02 * (1 - 1e-12)))], [over(0, 1, [32])]).ok).toBe(true) // float noise
     // The file before is what counts, not the first: a big earlier increase cannot pay for a later file's checkups.
-    expect(msg(errs([file(over(1, 5, [32])), file(over(2, 5.01))], [over(0, 1, [])]))).toContain("exceeds this file's evalCU increase")
+    expect(joined(errs([file(over(1, 5, [32])), file(over(2, 5.01))], [over(0, 1, [])]))).toContain("exceeds this file's evalCU increase")
     // A previous file without evalCU: nothing to compare with (the parser still bounds checkups by the file's evalCU).
     expect(errs([file(over(1, 0.02))], [logV2(0, { cu: 1000, stepsTotal: 400_000 })]).ok).toBe(true)
   })
@@ -358,7 +358,7 @@ describe("validateSessionPr v2: caregiver.lostCarries (Plan 04c)", () => {
     for (const bad of [0, -1, 1.5, "2", null]) {
       const r = errs([file(cg(0, { carries: 0, to: {}, safetyNet: false, lostCarries: bad }))])
       expect(r.ok, String(bad)).toBe(false)
-      expect(msg(r)).toContain("lostCarries")
+      expect(joined(r)).toContain("lostCarries")
     }
   })
 })

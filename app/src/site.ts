@@ -30,6 +30,13 @@ export interface HistoryRow {
   milestones: string
 }
 
+/** The HISTORY table's columns in order (the <th> texts of index.html); the numeric ones are right-aligned. Milestones is text. */
+export const HISTORY_COLUMNS: readonly { label: string; numeric: boolean }[] = [
+  { label: "Learner", numeric: false }, { label: "Steps", numeric: true }, { label: "CU", numeric: true },
+  { label: "Held-out ratio", numeric: true }, { label: "Own-stream ratio", numeric: true }, { label: "Milestones", numeric: false },
+  { label: "Final", numeric: false }, { label: "Setting", numeric: false }, { label: "Host", numeric: false },
+]
+
 const orDash = (v: number | null | undefined) => (typeof v === "number" ? fmt(v) : "—")
 
 /**

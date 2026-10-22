@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import type { SessionRow } from "@blanktab/harness"
-import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "../src/site"
+import { HISTORY_COLUMNS, buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "../src/site"
 
 const REPO = { owner: "markwhiting", name: "learner" } as const
 const row = (id: string, seen: number, over: Partial<SessionRow> = {}): SessionRow => ({
@@ -83,5 +85,15 @@ describe("buildLabel", () => {
   })
   it("a dev build links to the repo", () => {
     expect(buildLabel("dev", time, REPO)).toEqual({ text: "dev built 2026-10-20 01:45 UTC", href: "https://github.com/markwhiting/learner" })
+  })
+})
+
+describe("HISTORY_COLUMNS", () => {
+  it("the labels equal app/index.html's HISTORY <th> texts, in order; numeric exactly Steps, CU, Held-out ratio, Own-stream ratio", () => {
+    const html = readFileSync(join(__dirname, "../index.html"), "utf8")
+    const head = html.match(/<thead><tr>(<th[^>]*>[^<]*<\/th>)+<\/tr><\/thead>/)![0]
+    const ths = [...head.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map(m => m[1])
+    expect(HISTORY_COLUMNS.map(c => c.label)).toEqual(ths)
+    expect(HISTORY_COLUMNS.filter(c => c.numeric).map(c => c.label)).toEqual(["Steps", "CU", "Held-out ratio", "Own-stream ratio"])
   })
 })

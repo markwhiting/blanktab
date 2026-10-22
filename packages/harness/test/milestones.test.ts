@@ -10,6 +10,7 @@ import {
 import { MILESTONE_IDS, MILESTONE_SUITE_VERSION } from "../src/log"
 import { uniformAction } from "../src/heldout"
 import { M2_MIN_IN_VIEW, M5_MIN_PAGES, M5_REFERENCE_CLICKERS, MILESTONES_V1, YIELD_EVERY, recordRun, type CheckupTrace, type Milestone, type MilestoneId, type Policy } from "../src/milestones"
+import { distinctPages } from "../src/milestones/m5"
 
 const canvas = () => createCanvas(WORLD.width, WORLD.height)
 const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i])
@@ -61,7 +62,6 @@ function findPoint(room: Room, ok: (info: ReturnType<Room["inspect"]>) => boolea
 const ICON_Y = WORLD.height - TASKBAR_HEIGHT + 2 + 6
 const iconAt = (i: number) => ({ x: 4 + i * 16 + 6, y: ICON_Y })
 
-const distinct = (t: CheckupTrace) => new Set([t.initial.page, ...t.states.map(s => s.page)]).size
 /** Depth-first over the site: an unvisited link on this page, else Back. */
 function explorer(seed: number): (w: World) => Policy {
   const links = (twinRoom(seed, "places") as PlacesRoom).links()
@@ -282,7 +282,7 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
       if (seed <= 3) expect(m.reference!(seed, canvas())).toBe(ref) // deterministic: a fresh computation agrees
       expect(ref).toBeGreaterThanOrEqual(1)
       const dfs = await run(m, seed, explorer(seed))
-      const pages = distinct(dfs.trace)
+      const pages = distinctPages(dfs.trace)
       expect(pages, `seed ${seed}`).toBeGreaterThanOrEqual(M5_MIN_PAGES)
       expect(judge(m, dfs.trace, ref).passed, `seed ${seed}: ${pages} pages, ref ${ref}`).toBe(true)
     }
@@ -295,7 +295,7 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
       for (let j = 0; j < M5_REFERENCE_CLICKERS; j++) {
         const rnd = createRng(hashSeed(seed, `random-clicker/${j}`))
         const { trace } = await run(m, seed, () => () => uniformAction(rnd))
-        sum += distinct(trace)
+        sum += distinctPages(trace)
         if (judge(m, trace, ref).passed) lucky++
       }
       expect(sum / M5_REFERENCE_CLICKERS).toBe(ref)
@@ -307,7 +307,7 @@ describe("milestones v1 (decision 0016)", { timeout: 300_000 }, () => {
     const m = byId("M5")
     const seed = 1, link = (twinRoom(seed, "places") as PlacesRoom).links()["p0"]![0]!
     const { trace } = await run(m, seed, w => scripted(w, (_, n) => (n < 1 ? { x: link.x + 1, y: link.y + 2, click: true } : null)), 60)
-    expect(distinct(trace)).toBe(2)
+    expect(distinctPages(trace)).toBe(2)
     expect(m.measure(trace, NO_STATS, 1)).toBe(2)
     expect(m.passes(trace, NO_STATS, 1)).toBe(false)
   })

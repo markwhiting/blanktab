@@ -611,6 +611,22 @@ test("growing up: a 'Has it grown up?' panel with no checkup yet, a caregiver li
   expect(errors).toEqual([])
 })
 
+test("charts redraw on resize: the curve and milestones canvases' width attributes follow a viewport change from 1280 to 700 px wide", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto(LONG)
+  await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  const widths = () => page.evaluate(() => ["curve", "milestones"].map(id => {
+    const c = document.querySelector<HTMLCanvasElement>(`[data-testid="${id}"]`)!
+    return { attr: c.width, css: c.clientWidth }
+  }))
+  const wide = await widths()
+  expect(wide.map(w => w.attr === w.css && w.css > 0)).toEqual([true, true]) // a 1x display: one canvas pixel per CSS pixel
+  // (the layout is one column below ~760 px, so the charts get wider, not narrower: either way the width attribute must follow)
+  await page.setViewportSize({ width: 700, height: 800 })
+  await expect.poll(async () => (await widths()).map(w => w.attr === w.css && w.css > 0 && w.css !== wide[0]!.css)).toEqual([true, true])
+})
+
 test.describe("on a 2x display", () => {
   test.use({ deviceScaleFactor: 2 })
   test("charts drawn while LEARNER is hidden keep their size, and are drawn again when it is shown", async ({ page }) => {
