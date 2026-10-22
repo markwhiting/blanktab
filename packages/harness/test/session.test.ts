@@ -1479,6 +1479,122 @@ describe("session v2", { timeout: 60_000 }, () => {
       gateAccepts(logs)
     })
 
+    describe("a save or log write that fails after the caregiver's summary was taken (fix round 1)", () => {
+      // 0.125 CU a step, the default 300 s throttle: saves only at the crossings (8, 16, 32 CU at steps 64, 128, 256).
+      const careLife = (idb: IDBFactory, events: SessionEvent[], stub: Partial<StubOpts> = {}) => grow(idb, {
+        checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE, checkpointEveryMs: undefined },
+        stub: { cuPerStep: 0.125, ...stub }, deps: { onEvent: e => events.push(e) },
+      })
+      it("learner.save throws (not recoverable) during a crossing's save: the carries since the checkpoint are lost carries, none vanish", async () => {
+        const idb = new IDBFactory()
+        const events: SessionEvent[] = []
+        // The 32 CU file at step 256 takes the caregiver's summary, then its checkpoint's learner.save throws.
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+        await expect(careLife(idb, events, { onSave: steps => { if (steps === 256) throw new Error("save failed") } })).rejects.toThrow("save failed")
+        expect(errors).not.toHaveBeenCalled() // the final file was written
+        errors.mockRestore()
+        const lost = events.filter(e => e.type === "carried" && e.steps > 128).length
+        expect(lost).toBeGreaterThan(0)
+        const logs = await logsOf(idb)
+        expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 128, caregiver: { lostCarries: lost } })
+        expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+        gateAccepts(logs)
+      })
+      it("queue.put of the final log throws: the failed life's final file holds the carries since the checkpoint as lost carries", async () => {
+        const idb = new IDBFactory()
+        const events: SessionEvent[] = []
+        const add = FakeObjectStore.prototype.add
+        let failed = false
+        FakeObjectStore.prototype.add = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+          if (!failed && this.name === "outbox" && (value as { file: { final: boolean; stepsTotal: number } }).file.stepsTotal === 512) {
+            failed = true
+            throw new DOMException("the disk is full", "QuotaExceededError")
+          }
+          return add.call(this, value, key)
+        } as typeof add
+        try {
+          await expect(careLife(idb, events)).rejects.toMatchObject({ name: "QuotaExceededError" })
+        } finally {
+          FakeObjectStore.prototype.add = add
+        }
+        expect(failed).toBe(true)
+        const lost = events.filter(e => e.type === "carried" && e.steps > 256).length
+        expect(lost).toBeGreaterThan(0)
+        const logs = await logsOf(idb)
+        expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 256, caregiver: { carries: 0, lostCarries: lost } })
+        expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+        gateAccepts(logs)
+      })
+      it("a learner too broken to report its stats: the carries since the checkpoint are still lost carries", async () => {
+        const idb = new IDBFactory()
+        const events: SessionEvent[] = []
+        const inner = stubFactory({ cuPerStep: 0.125 })
+        let broken = false
+        const createLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+          const l = await inner(init)
+          return { ...l, stats: () => { if (broken) throw new Error("stats broken"); return l.stats() }, step: async o => {
+            if (l.stats().steps === 254) { broken = true; throw new Error("boom") }
+            return l.step(o)
+          } }
+        }
+        await expect(grow(idb, {
+          checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE, checkpointEveryMs: undefined },
+          deps: { createLearner, onEvent: e => events.push(e) },
+        })).rejects.toThrow("boom")
+        const lost = events.filter(e => e.type === "carried" && e.steps > 128).length
+        expect(lost).toBeGreaterThan(0)
+        const logs = await logsOf(idb)
+        expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 128, caregiver: { lostCarries: lost } })
+        expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
+      })
+    })
+
+    it("a checkpoint whose tail lacks the learner's evalCU is never written: the save fails, the life ends on its last good checkpoint", async () => {
+      // 2 CU a step, a sleep every 5: the 8 CU file and its checkpoint at step 4; the 8 CU checkup at step 5, whose save
+      // would hold a tail with a learner state without evalCU.
+      const inner = stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 } })
+      const createLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+        const l = await inner(init)
+        return { ...l, save: async () => { const st = (await l.save()) as unknown as StubState; delete (st.stats as Partial<LearnerStats>).evalCU; return st as unknown as LearnerState } }
+      }
+      const idb = new IDBFactory()
+      const saved: unknown[] = []
+      const put = FakeObjectStore.prototype.put
+      FakeObjectStore.prototype.put = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === "checkpoints") saved.push(value)
+        return put.call(this, value, key)
+      } as typeof put
+      try {
+        await expect(grow(idb, { deps: { createLearner } })).rejects.toThrow("checkups.tail without the learner's evalCU")
+      } finally {
+        FakeObjectStore.prototype.put = put
+      }
+      expect(saved.length).toBeGreaterThan(0)
+      for (const c of saved as { checkups?: { tail: unknown[] } }[]) expect(c.checkups!.tail).toEqual([]) // none with a tail was stored
+      const logs = await logsOf(idb)
+      expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 4 })
+      gateAccepts(logs)
+    })
+
+    it("a failed life's final log that cannot be written is reported on console.error, not silently dropped", async () => {
+      const idb = new IDBFactory()
+      const add = FakeObjectStore.prototype.add
+      FakeObjectStore.prototype.add = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === "outbox" && (value as { file: { final: boolean } }).file.final) throw new DOMException("the disk is full", "QuotaExceededError")
+        return add.call(this, value, key)
+      } as typeof add
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await expect(grow(idb, { stub: { throwAt: { steps: 7, error: new Error("boom") } } })).rejects.toThrow("boom")
+        expect(errors).toHaveBeenCalledTimes(1)
+        expect(String(errors.mock.calls[0]![0])).toContain("final log was not written")
+        expect(errors.mock.calls[0]![1]).toMatchObject({ name: "QuotaExceededError" })
+      } finally {
+        FakeObjectStore.prototype.add = add
+        errors.mockRestore()
+      }
+    })
+
     it("no checkup runs while the tail holds MAX_CHECKUPS_PER_FILE; the level runs after the next file", async () => {
       // 100 CU a step, a sleep every 5. A first run without checkups stops at step 22 (its checkpoint: step 21, 2100 CU).
       const idb = new IDBFactory()

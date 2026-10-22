@@ -68,7 +68,8 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (r.codeSha !== undefined && !(typeof r.codeSha === "string" && CODE_SHA_RE.test(r.codeSha))) fail("codeSha must be 40 lowercase hex chars or \"dev\"")
   if (r.checkups !== undefined) {
     checkCheckups(r.checkups, r.cu as number, r.steps as number, fail)
-    checkTailEvalCU(r.checkups as { tail: unknown[] }, r.learnerState, fail)
+    const e = tailEvalCUError(r.checkups as { tail: unknown[] }, r.learnerState)
+    if (e) fail(e)
   }
   if (r.caregiver !== undefined) {
     try {
@@ -98,12 +99,13 @@ function checkCheckups(v: unknown, cu: number, steps: number, fail: (what: strin
 
 /**
  * A non-empty tail is billed inside the learner's evalCU (a failed life's final file carries both), so the learner
- * state must have one: stats.evalCU, a finite number >= 0. Holds for the stored (packed) state and the unpacked one.
+ * state must have one: stats.evalCU, a finite number >= 0. Null if it holds, else what is wrong. Holds for the stored
+ * (packed) state and the unpacked one. Checked on load and, by the session, before a checkpoint is written.
  */
-function checkTailEvalCU(checkups: { tail: unknown[] }, learnerState: unknown, fail: (what: string) => void): void {
-  if (checkups.tail.length === 0) return
+export function tailEvalCUError(checkups: { tail: readonly unknown[] }, learnerState: unknown): string | null {
+  if (checkups.tail.length === 0) return null
   const stats = isRec(learnerState) && isRec(learnerState.stats) ? learnerState.stats : undefined
-  if (!isNonNeg(stats?.evalCU)) fail("checkups.tail without the learner's evalCU")
+  return isNonNeg(stats?.evalCU) ? null : "checkups.tail without the learner's evalCU"
 }
 
 /**
@@ -204,7 +206,8 @@ export async function fromRecord<S = LearnerState>(c: unknown, learnerId: string
   } catch (e) {
     throw new RangeError(`checkpoint for ${learnerId}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
   }
-  if (c.checkups) checkTailEvalCU(c.checkups, learnerState, what => { throw new RangeError(`checkpoint for ${learnerId}: ${what}`) })
+  const tailError = c.checkups ? tailEvalCUError(c.checkups, learnerState) : null
+  if (tailError) throw new RangeError(`checkpoint for ${learnerId}: ${tailError}`)
   return { ...c, learnerState } as Checkpoint<S>
 }
 
