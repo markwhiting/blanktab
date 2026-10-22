@@ -1,5 +1,5 @@
 // Gate validator for session PRs. Runs in Node (GitHub Action) on PR files treated purely as data.
-import { parseLogFile, type LogFile } from "@blanktab/harness/log"
+import { EVAL_CU_TOLERANCE, parseLogFile, type LogFile } from "@blanktab/harness/log"
 
 export interface PrFile { path: string; content: string }
 
@@ -66,6 +66,9 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   for (const p of prevSorted) if (p.schemaVersion === 2) for (const k of MONOTONIC) lastV2[k] = Math.max(lastV2[k], p[k])
   let lastEvalCU = -Infinity
   for (const p of prevSorted) if (p.schemaVersion === 2 && p.evalCU !== undefined) lastEvalCU = Math.max(lastEvalCU, p.evalCU)
+  // The evalCU of the file just before (by seq; on main or earlier in this PR), undefined if it has none: a file's
+  // checkups are billed to its own increase over that (decision 0016), not to evalCU spent before.
+  let prevFileEvalCU = prevLast?.schemaVersion === 2 ? prevLast.evalCU : undefined
   // Checkup levels strictly increase across files (each file's own are checked by the parser): a level is checked once.
   let lastLevel = -Infinity
   for (const p of prevSorted) if (p.schemaVersion === 2) for (const c of p.checkups ?? []) lastLevel = Math.max(lastLevel, c.level)
@@ -95,6 +98,16 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
         if (c.level <= lastLevel) errors.push(`${path}: checkup level ${c.level} is not above ${lastLevel}`)
         lastLevel = Math.max(lastLevel, c.level)
       }
+      const billed = (log.checkups ?? []).reduce((a, c) => a + c.evalCU, 0)
+      if (billed > 0 && log.evalCU !== undefined && prevFileEvalCU !== undefined && Number.isFinite(prevFileEvalCU)) {
+        const increase = log.evalCU - prevFileEvalCU
+        if (billed - increase > EVAL_CU_TOLERANCE * Math.max(Math.abs(increase), billed)) {
+          errors.push(`${path}: checkups' evalCU (${billed}) exceeds this file's evalCU increase (${log.evalCU} - ${prevFileEvalCU} = ${increase})`)
+        }
+      }
+      prevFileEvalCU = log.evalCU
+    } else {
+      prevFileEvalCU = undefined
     }
   }
 
