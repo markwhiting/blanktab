@@ -2,7 +2,7 @@ import { BUTTON_OPTIONS, FOVEA, KEYS, isValidAction, MOVE_OPTIONS, PERIPHERY, PR
 import type { Action, Learner, Observation } from "@blanktab/interface"
 import {
   Adam, add, addScalar, backward, composite, createRng, disposeGraph, exp, gatherRows, logSoftmax, matmul, mse, mul,
-  neg, noGrad, reshape, scale, square, sum, tensor,
+  neg, noGrad, reshape, scale, settleAll, square, sum, tensor,
 } from "@blanktab/tensor"
 import type { AdamState, Backend, Tensor } from "@blanktab/tensor"
 import { ACTION_DIM, actionOneHot, copyLastBaseline, obsToInputs, targetsFromObs } from "./encode"
@@ -159,7 +159,7 @@ export interface TrainableLearner extends Learner {
    * no update, no RNG draw, not counted in stats.cu.
    */
   replayLoss(): Promise<number>
-  /** Every parameter's values, in checkpoint order (Model.params). */
+  /** Every parameter's values, in checkpoint order (Model.params). May run alongside a step; rejects after dispose. */
   readParams(): Promise<Float32Array[]>
   /** Opens a frozen run (see FrozenRun). Throws while one is open, while a step, sleep or save runs, or after dispose. */
   frozenRun(opts: FrozenRunOptions): FrozenRun
@@ -167,8 +167,8 @@ export interface TrainableLearner extends Learner {
   readonly replay: ReplayBuffer
   /**
    * Frees the learner (idempotent). Later calls reject "learner: used after dispose" at once; a call in flight (step,
-   * sleep, save, replayLoss, a frozen step) runs to completion first, and the learner and any open frozen run are
-   * freed when it settles.
+   * sleep, save, replayLoss, a frozen step, readParams) runs to completion first, and the learner and any open frozen
+   * run are freed when the last of them settles.
    */
   dispose(): void
 }
@@ -280,17 +280,6 @@ export function sampleAction(logits: Float32Array, exploreEpsilon: number, rng: 
     return sampleFactor(logits, OFFSETS[f]!, n, rng)
   }
   return { move: factor(0), button: factor(1), scroll: factor(2), key: factor(3) }
-}
-
-/**
- * Awaits every promise; once all have settled, resolves to their values in order, or rejects with the first rejection
- * (in time). Unlike Promise.all, it never returns while one is still pending, so a caller may free what they read.
- */
-async function settleAll<T>(ps: readonly Promise<T>[]): Promise<T[]> {
-  let first: { e: unknown } | null = null
-  const rs = await Promise.allSettled(ps.map((p) => p.catch((e: unknown) => { first ??= { e }; throw e })))
-  if (first) throw (first as { e: unknown }).e
-  return rs.map((r) => (r as PromiseFulfilledResult<T>).value)
 }
 
 /** Reads every tensor; waits for all to settle; then resolves to the values, or rejects with the first rejection. */
@@ -447,8 +436,9 @@ interface Last {
  *     then backward and one Adam step;
  *  2. measures curiosity r = clamp((L_before − L_after) / max(predLoss EMA before this step, 1e-6), −1, 1), L_after
  *     being the same loss with the new weights;
- *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float read (logits, V(h_t)); a_t is sampled
- *     per factor with the learner's seeded RNG, uniformly with probability exploreEpsilon (sampleAction);
+ *  3. acts: h_t = core(inputs_t, h_{t-1}) and the heads, under noGrad; one 77-float tensor (logits, V(h_t)), read in
+ *     the same round as L_after and h_t (both need only the updated weights); a_t is sampled per factor with the
+ *     learner's seeded RNG, uniformly with probability exploreEpsilon (sampleAction);
  *  4. updates the actor-critic on a_{t-1}: A = curiosityWeight·r + γ·V(h_t) − V(h_{t-1}),
  *     loss = −logπ(a_{t-1})·stopgrad(A) + A² − entropyWeight·H(π), one Adam step;
  *  5. stores (obs_{t-1}, h_{t-2}, a_{t-1}, obs_t) in the FIFO replay buffer and carries h ← h_t (detached).
@@ -547,6 +537,8 @@ export async function createLearner(opts: {
   let hInData: Float32Array = new Float32Array(widths.hidden)
   let last: Last | null = null
   let busy = false
+  /** readParams calls in flight (they may overlap each other and an exclusive call): teardown waits for them too. */
+  let reading = 0
   let disposed = false
   /** A frozen run is open; closeFrozen disposes it (the learner's dispose does). */
   let frozenOpen = false
@@ -798,7 +790,7 @@ export async function createLearner(opts: {
   /**
    * Runs `fn` with the learner to itself: step, sleep, save, replayLoss and a frozen run's step never interleave.
    * Only a frozen run's own step may run while a frozen run is open. A dispose() made while `fn` runs takes effect
-   * here, once it has settled.
+   * here, once it has settled (or when the last readParams in flight settles, whichever is later).
    */
   async function exclusive<T>(fn: () => Promise<T>, frozenStep = false): Promise<T> {
     if (disposed) throw new Error("learner: used after dispose")
@@ -809,11 +801,26 @@ export async function createLearner(opts: {
       return await fn()
     } finally {
       busy = false
-      if (disposed) teardown()
+      if (disposed && reading === 0) teardown()
     }
   }
 
-  /** Frees everything the learner holds (once; dispose() calls it now, or exclusive() when the call in flight settles). */
+  /** readParams: not exclusive (it may run alongside a step), but a dispose() made meanwhile waits for it to settle. */
+  async function readParamsNow(): Promise<Float32Array[]> {
+    if (disposed) throw new Error("learner: used after dispose")
+    reading++
+    try {
+      return await readAll(model.params)
+    } finally {
+      reading--
+      if (disposed && !busy && reading === 0) teardown()
+    }
+  }
+
+  /**
+   * Frees everything the learner holds (once: dispose() calls it now, or else the last call in flight, exclusive or
+   * readParams, when it settles).
+   */
   function teardown(): void {
     closeFrozen?.()
     if (last) disposeLast(last)
@@ -832,7 +839,7 @@ export async function createLearner(opts: {
     const obs = copyObs(o)
     const y = targetsFromObs(obs) // validates the frames (RangeError) before any state changes
     /**
-     * This step's own tensors (inputs, yT, aT, hNext, headsT). If the step throws part-way they are all freed (the
+     * This step's own tensors (inputs, yT, aT, after, hNext, headsT). If the step throws part-way they are all freed (the
      * graphs and the advantage are freed where they are made), and h, hIn and last are left as they were.
      */
     const tr = tracker()
@@ -843,6 +850,8 @@ export async function createLearner(opts: {
 
       let info: UpdateInfo | null = null
       let aT: Tensor | null = null
+      /** L_after's tensor (step 2), when L_before was finite: read together with the acting heads. */
+      let after: Tensor | null = null
       stats.lastLoss = Number.NaN
       if (last && hIn) {
         const prev: Last = last
@@ -866,31 +875,34 @@ export async function createLearner(opts: {
           opt.zeroGrad() // also after a failure part-way through backward: no parameter keeps a stray gradient
           if (lossBefore) disposeGraph(lossBefore, [])
         }
-        // 2. Curiosity: the same loss with the updated weights, relative to the running loss.
+        // 2. Curiosity (built here, read with step 3's heads): the same loss with the updated weights.
         if (Number.isFinite(lb)) {
           info.lossBefore = lb
-          const after = noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT)))
-          let la: number
-          try {
-            la = await scalar(after)
-          } finally {
-            after.dispose()
-          }
+          after = tr.keep(noGrad(() => composite(() => predictionLoss(prev.inputs, hPrev2, a1, prev.targetTensors, yT))))
+        }
+      }
+
+      // 3. Act: h_t and the heads (one [1,77] tensor: 76 logits then V(h_t)), no graph. L_after needs only the
+      // updated weights too, so all three are read in one round.
+      const hNext = tr.keep(noGrad(() => composite(() => model.core(inputs, h))))
+      const headsT = tr.keep(actingHeads(hNext))
+      const reads = await readAll(after ? [after, headsT, hNext] : [headsT, hNext])
+      const [laOut, headsOut, hNextData] = (after ? reads : [null, ...reads]) as [Float32Array | null, Float32Array, Float32Array]
+
+      // 2 (on the host). Curiosity relative to the running loss, then the moving averages.
+      if (last && info) {
+        if (laOut) {
+          const la = laOut[0]!
           if (Number.isFinite(la)) {
             info.lossAfter = la
             // Scaled by the EMA from before this loss is folded in; the very first update has no scale yet (r = 0).
-            info.reward = curiosityReward(lb, la, stats.predLoss)
+            info.reward = curiosityReward(info.lossBefore, la, stats.predLoss)
           }
-          stats.predLoss = ema(stats.predLoss, lb)
+          stats.predLoss = ema(stats.predLoss, info.lossBefore)
         }
-        const base = copyLastBaseline(prev.targets, y)
+        const base = copyLastBaseline(last.targets, y)
         if (Number.isFinite(base)) stats.baselineLoss = ema(stats.baselineLoss, base)
       }
-
-      // 3. Act: h_t and the heads (one [1,77] read: 76 logits then V(h_t)), no graph.
-      const hNext = tr.keep(noGrad(() => composite(() => model.core(inputs, h))))
-      const headsT = tr.keep(actingHeads(hNext))
-      const [headsOut, hNextData] = (await readAll([headsT, hNext])) as [Float32Array, Float32Array]
       const logits = headsOut.subarray(0, ACTION_DIM)
       const valueNext = headsOut[ACTION_DIM]!
       const action = sampleAction(logits, settings.exploreEpsilon, rng)
@@ -917,7 +929,7 @@ export async function createLearner(opts: {
 
       // 5. Store the transition, carry the state, free the rest.
       if (last) replay.push({ obs: last.obs, hIn: hInData, action: last.action, next: obs })
-      tr.drop(aT, headsT)
+      tr.drop(aT, after, headsT)
       tr.release(inputs.periphery, inputs.fovea, inputs.proprio, yT.periphery, yT.fovea, hNext)
       if (last) disposeLast(last)
       hIn?.dispose()
@@ -1039,14 +1051,14 @@ export async function createLearner(opts: {
 
     stats: () => ({ ...stats }),
 
-    readParams: () => readAll(model.params),
+    readParams: readParamsNow,
 
     dispose() {
       if (disposed) return
-      // From now on every call rejects. A call in flight (step, sleep, save, replayLoss, a frozen step) is never
-      // freed under: exclusive() tears down when it settles.
+      // From now on every call rejects. A call in flight (step, sleep, save, replayLoss, a frozen step, readParams) is
+      // never freed under: the last of them to settle tears down.
       disposed = true
-      if (!busy) teardown()
+      if (!busy && reading === 0) teardown()
     },
   }
 }

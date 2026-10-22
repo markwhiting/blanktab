@@ -1,5 +1,6 @@
 import { ShapeError } from "./backend"
 import type { Storage } from "./backend"
+import { settleAll } from "./settle"
 import type { Tensor } from "./tensor"
 
 export interface AdamOptions {
@@ -110,10 +111,7 @@ export class Adam {
   async state(): Promise<AdamState> {
     const ts = this.slots.map((s) => s.t)
     const reads = this.slots.flatMap((s) => [s.m, s.v].map((st) => new Promise<Float32Array>((resolve) => resolve(s.p.backend.read(st)))))
-    let first: { e: unknown } | null = null
-    const rs = await Promise.allSettled(reads.map((r) => r.catch((e: unknown) => { first ??= { e }; throw e })))
-    if (first) throw (first as { e: unknown }).e
-    const values = rs.map((r) => (r as PromiseFulfilledResult<Float32Array>).value)
+    const values = await settleAll(reads)
     return { slots: ts.map((t, i) => ({ m: values[2 * i]!, v: values[2 * i + 1]!, t })) }
   }
 

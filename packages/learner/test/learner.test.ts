@@ -1054,23 +1054,32 @@ describe("frozen runs (checkups, spec §8.3)", { timeout: 60_000 }, () => {
 
 /**
  * A CPU backend whose reads can be delayed (each settles after 5 ms, reading the storage then) or made to fail (the
- * `failRead`-th read after arming rejects at once), and which counts uploads and any dispose made while a read is
- * still pending. Patched in place: a tensor's backend is its storage's, so a wrapper object would miss reads.
+ * `failRead`-th read after arming rejects at once), and which counts uploads, any dispose made while a read is
+ * still pending, and any dispose of a storage that itself has a read pending. Patched in place: a tensor's backend is its storage's, so a wrapper object would miss reads.
  */
 function flakyBackend() {
   const be = createCpuBackend()
   const { read, dispose, upload } = be
-  const ctl = { delay: false, failRead: 0, reads: 0, pending: 0, disposedWhilePending: 0, uploads: 0 }
+  const ctl = { delay: false, failRead: 0, reads: 0, pending: 0, disposedWhilePending: 0, disposedUnderRead: 0, uploads: 0 }
+  /** Storages with a read pending (a count per storage). */
+  const underRead = new Map<Storage, number>()
   Object.assign(be, {
     read: (s: Storage) => {
       ctl.reads++
       if (ctl.failRead > 0 && ctl.reads === ctl.failRead) return Promise.reject(new Error("read failed"))
       if (!ctl.delay) return read(s)
       ctl.pending++
-      return new Promise((r) => setTimeout(r, 5)).then(() => read(s)).finally(() => { ctl.pending-- })
+      underRead.set(s, (underRead.get(s) ?? 0) + 1)
+      return new Promise((r) => setTimeout(r, 5)).then(() => read(s)).finally(() => {
+        ctl.pending--
+        const n = underRead.get(s)! - 1
+        if (n === 0) underRead.delete(s)
+        else underRead.set(s, n)
+      })
     },
     dispose: (s: Storage) => {
       if (ctl.pending > 0) ctl.disposedWhilePending++
+      if (underRead.has(s)) ctl.disposedUnderRead++
       dispose(s)
     },
     upload: (d: Float32Array) => { ctl.uploads++; return upload(d) },
@@ -1174,6 +1183,47 @@ describe("robustness (Plan 04c)", { timeout: 60_000 }, () => {
     expect(be.stats.liveBuffers).toBe(0)
   })
 
+  it("dispose() during an in-flight readParams: it resolves to the values, nothing is freed under it, later calls reject, liveBuffers 0", async () => {
+    const { be, ctl, arm, l } = await warm(58, 3)
+    const expected = await l.readParams()
+    arm()
+    const p = l.readParams()
+    l.dispose()
+    expect(await p).toEqual(expected)
+    await expect(l.readParams()).rejects.toThrow("learner: used after dispose")
+    expect(ctl.disposedWhilePending).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("dispose() while an exclusive call and a readParams are in flight: the one that settles last tears down", async () => {
+    // replayLoss on an empty buffer settles before readParams' delayed reads: teardown must still wait for them.
+    const { be, ctl, arm, l } = await warm(59, 0)
+    arm()
+    const params = l.readParams()
+    const replayLoss = l.replayLoss()
+    l.dispose()
+    expect(Number.isNaN(await replayLoss)).toBe(true)
+    expect(ctl.pending).toBeGreaterThan(0) // readParams is still reading
+    expect((await params).every((x) => x.every(Number.isFinite))).toBe(true)
+    expect(ctl.disposedUnderRead).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
+  it("dispose() during a step and a readParams both in flight: nothing is freed under either's reads, liveBuffers 0", async () => {
+    const { be, ctl, arm, l, w } = await warm(60, 3)
+    arm()
+    const step = l.step(w.observe())
+    const params = l.readParams()
+    l.dispose()
+    const [a, ps] = await Promise.all([step, params])
+    expect(isValidAction(a)).toBe(true)
+    expect(ps.every((x) => x.every(Number.isFinite))).toBe(true)
+    // The step frees its own scratch while readParams' reads are pending (other storages): only a storage freed under
+    // its own pending read would be a fault.
+    expect(ctl.disposedUnderRead).toBe(0)
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+
   it("frozenRun() while a step is in flight throws 'already in progress'", async () => {
     const { arm, l, w } = await warm(56, 2)
     arm()
@@ -1217,5 +1267,31 @@ describe("robustness (Plan 04c)", { timeout: 60_000 }, () => {
     expect(await uploads(true)).toBe(10 * 5 + 9)
     expect(await uploads(false)).toBe(10 * 3)
     l.dispose()
+  })
+})
+
+describe("step speed (Plan 04c Task 2)", { timeout: 60_000 }, () => {
+  it("a learning step makes exactly 3 serial read rounds (no sleep)", async () => {
+    // A round starts whenever a read is made while no earlier read is still pending (reads are delayed 5 ms, so reads
+    // made together overlap and reads made one after another do not).
+    const { be, ctl, arm } = flakyBackend()
+    const { read } = be
+    let rounds = 0
+    Object.assign(be, { read: (s: Storage) => { if (ctl.pending === 0) rounds++; return read(s) } })
+    arm()
+    const updates: UpdateInfo[] = []
+    const l = await createLearner({ backend: be, seed: 61, widths: TINY, settings: DEFAULT_SETTINGS, onUpdate: (u) => updates.push(u) })
+    const w = createSyntheticStream()
+    const perStep: number[] = []
+    for (let i = 1; i <= 20; i++) {
+      rounds = 0
+      w.act(await l.step(w.observe()))
+      if (i >= 3) perStep.push(rounds)
+    }
+    // Every measured step learned on finite losses (all four reads were needed).
+    expect(updates.slice(1).every((u) => Number.isFinite(u.lossBefore) && Number.isFinite(u.lossAfter) && !u.skipped)).toBe(true)
+    expect(perStep).toEqual(Array(18).fill(3))
+    l.dispose()
+    expect(be.stats.liveBuffers).toBe(0)
   })
 })
