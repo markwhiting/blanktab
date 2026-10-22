@@ -52,6 +52,20 @@ export function heldOutRatio(logs: LogFile[]): number | null {
   return null
 }
 
+/**
+ * The learner's latest checkup: its level and score (how many milestones it passed), from the newest v2 file that
+ * has one, or null if none does.
+ */
+export function latestCheckup(logs: LogFile[]): { level: number; score: number } | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const l = logs[i]!
+    if (l.schemaVersion !== 2) continue
+    const c = l.checkups?.[l.checkups.length - 1]
+    if (c) return { level: c.level, score: c.passed.length }
+  }
+  return null
+}
+
 export function buildSummary(runsDir: string): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
@@ -67,6 +81,7 @@ export function buildSummary(runsDir: string): Summary {
         cu: last.schemaVersion === 2 ? last.cu : null,
         lossRatio: lossRatio(logs),
         heldOutRatio: heldOutRatio(logs),
+        checkupScore: latestCheckup(logs),
       })
     }
   }

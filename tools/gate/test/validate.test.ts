@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest"
+import { readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { validateSessionPr, type PrFile } from "../validate.ts"
-import type { CurvePoint, LogFile, LogFileV1, LogFileV2 } from "@blanktab/harness/log"
+import { parseLogFile, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
 
 const ID = "lrn_0123456789abcdef"
 const log = (seq: number, over: Partial<LogFileV1> = {}): LogFileV1 => ({
@@ -317,5 +319,49 @@ describe("validateSessionPr v2: the held-out check's optional fields (decision 0
     expect(msg([file(logV2(1))], [logV2(0, { evalCU: 1 })])).toContain("evalCU missing")
     expect(errs([file(logV2(0)), file(logV2(1, { evalCU: 1 }))]).ok).toBe(true) // absent, then present: a newer page
     expect(errs([file(logV2(1))], [logV2(0)]).ok).toBe(true)
+  })
+})
+const msg = (r: { errors: string[] }) => r.errors.join("\n")
+describe("validateSessionPr v2: checkups (decision 0016)", () => {
+  const ck = (level: number) => ({ level, steps: 10, passed: ["M1"], measures: { M1: 1, M2: null, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0.01 })
+  const withCk = (seq: number, levels: number[], over: Partial<LogFileV2> = {}) =>
+    logV2(seq, { cu: 1000 * (seq + 1), stepsTotal: 400_000 * (seq + 1), curve: [], milestoneSuiteVersion: 1, checkups: levels.map(ck), evalCU: seq + 1, ...over }) // checkups are billed inside evalCU's increase
+  it("accepts increasing levels across the files on main and the PR", () => {
+    expect(errs([file(withCk(1, [128, 256]))], [withCk(0, [32, 64])]).ok).toBe(true)
+    expect(errs([file(withCk(1, []))], [withCk(0, [64])]).ok).toBe(true)
+  })
+  it("checkup levels strictly increase across the files on main and the PR", () => {
+    expect(msg(errs([file(withCk(1, [64]))], [withCk(0, [64])]))).toContain("checkup level 64 is not above 64")
+    expect(msg(errs([file(withCk(0, [64])), file(withCk(1, [64]))]))).toContain("checkup level 64 is not above 64")
+    expect(msg(errs([file(withCk(1, [32]))], [withCk(0, [64])]))).toContain("checkup level 32 is not above 64")
+  })
+  it("a file's checkups fit in its own evalCU increase over the file before (on main or in the PR), within 1e-9 relative", () => {
+    // Each checkup costs 0.01; withCk files rise by 1 evalCU a file.
+    const over = (seq: number, ev: number, levels = [64, 128]) => withCk(seq, levels, { evalCU: ev })
+    expect(msg(errs([file(over(1, 1.015))], [over(0, 1, [32])]))).toContain("checkups' evalCU (0.02) exceeds this file's evalCU increase")
+    expect(msg(errs([file(over(0, 1, [32])), file(over(1, 1.015))]))).toContain("exceeds this file's evalCU increase")
+    expect(errs([file(over(1, 1.02))], [over(0, 1, [32])]).ok).toBe(true) // exactly its increase
+    expect(errs([file(over(1, 1 + 0.02 * (1 - 1e-12)))], [over(0, 1, [32])]).ok).toBe(true) // float noise
+    // The file before is what counts, not the first: a big earlier increase cannot pay for a later file's checkups.
+    expect(msg(errs([file(over(1, 5, [32])), file(over(2, 5.01))], [over(0, 1, [])]))).toContain("exceeds this file's evalCU increase")
+    // A previous file without evalCU: nothing to compare with (the parser still bounds checkups by the file's evalCU).
+    expect(errs([file(over(1, 0.02))], [logV2(0, { cu: 1000, stepsTotal: 400_000 })]).ok).toBe(true)
+  })
+})
+
+// Node-only (reads the repo), so it lives here under the root tsconfig, not in packages/harness (browser-typed).
+describe("committed logs", () => {
+  it("every committed log under data/runs still parses", () => {
+    const root = join(__dirname, "../../../data/runs")
+    let n = 0
+    for (const d of readdirSync(root).filter(d => d.startsWith("lrn_"))) {
+      for (const f of readdirSync(join(root, d))) {
+        if (!/^\d+\.json$/.test(f)) continue
+        const r = parseLogFile(JSON.parse(readFileSync(join(root, d, f), "utf8")))
+        expect(r.ok, `${d}/${f}: ${r.ok ? "" : r.error}`).toBe(true)
+        n++
+      }
+    }
+    expect(n).toBeGreaterThan(0)
   })
 })

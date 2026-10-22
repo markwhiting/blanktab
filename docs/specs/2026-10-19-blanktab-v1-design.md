@@ -205,14 +205,14 @@ Picture books, tools, games and the mini-web come later. The shell and generator
 ### 7.2 Privileged trace
 Each tick, the world emits to the harness only: element under the cursor and whether it responded; scroll extents and revealed fraction; active room and page; widget state changes. Detectors and the caregiver use this trace. It never crosses into the learner.
 
-### 7.3 Caregiver [agent; the user called this "a meta-learner landscape"]
+### 7.3 Caregiver [agent; the user called this "a meta-learner landscape"; **amended by 0016**: relative LP, settings from caregiver-prior.json while the picker is random, decides every `caregiverPeriod` steps only (not also after each sleep), observes only transitions within one room]
 - **Learning progress per room:** `LP(room) = EMA_slow(loss) − EMA_fast(loss)`, computed from the learner's prediction loss while in that room.
-- **When to move:** every `caregiverPeriod` steps (and after each sleep), the caregiver may *carry* the learner. It picks a room by softmax over LP with temperature τ, plus ε-uniform exploration.
+- **When to move:** every `caregiverPeriod` steps (*0016: no longer also after each sleep*), the caregiver may *carry* the learner. It picks a room by softmax over LP with temperature τ, plus ε-uniform exploration.
 - **How it moves:** by bringing the room's window forward through a harness command. This is logged as a caregiver action, never as a learner action.
 - **Handover:** once the learner passes the **M6 (uses the taskbar)** checkup twice in a row, the caregiver enters *safety-net mode*. It only carries the learner if `LP < threshold` everywhere it has been for `stuckSteps`.
 - **Settings:** `caregiverPeriod`, τ, ε, `threshold`, `stuckSteps`. They come from `knowledge/caregiver-prior.json` and the picker.
 
-## 8. Milestones, checkups, and scoring [user: ladder, 0005; agent: v1 suite and format]
+## 8. Milestones, checkups, and scoring [user: ladder, 0005; agent: v1 suite and format; **amended by 0016**: exact suite v1, module signature and location, checkups on the log schedule, frozen runs]
 
 ### 8.1 Milestone spec format
 Each milestone is a module in `packages/harness/milestones/` that exports:

@@ -843,3 +843,211 @@ describe("the held-out check (decision 0015 §3)", { timeout: 60_000 }, () => {
     expect(be.stats.liveBuffers).toBe(0)
   })
 })
+
+/** A fixed observation stream (independent of anyone's actions): the synthetic world under seeded random actions. */
+function stream(n: number, seed = 31): Observation[] {
+  const w = createSyntheticStream()
+  const rnd = createRng(seed)
+  const pick = (k: number) => Math.min(k - 1, Math.floor(rnd() * k))
+  const out: Observation[] = []
+  for (let i = 0; i < n; i++) {
+    out.push(w.observe())
+    w.act({ move: pick(MOVE_OPTIONS), button: pick(BUTTON_OPTIONS), scroll: pick(SCROLL_OPTIONS), key: pick(KEYS.length) })
+  }
+  return out
+}
+
+describe("frozen runs (checkups, spec §8.3)", { timeout: 60_000 }, () => {
+  const trained = async (seed: number, steps: number, be: Backend = createCpuBackend()) => {
+    const updates: UpdateInfo[] = []
+    const l = await createLearner({ backend: be, seed, widths: TINY, settings: DEFAULT_SETTINGS, onUpdate: (u) => updates.push(u) })
+    const w = createSyntheticStream()
+    const actions: Action[] = []
+    for (let i = 0; i < steps; i++) { const a = await l.step(w.observe()); actions.push(a); w.act(a) }
+    return { l, w, updates, actions, be }
+  }
+
+  it("a frozen run changes nothing but evalCU", async () => {
+    const { l } = await trained(41, 50)
+    await l.sleep()
+    const before = await l.save()
+    const run = l.frozenRun({ seed: 7, measureLoss: true })
+    for (const o of stream(300)) await run.step(o)
+    run.dispose()
+    const after = await l.save()
+    expect(firstDifference({ ...after, stats: { ...after.stats, evalCU: 0 } }, { ...before, stats: { ...before.stats, evalCU: 0 } })).toBeNull()
+    expect({ ...after, stats: { ...after.stats, evalCU: 0 } }).toEqual({ ...before, stats: { ...before.stats, evalCU: 0 } })
+    expect(after.stats.evalCU).toBeGreaterThan(before.stats.evalCU)
+    expect(after.stats.cu).toBe(before.stats.cu)
+    l.dispose()
+  })
+
+  it("after a frozen run, the learner continues bit-identically to a twin that had none", async () => {
+    const a = await trained(42, 300)
+    const b = await trained(42, 300)
+    const run = a.l.frozenRun({ seed: 3, measureLoss: true })
+    for (const o of stream(200)) await run.step(o)
+    run.dispose()
+    for (const t of [a, b]) for (let i = 0; i < 200; i++) { const x = await t.l.step(t.w.observe()); t.actions.push(x); t.w.act(x) }
+    expect(a.updates.length).toBe(499)
+    expect(a.updates).toEqual(b.updates)
+    expect(a.actions).toEqual(b.actions)
+    expect(await a.l.readParams()).toEqual(await b.l.readParams())
+    a.l.dispose()
+    b.l.dispose()
+  })
+
+  it("frozen runs are deterministic per seed and draw nothing from the learner's RNG", async () => {
+    const { l } = await trained(43, 40)
+    const rng0 = (await l.save()).rng
+    const obs = stream(60)
+    const actionsOf = async (seed: number) => {
+      const run = l.frozenRun({ seed, measureLoss: false })
+      const as: Action[] = []
+      for (const o of obs) as.push(await run.step(o))
+      run.dispose()
+      return as
+    }
+    const a7 = await actionsOf(7)
+    expect(a7.every(isValidAction)).toBe(true)
+    expect(await actionsOf(7)).toEqual(a7)
+    expect(await actionsOf(8)).not.toEqual(a7)
+    expect((await l.save()).rng).toBe(rng0)
+    l.dispose()
+  })
+
+  it("a newborn's frozen predLoss equals its baselineLoss exactly (copy-last), so M1 cannot pass at birth", async () => {
+    const l = await createLearner({ backend: createCpuBackend(), seed: 44, widths: TINY, settings: DEFAULT_SETTINGS })
+    const run = l.frozenRun({ seed: 1, measureLoss: true })
+    for (const o of stream(50)) await run.step(o)
+    const r = run.result()
+    run.dispose()
+    expect(r.transitions).toBe(49)
+    expect(r.baselineLoss).toBeGreaterThan(0)
+    expect(r.predLoss).toBe(r.baselineLoss)
+    l.dispose()
+  })
+
+  it("measureLoss false: result() losses are NaN and transitions 0; evalCU spent is less than with measureLoss", async () => {
+    const { l } = await trained(45, 30)
+    const obs = stream(40)
+    const spend = async (measureLoss: boolean) => {
+      const e0 = l.stats().evalCU
+      const run = l.frozenRun({ seed: 2, measureLoss })
+      for (const o of obs) await run.step(o)
+      const r = run.result()
+      run.dispose()
+      return { r, spent: l.stats().evalCU - e0 }
+    }
+    const off = await spend(false)
+    const on = await spend(true)
+    expect(Number.isNaN(off.r.predLoss) && Number.isNaN(off.r.baselineLoss)).toBe(true)
+    expect(off.r.transitions).toBe(0)
+    expect(on.r.transitions).toBe(39)
+    expect(Number.isFinite(on.r.predLoss) && Number.isFinite(on.r.baselineLoss)).toBe(true)
+    expect(off.spent).toBeGreaterThan(0)
+    expect(off.spent).toBeLessThan(on.spent)
+    // No transitions yet: NaN even with measureLoss.
+    const fresh = l.frozenRun({ seed: 2, measureLoss: true })
+    expect(fresh.result().transitions).toBe(0)
+    expect(Number.isNaN(fresh.result().predLoss)).toBe(true)
+    await fresh.step(obs[0]!)
+    expect(fresh.result().transitions).toBe(0)
+    fresh.dispose()
+    l.dispose()
+  })
+
+  it("while a frozen run is open, step/sleep/save/replayLoss reject; after dispose they work", async () => {
+    const { l, w } = await trained(46, 10)
+    const run = l.frozenRun({ seed: 1, measureLoss: true })
+    const open = /a frozen run is open \(dispose it first\)/
+    await expect(l.step(w.observe())).rejects.toThrow(open)
+    await expect(l.sleep()).rejects.toThrow(open)
+    await expect(l.save()).rejects.toThrow(open)
+    await expect(l.replayLoss()).rejects.toThrow(open)
+    expect(() => l.frozenRun({ seed: 2, measureLoss: true })).toThrow(open)
+    await run.step(w.observe())
+    run.dispose()
+    run.dispose() // idempotent
+    await expect(run.step(w.observe())).rejects.toThrow(/dispose/)
+    expect(l.stats().steps).toBe(10)
+    w.act(await l.step(w.observe()))
+    await l.sleep()
+    await l.save()
+    expect(Number.isFinite(await l.replayLoss())).toBe(true)
+    expect(l.stats().steps).toBe(11)
+    l.dispose()
+  })
+
+  it("a frozen run leaks nothing: liveBuffers after dispose equals before, also when a step throws part-way", async () => {
+    const make = async (failAt: number) => {
+      const be = createCpuBackend()
+      const { upload, zeros } = be
+      let k = 0, armed = false
+      const take = () => { if (armed && ++k === failAt) throw new Error("device lost") }
+      Object.assign(be, { upload: (d: Float32Array) => { take(); return upload(d) }, zeros: (m: number) => { take(); return zeros(m) } })
+      const l = await createLearner({ backend: be, seed: 47, widths: TINY, settings: DEFAULT_SETTINGS })
+      const w = createSyntheticStream()
+      for (let i = 0; i < 4; i++) w.act(await l.step(w.observe()))
+      const before = be.stats.liveBuffers
+      armed = true
+      return { be, l, before, count: () => k }
+    }
+    const obs = stream(3)
+    const probe = await make(0)
+    const pr = probe.l.frozenRun({ seed: 1, measureLoss: true })
+    for (const o of obs) await pr.step(o)
+    pr.dispose()
+    expect(probe.be.stats.liveBuffers).toBe(probe.before)
+    const n = probe.count()
+    expect(n).toBeGreaterThan(10)
+    probe.l.dispose()
+    for (let failAt = 1; failAt <= n; failAt++) {
+      const { be, l, before } = await make(failAt)
+      let threw = false
+      try {
+        const run = l.frozenRun({ seed: 1, measureLoss: true })
+        try {
+          for (const o of obs) await run.step(o)
+        } finally {
+          run.dispose()
+        }
+      } catch (e) {
+        expect((e as Error).message).toBe("device lost")
+        threw = true
+      }
+      expect(threw, `failing at allocation ${failAt}`).toBe(true)
+      expect(be.stats.liveBuffers, `failing at allocation ${failAt}`).toBe(before)
+      await l.step(obs[0]!) // the learner itself is untouched and usable
+      l.dispose()
+      expect(be.stats.liveBuffers).toBe(0)
+    }
+  })
+
+  it("lastLoss is this step's L_before (NaN on step 1); a state saved without lastLoss loads with NaN", async () => {
+    const be = createCpuBackend()
+    const updates: UpdateInfo[] = []
+    const l = await createLearner({ backend: be, seed: 48, widths: TINY, settings: DEFAULT_SETTINGS, onUpdate: (u) => updates.push(u) })
+    expect(Number.isNaN(l.stats().lastLoss)).toBe(true)
+    const w = createSyntheticStream()
+    w.act(await l.step(w.observe()))
+    expect(Number.isNaN(l.stats().lastLoss)).toBe(true)
+    for (let i = 0; i < 5; i++) {
+      w.act(await l.step(w.observe()))
+      expect(l.stats().lastLoss).toBe(updates.at(-1)!.lossBefore)
+      expect(l.stats().lastLoss).toBeGreaterThan(0)
+    }
+    const state = await l.save()
+    expect(state.stats.lastLoss).toBe(l.stats().lastLoss)
+    l.dispose()
+    const { lastLoss: _gone, ...older } = state.stats
+    void _gone
+    const restored = await createLearner({ backend: be, state: { ...state, stats: older as LearnerState["stats"] } })
+    expect(Number.isNaN(restored.stats().lastLoss)).toBe(true)
+    restored.dispose()
+    for (const bad of [-1, Number.POSITIVE_INFINITY, "0.1", undefined]) {
+      await expect(createLearner({ backend: be, state: { ...state, stats: { ...state.stats, lastLoss: bad } as unknown as LearnerState["stats"] } }), String(bad)).rejects.toThrow(RangeError)
+    }
+    expect(be.stats.liveBuffers).toBe(0)
+  })
+})

@@ -1,17 +1,39 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
 import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, WORLD, type Action, type Observation, type WorldView } from "@blanktab/interface"
-import { createCpuBackend } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, clampSettings, createLearner, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
+import { createCpuBackend, createRng } from "@blanktab/tensor"
+import { DEFAULT_SETTINGS, clampSettings, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
 import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/checkpoint"
-import { MAX_RESTORES, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
-import { createWorld } from "@blanktab/world"
+import { MAX_RESTORES, MILESTONE_SUITE_VERSION, levelAtOrBelow, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
+import { createWorld, hashSeed, type TraceEvent } from "@blanktab/world"
+import { uniformAction } from "../src/heldout"
+import { MILESTONES_V1, type Milestone } from "../src/milestones"
+import { CAREGIVER_DEFAULTS, clampCaregiverSettings } from "../src/caregiver"
+import { validateSessionPr } from "../../../tools/gate/validate"
 import { createCanvas } from "@napi-rs/canvas"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
 import { buildHeldOut } from "../src/heldout"
 import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
 import { mkFile } from "./helpers"
+
+// Plan 04b: a spy on every caregiver the session makes (each delegates to a real one), in one call log with the events.
+const cgSpy = vi.hoisted(() => ({ log: [] as string[], inits: [] as unknown[] }))
+vi.mock("../src/caregiver", async importOriginal => {
+  const m = await importOriginal<typeof import("../src/caregiver")>()
+  return {
+    ...m,
+    createCaregiver: (init: Parameters<typeof m.createCaregiver>[0]) => {
+      cgSpy.inits.push(structuredClone(init))
+      const c = m.createCaregiver(init)
+      const spy = <K extends keyof typeof c>(k: K): (typeof c)[K] => ((...a: unknown[]) => {
+        cgSpy.log.push(k)
+        return (c[k] as (...x: unknown[]) => unknown)(...a)
+      }) as (typeof c)[K]
+      return { observe: spy("observe"), decide: spy("decide"), onCheckup: spy("onCheckup"), takeSummary: spy("takeSummary"), state: spy("state") }
+    },
+  }
+})
 
 const ID = "lrn_0123456789abcdef"
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
@@ -63,15 +85,17 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number }) {
+interface StubOpts { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number; frozen?: { evalPerStep: number } }
+function stubFactory(o: StubOpts) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
-    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0, evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN } }
+    const s0 = "state" in init ? (init.state as unknown as StubState) : { seed: init.seed, widths: init.widths, settings: init.settings, stats: { steps: 0, cu: 0, predLoss: Number.NaN, baselineLoss: Number.NaN, skippedUpdates: 0, consecutiveSkips: 0, sleeps: 0, evalCU: 0, heldOutLoss: Number.NaN, heldOutBaseline: Number.NaN, lastLoss: Number.NaN } }
     const st: StubState = structuredClone(s0)
     const loss = () => {
       const n = st.stats.steps
       st.stats.predLoss = n < (o.nanUntil ?? 2) ? Number.NaN : 0.5 / (1 + n / 100)
       st.stats.baselineLoss = n < (o.nanUntil ?? 2) ? Number.NaN : 0.4
+      if (o.frozen) st.stats.lastLoss = st.stats.predLoss // the caregiver's signal (Plan 04b)
     }
     return {
       step: async () => {
@@ -96,6 +120,15 @@ function stubFactory(o: { cuPerStep: number; sleepCu?: number; nanUntil?: number
       stats: () => ({ ...st.stats }),
       dispose: () => {},
       ...(o.knowledge ? { onKnowledge: (m: Manifest) => void o.knowledge!.push([st.stats.steps, m.knowledgeSha]) } : {}),
+      // With `frozen`, a frozen run (Plan 04b checkups): uniform actions from its own seed, `evalPerStep` evalCU a step, nothing else changes.
+      ...(o.frozen ? { frozenRun: (fo: FrozenRunOptions): FrozenRun => {
+        const rnd = createRng(fo.seed)
+        return {
+          step: async () => { st.stats.evalCU += o.frozen!.evalPerStep; return uniformAction(rnd) },
+          result: () => ({ predLoss: Number.NaN, baselineLoss: Number.NaN, transitions: 0 }),
+          dispose: () => {},
+        }
+      } } : {}),
     }
   }
 }
@@ -377,7 +410,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         }))
         expect(r.resumedFrom).toBe(cp!.steps)
         // The page redraws the curve from the event: the checkpoint's place in the life and its curve since the last log.
-        expect(events[0]).toEqual({ type: "resumed", steps: cp!.steps, cu: cp!.cu, curveTail: cp!.curveTail })
+        expect(events[0]).toEqual({ type: "resumed", steps: cp!.steps, cu: cp!.cu, curveTail: cp!.curveTail, checkupTail: [] })
         expect(ticks[0]).toBe(cp!.steps + 1)
         const logs = await logsOf(idb)
         expectContinuous(logs)
@@ -1103,6 +1136,407 @@ describe("session v2", { timeout: 60_000 }, () => {
         expect((await logsOf(idb)).some(f => f.final)).toBe(false)
         expect(await loadCheckpoint(idb, ID)).toBeDefined()
       }
+    })
+  })
+
+  describe("growing up (Plan 04b)", { timeout: 120_000 }, () => {
+    const canvas = () => createCanvas(WORLD.width, WORLD.height)
+    /**
+     * The v1 suite at a 5-step budget (same worlds, measures and pass rules). M5's reference (16 random clickers at its
+     * own budget, ~0.4 s) is a pure function of the seed: memoized, so the many lives here reuse it.
+     */
+    const refs = new Map<number, number>()
+    const SUITE: Milestone[] = MILESTONES_V1.map(m => ({
+      ...m, budgetSteps: 5,
+      ...(m.reference ? { reference: (seed: number, c: Parameters<NonNullable<Milestone["reference"]>>[1]) => {
+        if (!refs.has(seed)) refs.set(seed, m.reference!(seed, c))
+        return refs.get(seed)!
+      } } : {}),
+    }))
+    /** Epsilon 1: every decision picks a room uniformly, so carries are frequent. */
+    const CARE = { ...CAREGIVER_DEFAULTS, caregiverPeriod: 50, caregiverEpsilon: 1 }
+    type GrowOpts = { cfg?: Partial<SessionConfig>; deps?: Partial<SessionDeps>; stub?: Partial<StubOpts>; checkups?: false; suite?: Milestone[] }
+    /** 2 CU a step and a sleep every 5 steps by default, in a real world; checkups on unless `checkups: false`. */
+    const grow = (idb: IDBFactory, o: GrowOpts = {}) => runSession(
+      cfgFor({ lifetimeCU: 40, sleepInterval: 5, ...o.cfg }),
+      depsFor(idb, {
+        world: createWorld({ seed: 7, canvas: canvas() }),
+        createLearner: stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 }, ...o.stub }),
+        ...(o.checkups === false ? {} : { checkups: { canvas, suite: o.suite ?? SUITE } }),
+        ...o.deps,
+      }),
+    )
+    const results = (logs: LogFileV2[]) => logs.flatMap(f => f.checkups ?? [])
+    const levelsOf = (logs: LogFileV2[]) => results(logs).map(c => c.level)
+    /** Writer/validator agreement: the files as written parse, and the gate accepts them as one PR. */
+    const gateAccepts = (logs: LogFileV2[]) => {
+      for (const f of logs) {
+        const p = parseLogFile(JSON.parse(JSON.stringify(f)))
+        expect(p.ok, p.ok ? "" : p.error).toBe(true)
+      }
+      const v = validateSessionPr(logs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [])
+      expect(v.errors).toEqual([])
+      expect(v.ok).toBe(true)
+    }
+    const checkupEvents = (events: SessionEvent[]) => events.flatMap(e =>
+      e.type === "checkupStarted" ? [["start", e.level]] : e.type === "checkup" ? [["done", e.result.level, e.result.steps]] : [])
+
+    it("checkups run at the first clean sleep after each crossing, once per level; crossings within one sleep interval give one checkup, at the highest", async () => {
+      const events: SessionEvent[] = []
+      await grow(new IDBFactory(), { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: { onEvent: e => events.push(e) } })
+      // 2 CU a step, a sleep every 10: at the first sleep (20 CU) 8 and 16 are both due; only 16 is checked.
+      expect(checkupEvents(events)).toEqual([
+        ["start", 16], ["done", 16, 10], ["start", 32], ["done", 32, 20], ["start", 64], ["done", 64, 40], ["start", 128], ["done", 128, 70],
+      ])
+    })
+
+    it("results go into the next log file (the same file when the crossing and the sleep share a step), with milestoneSuiteVersion 1; every file parses and the validator accepts the sequence", async () => {
+      // Sleeps every 10 steps: each result waits for the next file. Every 8: the crossings fall on sleeps, same file.
+      for (const [sleepInterval, expected] of [
+        [10, [[4, []], [8, []], [16, [16]], [32, [32]], [64, [64]], [70, [128]]]],
+        [8, [[4, []], [8, [16]], [16, [32]], [32, [64]], [64, [128]], [70, []]]],
+      ] as const) {
+        const idb = new IDBFactory()
+        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval } })
+        const logs = await logsOf(idb)
+        expect(logs.map(f => [f.stepsTotal, (f.checkups ?? []).map(c => c.level)]), `sleepInterval ${sleepInterval}`).toEqual(expected)
+        for (const f of logs) expect(f.milestoneSuiteVersion).toBe(MILESTONE_SUITE_VERSION)
+        expect(MILESTONE_SUITE_VERSION).toBe(1)
+        for (const c of results(logs)) expect(c.passed.every(id => typeof id === "string") && Object.keys(c.measures).length === 6).toBe(true)
+        gateAccepts(logs)
+      }
+    })
+
+    it("checkups are billed to evalCU only", async () => {
+      const life = async (checkups: boolean) => {
+        const idb = new IDBFactory()
+        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, stub: { evalCu: 0.25 }, ...(checkups ? {} : { checkups: false as const }) })
+        return logsOf(idb)
+      }
+      const [withC, without] = [await life(true), await life(false)]
+      expect(withC.map(f => [f.stepsTotal, f.cu])).toEqual(without.map(f => [f.stepsTotal, f.cu]))
+      expect(results(withC)).toHaveLength(4)
+      let billed = 0
+      for (const [i, f] of withC.entries()) {
+        for (const c of f.checkups!) { expect(c.evalCU).toBeCloseTo(6 * 5 * 0.001, 12); billed += c.evalCU } // 6 milestones x 5 frozen steps
+        expect(f.evalCU! - without[i]!.evalCU!).toBeCloseTo(billed, 12)
+      }
+      expect(without.every(f => !("checkups" in f) && !("milestoneSuiteVersion" in f))).toBe(true)
+    })
+
+    it("no checkup while consecutiveSkips > 0; it runs at the next clean sleep", async () => {
+      const events: SessionEvent[] = []
+      // Skips over steps 18-22: the sleep at step 20 (32 CU due) is not clean.
+      await grow(new IDBFactory(), { cfg: { lifetimeCU: 140, sleepInterval: 10 }, stub: { skip: n => n >= 18 && n <= 22 }, deps: { onEvent: e => events.push(e) } })
+      expect(checkupEvents(events).filter(e => e[0] === "done")).toEqual([["done", 16, 10], ["done", 32, 30], ["done", 64, 40], ["done", 128, 70]])
+    })
+
+    it("the caregiver does not act or observe during a checkup", async () => {
+      cgSpy.log.length = 0
+      await grow(new IDBFactory(), { cfg: { lifetimeCU: 140, sleepInterval: 10, caregiver: CARE }, deps: { onEvent: e => cgSpy.log.push(`event:${e.type}`) } })
+      const log = cgSpy.log
+      const starts = log.flatMap((x, i) => (x === "event:checkupStarted" ? [i] : []))
+      expect(starts).toHaveLength(4)
+      for (const s of starts) {
+        const end = log.indexOf("event:checkup", s)
+        expect(end).toBeGreaterThan(s)
+        expect(log.slice(s + 1, end)).toEqual([])
+        expect(log[end + 1]).toBe("onCheckup") // told the result once it is in
+      }
+      // Non-vacuous: it decided every step and watched every one within a room (all but the first and each after a carry).
+      const carries = log.filter(x => x === "event:carried").length
+      expect(log.filter(x => x === "decide").length).toBe(70)
+      expect(log.filter(x => x === "observe").length).toBe(70 - 1 - carries)
+    })
+
+    it("the caregiver carries through world.bringToFront: focus events with source caregiver, counted in the log's caregiver summary; its settings are in the log's settings", async () => {
+      const idb = new IDBFactory()
+      const world = createWorld({ seed: 7, canvas: canvas() })
+      const trace: TraceEvent[] = []
+      const traced = {
+        observe: () => world.observe(), act: (a: Action) => world.act(a), state: () => world.state(), rooms: () => world.rooms(),
+        bringToFront: (k: Parameters<typeof world.bringToFront>[0]) => world.bringToFront(k),
+        drainTrace: () => { const t = world.drainTrace(); trace.push(...t); return t },
+      }
+      const events: SessionEvent[] = []
+      await grow(idb, { checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE }, stub: { cuPerStep: 0.125 }, deps: { world: traced, onEvent: e => events.push(e) } })
+      trace.push(...world.drainTrace()) // a carry at the last step
+      const carried = events.flatMap(e => (e.type === "carried" ? [e] : []))
+      const focus = trace.filter(e => e.kind === "focus" && e.source === "caregiver")
+      const logs = await logsOf(idb)
+      expect(carried.length).toBeGreaterThan(3)
+      expect(focus.map(e => e.room)).toEqual(carried.map(e => e.to))
+      expect(logs.reduce((a, f) => a + f.caregiver!.carries, 0)).toBe(carried.length)
+      const to: Record<string, number> = {}
+      for (const f of logs) for (const [k, n] of Object.entries(f.caregiver!.to)) to[k] = (to[k] ?? 0) + n
+      const byRoom: Record<string, number> = {}
+      for (const e of carried) byRoom[e.to] = (byRoom[e.to] ?? 0) + 1
+      expect(to).toEqual(byRoom)
+      // Carries only on the period (50 steps), not at the sleeps in between (decision 0016).
+      for (const e of carried) expect(e.steps % 50).toBe(0)
+      for (const f of logs) expect(f.settings).toMatchObject(clampCaregiverSettings(CARE))
+      gateAccepts(logs)
+    })
+
+    it("the caregiver observes a loss only when the previous frame was seen in the same room: not the first transition after a carry, nor a run's first", async () => {
+      cgSpy.log.length = 0
+      const world = createWorld({ seed: 7, canvas: canvas() })
+      const rooms: string[] = [] // the room of each step's frame, as the session reads it
+      const watched = { observe: () => { rooms.push(world.state().room); return world.observe() }, state: () => world.state(), rooms: () => world.rooms(), bringToFront: (k: Parameters<typeof world.bringToFront>[0]) => world.bringToFront(k), act: (a: Action) => world.act(a), drainTrace: () => world.drainTrace() }
+      await grow(new IDBFactory(), { checkups: false, cfg: { lifetimeCU: 64, sleepInterval: 5, caregiver: CARE }, stub: { cuPerStep: 0.125 }, deps: { world: watched, onEvent: e => cgSpy.log.push(`event:${e.type}`) } })
+      // Per step: [observe] decide [event:carried].
+      const perStep: { observed: boolean; carried: boolean }[] = []
+      let observed = false
+      for (const x of cgSpy.log) {
+        if (x === "observe") observed = true
+        else if (x === "decide") { perStep.push({ observed, carried: false }); observed = false }
+        else if (x === "event:carried") perStep.at(-1)!.carried = true
+      }
+      expect(perStep).toHaveLength(512)
+      expect(perStep[0]!.observed).toBe(false)
+      const afterCarry = perStep.flatMap((p, i) => (p.carried && i + 2 < perStep.length ? [i] : []))
+      expect(afterCarry.length).toBeGreaterThan(3)
+      for (const i of afterCarry) {
+        expect(rooms[i + 1], `step ${i + 2}`).not.toBe(rooms[i])
+        expect(perStep[i + 1]!.observed, `step ${i + 2}: across the carry`).toBe(false)
+        expect(perStep[i + 2]!.observed, `step ${i + 3}: within the new room`).toBe(true)
+      }
+      // And in general: observed exactly when the frame before was in the same room.
+      perStep.forEach((p, i) => expect(p.observed, `step ${i + 1}`).toBe(i > 0 && rooms[i] === rooms[i - 1]))
+    })
+
+    it("a failed life's final file carries its checkpoint's checkup tail; one rebuilt from the latest file does not repeat its checkups", async () => {
+      // 2 CU a step, a sleep every 10: the 16 CU checkup at step 10 waits for the file at step 16; the learner fails at 13.
+      const idb = new IDBFactory()
+      await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, caregiver: CARE }, stub: { throwAt: { steps: 13, error: new Error("boom") } } })).rejects.toThrow("boom")
+      const logs = await logsOf(idb)
+      expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 10, milestoneSuiteVersion: 1 })
+      expect(levelsOf(logs)).toEqual([16])
+      expect(logs.at(-1)!.caregiver).toBeDefined()
+      expect(logs.at(-1)!.settings).toMatchObject(clampCaregiverSettings(CARE))
+      gateAccepts(logs)
+      // A corrupt checkpoint after the 32 CU file: the final file repeats that file's counters, not its checkups.
+      const idb2 = new IDBFactory()
+      await expect(grow(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: { onTick: ({ steps }) => { if (steps === 33) throw new Error("reload") } } })).rejects.toThrow("reload")
+      expect(levelsOf(await logsOf(idb2))).toEqual([16, 32])
+      const c = (await loadCheckpoint(idb2, ID))!
+      await saveCheckpoint(idb2, { ...c, steps: -1 })
+      await expect(grow(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10 } })).rejects.toThrow(RangeError)
+      const after = await logsOf(idb2)
+      expect(after.at(-1)!.final).toBe(true)
+      expect(after.at(-1)!.checkups).toBeUndefined()
+      expect(levelsOf(after)).toEqual([16, 32])
+      gateAccepts(after)
+    })
+
+    it("a finished checkup is checkpointed at once, inside the throttle window (a reload never checks its level again)", async () => {
+      const savedSteps: number[] = []
+      // The default 300 s throttle: no sleep would save. Crossings 8, 16, 32 CU at steps 2, 4, 8; checkups at 5 and 10 (the end).
+      await grow(new IDBFactory(), { cfg: { checkpointEveryMs: undefined }, stub: { cuPerStep: 4, savedSteps } })
+      expect(savedSteps).toEqual([0, 2, 4, 5, 8])
+    })
+
+    describe("Review Focus 3: reload at every step across two checkups", () => {
+      // 4 CU a step, a sleep every 5: checkups 16 (step 5) and 32 (step 10, the end of the life).
+      const run = (idb: IDBFactory, o: { stopAt?: number; stopAtCheckup?: number } = {}) => {
+        let started = 0
+        return grow(idb, { stub: { cuPerStep: 4 }, deps: {
+          onTick: ({ steps }) => { if (steps === o.stopAt) throw new Error("reload") },
+          onEvent: e => { if (e.type === "checkupStarted" && ++started === o.stopAtCheckup) throw new Error("reload") },
+        } })
+      }
+      const cases = [...Array.from({ length: 10 }, (_, i) => ({ stopAt: i + 1 })), ...[1, 2].map(k => ({ stopAtCheckup: k }))]
+      it("the levels in the logs equal an uninterrupted life's, none twice", async () => {
+        const whole = new IDBFactory()
+        await run(whole)
+        const wholeLogs = await logsOf(whole)
+        expect(levelsOf(wholeLogs)).toEqual([16, 32])
+        for (const c of cases) {
+          const idb = new IDBFactory()
+          await expect(run(idb, c)).rejects.toThrow("reload")
+          await run(idb)
+          const logs = await logsOf(idb)
+          expect(levelsOf(logs), JSON.stringify(c)).toEqual([16, 32])
+          expect(logs.map(strip), JSON.stringify(c)).toEqual(wholeLogs.map(strip))
+          gateAccepts(logs)
+        }
+      })
+    })
+
+    it("a halt asked during a checkup abandons it; the halting save keeps the old lastLevel; after resume the level is checked exactly once", async () => {
+      const idb = new IDBFactory()
+      const inbox = new SessionInbox()
+      let level = 0
+      let answer: Promise<boolean> | undefined
+      // The halt is asked from inside M3 of the 16 CU checkup (step 10).
+      const suite = SUITE.map(m => (m.id === "M3" ? { ...m, measure: (...a: Parameters<Milestone["measure"]>) => {
+        if (level === 16 && !answer) answer = inbox.checkpointNow({ halt: true })
+        return m.measure(...a)
+      } } : m))
+      const events: SessionEvent[] = []
+      const r = await grow(idb, { suite, deps: { inbox, onEvent: e => { events.push(e); if (e.type === "checkupStarted") level = e.level } } })
+      expect(await answer).toBe(true)
+      expect(r).toMatchObject({ halted: true, steps: 10 })
+      expect(checkupEvents(events)).toEqual([["start", 8], ["done", 8, 5], ["start", 16]])
+      const cp = (await loadCheckpoint(idb, ID))!
+      expect(cp.steps).toBe(10)
+      expect(cp.checkups).toEqual({ lastLevel: 8, tail: [] })
+      expect(levelsOf(await logsOf(idb))).toEqual([8])
+      const again: SessionEvent[] = []
+      await grow(idb, { suite, deps: { onEvent: e => again.push(e) } })
+      expect(again[0]).toMatchObject({ type: "resumed", steps: 10, checkupTail: [] })
+      expect(checkupEvents(again)).toEqual([["start", 16], ["done", 16, 15], ["start", 32], ["done", 32, 20]])
+      const logs = await logsOf(idb)
+      expect(levelsOf(logs)).toEqual([8, 16, 32])
+      gateAccepts(logs)
+    })
+
+    it("a restore after 20 skips rolls back lastLevel, tail and caregiver to the checkpoint's, with no duplicate level in the logs", async () => {
+      const idb = new IDBFactory()
+      let poisoned = true, justRestored = false
+      let after: Awaited<ReturnType<typeof loadCheckpoint>>
+      cgSpy.inits.length = 0
+      // 0.5 CU a step, a sleep every 10: checkups 8 (step 20), 16 (40), 32 (70). Skips from 75 restore at 94 to the checkpoint at 70.
+      await grow(idb, {
+        cfg: { lifetimeCU: 64, sleepInterval: 10, caregiver: CARE }, stub: { cuPerStep: 0.5, skip: n => poisoned && n >= 75 },
+        deps: {
+          onEvent: e => { if (e.type === "restored") { poisoned = false; justRestored = true } },
+          onTick: async () => { if (justRestored) { justRestored = false; after = await loadCheckpoint(idb, ID) } },
+        },
+      })
+      expect(after!.steps).toBe(70)
+      expect(after!.checkups!.lastLevel).toBe(32)
+      expect(after!.checkups!.tail.map(c => [c.level, c.steps])).toEqual([[32, 70]])
+      expect(cgSpy.inits).toHaveLength(2)
+      expect(cgSpy.inits[1]).toEqual({ state: after!.caregiver })
+      const logs = await logsOf(idb)
+      expect(levelsOf(logs)).toEqual([8, 16, 32])
+      expect(logs.at(-1)).toMatchObject({ final: true, restores: 1 })
+      gateAccepts(logs)
+    })
+
+    it("a checkup whose milestone throws: the life goes on, the result has error true, the next log is written", async () => {
+      const idb = new IDBFactory()
+      const suite = SUITE.map(m => (m.id === "M2" ? { ...m, measure: () => { throw new Error("bad milestone") } } : m))
+      await grow(idb, { suite })
+      const logs = await logsOf(idb)
+      expect(levelsOf(logs)).toEqual([8, 16, 32])
+      for (const c of results(logs)) {
+        expect(c.error).toBe(true)
+        expect(c.measures.M2).toBeNull()
+        expect(c.passed).not.toContain("M2")
+      }
+      expect(logs.at(-1)!.final).toBe(true)
+      gateAccepts(logs)
+    })
+
+    it("a recoverable error inside a checkup propagates (resume from checkpoint) and the level reruns once", async () => {
+      class Lost extends Error {}
+      let m2 = 0
+      const suite = SUITE.map(m => (m.id === "M2" ? { ...m, measure: (...a: Parameters<Milestone["measure"]>) => {
+        if (m2++ === 1) throw new Lost("device lost") // in the 16 CU checkup
+        return m.measure(...a)
+      } } : m))
+      const idb = new IDBFactory()
+      const events: SessionEvent[] = []
+      const deps = { recoverable: (e: unknown) => e instanceof Lost, onEvent: (e: SessionEvent) => events.push(e) }
+      await expect(grow(idb, { suite, deps })).rejects.toBeInstanceOf(Lost)
+      expect((await logsOf(idb)).some(f => f.final)).toBe(false)
+      expect((await loadCheckpoint(idb, ID))!.checkups!.lastLevel).toBe(8)
+      await grow(idb, { suite, deps })
+      expect(checkupEvents(events).filter(e => e[1] === 16).map(e => e[0])).toEqual(["start", "start", "done"])
+      const logs = await logsOf(idb)
+      expect(levelsOf(logs)).toEqual([8, 16, 32])
+      expect(results(logs).some(c => c.error)).toBe(false) // it was not recorded as a milestone error
+      gateAccepts(logs)
+    })
+
+    it("a pre-04b checkpoint (no checkups or caregiver fields) resumes: lastLevel 0, caregiver from cfg", async () => {
+      const idb = new IDBFactory()
+      await expect(grow(idb, { checkups: false, deps: { onTick: ({ steps }) => { if (steps === 12) throw new Error("reload") } } })).rejects.toThrow("reload")
+      const old = (await readCheckpointRecord(idb, ID)) as Record<string, unknown>
+      expect(old.steps).toBe(10)
+      expect("checkups" in old || "caregiver" in old).toBe(false)
+      cgSpy.inits.length = 0
+      const events: SessionEvent[] = []
+      await grow(idb, { cfg: { caregiver: CARE }, deps: { onEvent: e => events.push(e) } })
+      expect(events[0]).toMatchObject({ type: "resumed", steps: 10, checkupTail: [] })
+      // lastLevel 0: the first clean sleep (step 15, 30 CU) checks the highest level due, 16.
+      expect(levelAtOrBelow(30)).toBe(16)
+      expect(checkupEvents(events)).toEqual([["start", 16], ["done", 16, 15], ["start", 32], ["done", 32, 20]])
+      expect(cgSpy.inits).toEqual([{ settings: clampCaregiverSettings(CARE), seed: hashSeed(7, "caregiver") }])
+      gateAccepts(await logsOf(idb))
+    })
+
+    it("Privileged wall: the learner gets observations, birth facts, its own state and manifests, nothing caregiver- or checkup-derived", async () => {
+      const idb = new IDBFactory()
+      const calls: [string, unknown[]][] = []
+      const inits: LearnerInit[] = []
+      const inner = stubFactory({ cuPerStep: 2, frozen: { evalPerStep: 0.001 }, knowledge: [] })
+      const spyLearner = async (init: LearnerInit): Promise<SessionLearner> => {
+        inits.push(init)
+        const l = await inner(init)
+        const wrap = <A extends unknown[], R>(name: string, f: (...a: A) => R) => (...a: A): R => { calls.push([name, a]); return f(...a) }
+        return {
+          step: wrap("step", l.step), sleep: wrap("sleep", l.sleep), save: wrap("save", l.save), stats: wrap("stats", l.stats), dispose: wrap("dispose", l.dispose),
+          onKnowledge: wrap("onKnowledge", l.onKnowledge!),
+          frozenRun: wrap("frozenRun", (fo: FrozenRunOptions): FrozenRun => {
+            const r = l.frozenRun!(fo)
+            return { step: wrap("frozen.step", r.step), result: wrap("frozen.result", r.result), dispose: wrap("frozen.dispose", r.dispose) }
+          }),
+        }
+      }
+      const inbox = new SessionInbox()
+      const events: SessionEvent[] = []
+      const deps = (stopAt?: number) => ({
+        createLearner: spyLearner, inbox, onEvent: (e: SessionEvent) => events.push(e),
+        onTick: ({ steps }: { steps: number }) => { if (steps === 3) inbox.setKnowledge(knowledgeWith("e".repeat(64))); if (steps === stopAt) throw new Error("reload") },
+      })
+      // 120 steps: long enough for the caregiver's period (50 steps).
+      await expect(grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps(12) })).rejects.toThrow("reload")
+      await grow(idb, { cfg: { lifetimeCU: 240, caregiver: CARE }, deps: deps() })
+      // Non-vacuous: checkups ran, the caregiver carried, knowledge was handed over, and a resume created from state.
+      expect(events.some(e => e.type === "checkup")).toBe(true)
+      expect(events.some(e => e.type === "carried")).toBe(true)
+      expect(calls.some(([n]) => n === "onKnowledge")).toBe(true)
+      expect(inits.some(i => "state" in i)).toBe(true)
+      const observations = calls.filter(([n]) => n === "step" || n === "frozen.step")
+      expect(observations.filter(([n]) => n === "frozen.step").length).toBeGreaterThan(0)
+      const strings: string[] = []
+      const noStrings = (v: unknown, path: string) => {
+        if (typeof v === "string") strings.push(path)
+        else if (v && typeof v === "object" && !ArrayBuffer.isView(v)) for (const [k, x] of Object.entries(v)) noStrings(x, `${path}.${k}`)
+      }
+      for (const [n, args] of observations) {
+        expect(args).toHaveLength(1)
+        const o = args[0] as Record<string, unknown>
+        expect(Object.keys(o).sort(), n).toEqual(["buttonHeld", "cursor", "fovea", "periphery"])
+        expect(o.fovea).toBeInstanceOf(Uint8Array)
+        expect(o.periphery).toBeInstanceOf(Uint8Array)
+        noStrings(o, n)
+      }
+      expect(strings).toEqual([])
+      for (const i of inits) for (const k of Object.keys(i)) expect(["seed", "widths", "settings", "heldOut", "state"]).toContain(k)
+      for (const [, args] of calls.filter(([n]) => n === "onKnowledge")) {
+        expect(args).toHaveLength(1)
+        for (const k of Object.keys(args[0] as object)) expect(["knowledgeSha", "codeSha", "learnerStateVersion"]).toContain(k)
+        expect((args[0] as Manifest).knowledgeSha).toMatch(/^[0-9a-f]{64}$/)
+      }
+      // No TraceEvent (kind, room), PrivilegedState (room, hovered), CheckupResult (passed) or CaregiverState (m6Streak).
+      const FORBIDDEN = ["kind", "room", "hovered", "passed", "m6Streak"]
+      const found: string[] = []
+      const seen = new Set<object>()
+      const scan = (v: unknown, path: string) => {
+        if (!v || typeof v !== "object" || ArrayBuffer.isView(v) || seen.has(v)) return
+        seen.add(v)
+        for (const [k, x] of Object.entries(v)) {
+          if (FORBIDDEN.includes(k)) found.push(`${path}.${k}`)
+          scan(x, `${path}.${k}`)
+        }
+      }
+      calls.forEach(([n, args], i) => scan(args, `${n}#${i}`))
+      inits.forEach((x, i) => scan(x, `init#${i}`))
+      expect(found).toEqual([])
     })
   })
 })

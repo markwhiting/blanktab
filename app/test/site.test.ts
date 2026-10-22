@@ -34,7 +34,7 @@ describe("historyRows", () => {
     expect(r).toEqual({
       learnerId: "lrn_aaaaaaaaaaaaaaaa",
       href: "https://github.com/markwhiting/learner/tree/main/data/runs/lrn_aaaaaaaaaaaaaaaa",
-      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu", cu: "—", lossRatio: "—", heldOutRatio: "—",
+      steps: "1500", final: "no", setting: "moveProbability = 0.123", host: "4 cores · no webgpu", cu: "—", lossRatio: "—", heldOutRatio: "—", milestones: "—",
     })
     expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { settings: {} })] }, REPO)[0]).toMatchObject({ final: "yes", setting: "none", host: "8 cores · webgpu" })
   })
@@ -42,6 +42,13 @@ describe("historyRows", () => {
     const [r] = historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: 1024.4567, lossRatio: 0.87654, heldOutRatio: 1.04321 })] }, REPO)
     expect(r).toMatchObject({ cu: "1024.457", lossRatio: "0.877", heldOutRatio: "1.043" })
     expect(historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, { cu: null, lossRatio: null, heldOutRatio: null })] }, REPO)[0]).toMatchObject({ cu: "—", lossRatio: "—", heldOutRatio: "—" })
+  })
+  it("historyRows: a milestones column, '2 of 6 at 512 CU', and '—' without checkupScore", () => {
+    const at = (over: Partial<SessionRow>) => historyRows({ schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa", 0, over)] }, REPO)[0]!.milestones
+    expect(at({ checkupScore: { level: 512, score: 2 } })).toBe("2 of 6 at 512 CU")
+    expect(at({ checkupScore: { level: 2048, score: 0 } })).toBe("0 of 6 at 2,048 CU")
+    expect(at({ checkupScore: null })).toBe("—")
+    expect(at({})).toBe("—")
   })
 })
 

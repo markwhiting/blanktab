@@ -1,7 +1,8 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
+import { checkCaregiverState, type CaregiverState } from "./caregiver"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_SUITE_VERSION, isLogLevel, parseCheckups, type CheckupResult, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
@@ -36,6 +37,13 @@ export interface Checkpoint<S = LearnerState> {
    * of another version) is ended on the record under this code, the one it was lived on. Absent in older checkpoints.
    */
   codeSha?: string
+  /**
+   * Checkups (decision 0016): the highest level checked so far (0: none) and the results not yet in a log file. Absent
+   * in checkpoints written before checkups (lastLevel 0 then).
+   */
+  checkups?: { lastLevel: number; tail: CheckupResult[] }
+  /** The caregiver's state, when the life has one. Absent in older checkpoints (and lives without one). */
+  caregiver?: CaregiverState
   learnerState: S
 }
 
@@ -56,7 +64,27 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (r.knowledgeSha !== undefined && !(typeof r.knowledgeSha === "string" && KNOWLEDGE_SHA_RE.test(r.knowledgeSha))) fail("knowledgeSha must be 64 lowercase hex chars")
   if (r.sessionsSeenAtBirth !== undefined && !isNonNegInt(r.sessionsSeenAtBirth)) fail("sessionsSeenAtBirth must be a non-negative integer")
   if (r.codeSha !== undefined && !(typeof r.codeSha === "string" && CODE_SHA_RE.test(r.codeSha))) fail("codeSha must be 40 lowercase hex chars or \"dev\"")
+  if (r.checkups !== undefined) checkCheckups(r.checkups, r.cu as number, r.steps as number, fail)
+  if (r.caregiver !== undefined) {
+    try {
+      checkCaregiverState(r.caregiver)
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e))
+    }
+  }
   if (!("learnerState" in r)) fail("no learnerState")
+}
+
+const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every(k => keys.includes(k))
+
+function checkCheckups(v: unknown, cu: number, steps: number, fail: (what: string) => void): void {
+  if (!isRec(v) || !onlyKeys(v, ["lastLevel", "tail"])) return fail("checkups must be { lastLevel, tail }")
+  const { lastLevel, tail } = v
+  if (!(lastLevel === 0 || (typeof lastLevel === "number" && isLogLevel(lastLevel) && lastLevel <= cu))) fail("checkups.lastLevel must be 0 or a log level no more than cu")
+  const parsed = parseCheckups(tail, MILESTONE_SUITE_VERSION, cu, steps)
+  if (typeof parsed === "string") return fail(`checkups.tail: ${parsed}`)
+  if (parsed.some(c => c.level > (lastLevel as number))) fail("checkups.tail has a level above lastLevel")
 }
 
 /**

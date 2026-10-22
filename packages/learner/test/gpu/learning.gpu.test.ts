@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { createCpuBackend, createWebGpuBackend, isSoftwareAdapter } from "@blanktab/tensor"
 import type { Backend } from "@blanktab/tensor"
-import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, type Action } from "@blanktab/interface"
+import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, isValidAction, type Action } from "@blanktab/interface"
 import { createRng } from "@blanktab/tensor"
 import { DEFAULT_SETTINGS, createLearner, type HeldOutSet } from "../../src/learner"
 import type { Widths } from "../../src/model"
@@ -74,5 +74,35 @@ describe("the learner on WebGPU", () => {
     expect(onGpu.stats.heldOutBaseline).toBe(cpu.stats.heldOutBaseline)
     expect(onGpu.stats.evalCU).toBeCloseTo(cpu.stats.evalCU, 12)
     expect(onGpu.stats.evalCU).toBeGreaterThan(0)
+  })
+
+  it("a 300-step frozen run on WebGPU: valid actions, liveBuffers back to its value before", async () => {
+    const gpu = await createWebGpuBackend({ powerPreference: "high-performance" })
+    if (!gpu) throw new Error("WebGPU backend unavailable")
+    if (!allowSoftware && isSoftwareAdapter(gpu.adapterInfo)) throw new Error(`software adapter ${JSON.stringify(gpu.adapterInfo)}`)
+    const learner = await createLearner({ backend: gpu, seed: SEED, widths: TINY, settings: { ...DEFAULT_SETTINGS } })
+    const world = createSyntheticStream()
+    for (let i = 0; i < 50; i++) world.act(await learner.step(world.observe()))
+    const before = gpu.stats.liveBuffers
+    const s0 = learner.stats()
+    const run = learner.frozenRun({ seed: 7, measureLoss: true })
+    const other = createSyntheticStream({ start: { x: 60, y: 60 } })
+    const actions: Action[] = []
+    for (let i = 0; i < STEPS; i++) {
+      const a = await run.step(other.observe())
+      actions.push(a)
+      other.act(a)
+    }
+    const r = run.result()
+    run.dispose()
+    console.log(JSON.stringify({ frozen: r, evalCU: learner.stats().evalCU - s0.evalCU }))
+    expect(actions.every(isValidAction)).toBe(true)
+    expect(r.transitions).toBe(STEPS - 1)
+    expect(Number.isFinite(r.predLoss) && Number.isFinite(r.baselineLoss)).toBe(true)
+    expect(gpu.stats.liveBuffers).toBe(before)
+    expect(learner.stats().cu).toBe(s0.cu)
+    expect(learner.stats().steps).toBe(s0.steps)
+    expect(learner.stats().evalCU).toBeGreaterThan(s0.evalCU)
+    learner.dispose()
   })
 })

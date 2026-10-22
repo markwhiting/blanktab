@@ -1,5 +1,6 @@
 // Pure helpers for the page's text: the history table, the links, the build label. No DOM here.
 import type { SessionRow, Summary } from "@blanktab/harness"
+import { SUITE_SIZE, fmtLevel } from "./milestones"
 
 export interface Repo { readonly owner: string; readonly name: string }
 
@@ -25,6 +26,8 @@ export interface HistoryRow {
   cu: string; lossRatio: string
   /** The latest held-out ratio (decision 0015 §3), "—" for a learner from before the held-out check. */
   heldOutRatio: string
+  /** The latest checkup's score, "2 of 6 at 512 CU", or "—" for a learner without one. */
+  milestones: string
 }
 
 const orDash = (v: number | null | undefined) => (typeof v === "number" ? fmt(v) : "—")
@@ -55,6 +58,7 @@ export function historyRows(summary: Summary, repo: Repo): HistoryRow[] {
       cu: orDash(s.cu),
       lossRatio: orDash(s.lossRatio),
       heldOutRatio: orDash(s.heldOutRatio),
+      milestones: s.checkupScore ? `${s.checkupScore.score} of ${SUITE_SIZE} at ${fmtLevel(s.checkupScore.level)} CU` : "—",
     }))
 }
 
