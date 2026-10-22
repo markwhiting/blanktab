@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest"
+import committedPrior from "../../../knowledge/caregiver-prior.json"
+import committedSpace from "../../../knowledge/settings-space.json"
+import { CAREGIVER_DEFAULTS, CAREGIVER_RANGES } from "../src/caregiver"
 import { loadKnowledge, loadManifest, chooseSettings, OFFLINE_KNOWLEDGE_SHA, type Knowledge } from "../src/knowledge"
 
 const row = (id: string) => ({
@@ -25,10 +28,10 @@ function fakeFetch(files: Record<string, unknown>, opts: { status?: number; thro
 }
 
 describe("loadKnowledge", () => {
-  it("fetches the three files under <base>knowledge/ and returns them", async () => {
+  it("fetches the four files under <base>knowledge/ and returns them", async () => {
     const f = fakeFetch(FILES)
     const k = await loadKnowledge("/learner/", f.fn)
-    expect([...f.urls].sort()).toEqual(["/learner/knowledge/manifest.json", "/learner/knowledge/settings-space.json", "/learner/knowledge/summary.json"])
+    expect([...f.urls].sort()).toEqual(["/learner/knowledge/caregiver-prior.json", "/learner/knowledge/manifest.json", "/learner/knowledge/settings-space.json", "/learner/knowledge/summary.json"])
     expect(k.offline).toBe(false)
     expect(k.summary.sessions).toHaveLength(2)
     expect(k.manifest.knowledgeSha).toBe("c".repeat(64))
@@ -81,6 +84,47 @@ describe("loadKnowledge", () => {
   })
 })
 
+describe("caregiver prior", () => {
+  const prior = { caregiverPeriod: 300, caregiverTau: 0.1, caregiverEpsilon: 0.2, caregiverThreshold: 0.02, caregiverStuckSteps: 1500 }
+  it("loads caregiver-prior.json; missing or malformed gives CAREGIVER_DEFAULTS and offline stays false", async () => {
+    const f = fakeFetch({ ...FILES, "caregiver-prior.json": { schemaVersion: 1, settings: prior } })
+    const k = await loadKnowledge("/", f.fn)
+    expect(k.offline).toBe(false)
+    expect(k.caregiverPrior).toEqual(prior)
+    expect(f.urls).toContain("/knowledge/caregiver-prior.json")
+    const bads: unknown[] = [
+      undefined, "<html>", { schemaVersion: 2, settings: prior }, { schemaVersion: 1 }, { schemaVersion: 1, settings: [] },
+      { schemaVersion: 1, settings: { ...prior, caregiverTau: "0.1" } }, { schemaVersion: 1, settings: { ...prior, caregiverPeriod: 5 } },
+      { schemaVersion: 1, settings: { ...prior, caregiverEpsilon: 2 } }, { schemaVersion: 1, settings: { caregiverPeriod: 300 } },
+    ]
+    for (const bad of bads) {
+      const files = { ...FILES, ...(bad === undefined ? {} : { "caregiver-prior.json": bad }) }
+      const kk = await loadKnowledge("/", fakeFetch(files).fn)
+      expect(kk.offline).toBe(false)
+      expect(kk.caregiverPrior).toEqual(CAREGIVER_DEFAULTS)
+      expect(kk.manifest.knowledgeSha).toBe("c".repeat(64))
+    }
+  })
+  it("the offline fallback carries the defaults too", async () => {
+    const k = await loadKnowledge("/", fakeFetch(FILES, { throws: true }).fn)
+    expect(k.caregiverPrior).toEqual(CAREGIVER_DEFAULTS)
+  })
+  it("the committed prior lies inside the settings-space ranges", () => {
+    const file = committedPrior
+    expect(file).toEqual({ schemaVersion: 1, settings: CAREGIVER_DEFAULTS })
+    const space: { name: string; min: number; max: number }[] = committedSpace.settings
+    for (const [name, value] of Object.entries(file.settings as Record<string, number>)) {
+      const row = space.find(s => s.name === name)
+      expect(row, name).toBeDefined()
+      expect(value, name).toBeGreaterThanOrEqual(row!.min)
+      expect(value, name).toBeLessThanOrEqual(row!.max)
+      const [lo, hi] = CAREGIVER_RANGES[name as keyof typeof CAREGIVER_RANGES]
+      expect(row!.min, name).toBeGreaterThanOrEqual(lo)
+      expect(row!.max, name).toBeLessThanOrEqual(hi)
+    }
+  })
+})
+
 describe("the manifest's learnerStateVersion", () => {
   it("is read when present (a positive integer) and left out when absent (a manifest from before it existed)", async () => {
     const withV = await loadKnowledge("/", fakeFetch({ ...FILES, "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: 3 } }).fn)
@@ -111,6 +155,7 @@ describe("loadManifest", () => {
 describe("chooseSettings", () => {
   const k = (settings: { name: string; min: number; max: number }[]): Knowledge => ({
     offline: false, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha: "c".repeat(64), codeSha: "dev" }, settingsSpace: { settings },
+    caregiverPrior: { ...CAREGIVER_DEFAULTS },
   })
   it("draws each setting uniformly within its range", () => {
     const space = k([{ name: "moveProbability", min: 0.1, max: 1 }, { name: "other", min: -2, max: -1 }])

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { mkdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -33,6 +33,16 @@ describe("computeKnowledgeSha", () => {
     expect(b).not.toBe(a)
     writeFileSync(join(dir, "settings-space.json"), "S2")
     expect(computeKnowledgeSha(dir)).not.toBe(b)
+  })
+})
+
+describe("the committed knowledge directory", () => {
+  it("adding caregiver-prior.json changes computeKnowledgeSha (expected: one boundary log per running tab)", () => {
+    writeFileSync(join(dir, "settings-space.json"), "S")
+    writeFileSync(join(dir, "consolidation-prior.json"), "C")
+    const without = computeKnowledgeSha(dir)
+    writeFileSync(join(dir, "caregiver-prior.json"), readFileSync(new URL("../../../knowledge/caregiver-prior.json", import.meta.url), "utf8"))
+    expect(computeKnowledgeSha(dir)).not.toBe(without)
   })
 })
 

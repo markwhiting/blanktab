@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import type { Knowledge, Manifest } from "@blanktab/harness"
+import { CAREGIVER_DEFAULTS, type Knowledge, type Manifest } from "@blanktab/harness"
 import {
   CHECKPOINT_RETRY_MS, INCOMPATIBLE_MESSAGE, STALE_MESSAGE, KNOWLEDGE_POLL, MANIFEST_POLL, RELOAD_JITTER_MS, RELOAD_TARGET_KEY, createPoller, jittered,
   onWorkerLoadFailure, startUpdates, type UpdatesDeps,
@@ -179,6 +179,7 @@ describe("createPoller", () => {
 const SHA = "a".repeat(40), NEW = "b".repeat(40)
 const knowledge = (knowledgeSha: string, offline = false): Knowledge => ({
   offline, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha, codeSha: SHA, learnerStateVersion: 1 }, settingsSpace: { settings: [] },
+  caregiverPrior: { ...CAREGIVER_DEFAULTS },
 })
 
 describe("startUpdates", () => {
