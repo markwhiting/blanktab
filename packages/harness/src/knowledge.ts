@@ -62,14 +62,16 @@ function asSettingsSpace(v: unknown): Knowledge["settingsSpace"] {
   return { settings }
 }
 
-/** Strict: every caregiver setting present, finite and inside its range, else the whole prior is malformed. */
+const INTEGER_KEYS: ReadonlySet<string> = new Set(["caregiverPeriod", "caregiverStuckSteps"])
+
+/** Strict: every caregiver setting present, finite and inside its range (counts integral), else the whole prior is malformed. */
 function asCaregiverPrior(v: unknown): CaregiverSettings {
   if (!isObj(v) || v.schemaVersion !== 1 || !isObj(v.settings)) throw new Error("bad caregiver-prior.json")
   const out = { ...CAREGIVER_DEFAULTS }
   for (const key of Object.keys(CAREGIVER_RANGES) as (keyof CaregiverSettings)[]) {
     const x = v.settings[key]
     const [lo, hi] = CAREGIVER_RANGES[key]
-    if (!isNum(x) || x < lo || x > hi) throw new Error(`bad caregiver-prior.json ${key}`)
+    if (!isNum(x) || x < lo || x > hi || (INTEGER_KEYS.has(key) && !Number.isInteger(x))) throw new Error(`bad caregiver-prior.json ${key}`)
     out[key] = x
   }
   return out
@@ -85,9 +87,9 @@ async function getJson(baseUrl: string, fetchFn: typeof fetch, name: string): Pr
 export async function loadKnowledge(baseUrl: string, fetchFn: typeof fetch): Promise<Knowledge> {
   const get = (name: string) => getJson(baseUrl, fetchFn, name)
   try {
-    const [summary, manifest, settingsSpace] = await Promise.all([get("summary.json"), get("manifest.json"), get("settings-space.json")])
     // The caregiver prior is optional: a tab born before it was published still runs, on the defaults.
-    const caregiverPrior = await get("caregiver-prior.json").then(asCaregiverPrior).catch(() => ({ ...CAREGIVER_DEFAULTS }))
+    const prior = get("caregiver-prior.json").then(asCaregiverPrior).catch(() => ({ ...CAREGIVER_DEFAULTS }))
+    const [summary, manifest, settingsSpace, caregiverPrior] = await Promise.all([get("summary.json"), get("manifest.json"), get("settings-space.json"), prior])
     return { offline: false, summary: asSummary(summary), manifest: asManifest(manifest), settingsSpace: asSettingsSpace(settingsSpace), caregiverPrior }
   } catch {
     return offlineKnowledge()

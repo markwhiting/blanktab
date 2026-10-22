@@ -30,6 +30,9 @@ describe("observe", () => {
     const before = JSON.stringify(c.state())
     c.observe("a", NaN)
     c.observe("c", NaN)
+    c.observe("a", Infinity)
+    c.observe("a", -Infinity)
+    c.observe("c", Infinity)
     expect(JSON.stringify(c.state())).toBe(before)
   })
 })
@@ -118,10 +121,10 @@ describe("safety net", () => {
     // never decides on a sleep or the period while safety net is on and not stuck long enough
     for (let i = 1; i < 100; i++) expect(c.decide("a", rooms, i % 10 === 0)).toBeNull()
     expect(c.state().stuckFor).toBe(99)
-    // step 100: stuck long enough -> it decides (a pick of the current room is no move, but the count still resets)
-    const first = c.decide("a", rooms, false)
+    // step 100: stuck long enough -> it decides; from "z" (not in rooms) every pick is a real move
+    expect(c.decide("z", rooms, false)).not.toBeNull()
     expect(c.state().stuckFor).toBe(0)
-    expect(c.state().carries).toBe(first === null ? 0 : 1)
+    expect(c.state().carries).toBe(1)
     // and then waits another full stuckSteps
     for (let i = 1; i < 100; i++) expect(c.decide("a", rooms, true)).toBeNull()
     expect(c.state().stuckFor).toBe(99)
@@ -161,6 +164,23 @@ describe("state", () => {
     d.observe("a", 5)
     expect(c.state().rooms.a).toEqual({ fast: 1, slow: 1 })
     expect(st.rooms.a).toEqual({ fast: 1, slow: 1 })
+  })
+})
+
+describe("robustness", () => {
+  it("clamps settings on creation and on restore (tau 0 cannot divide by zero)", () => {
+    const c = createCaregiver({ settings: { ...CAREGIVER_DEFAULTS, caregiverTau: 0, caregiverPeriod: NaN, caregiverEpsilon: 9 }, seed: 1 })
+    expect(c.state().settings).toMatchObject({ caregiverTau: 0.001, caregiverPeriod: 500, caregiverEpsilon: 1 })
+    c.observe("a", 1); for (let i = 0; i < 20; i++) c.observe("a", 0.1)
+    expect(["a", "b"]).toContain(c.decide("z", ["a", "b"], true))
+    const st = c.state(); st.settings.caregiverTau = 0
+    expect(createCaregiver({ state: st }).state().settings.caregiverTau).toBe(0.001)
+  })
+  it("rejects a restored state with a non-finite average or a bad rng", () => {
+    const st = mk().state()
+    expect(() => createCaregiver({ state: { ...st, rooms: { a: { fast: NaN, slow: 1 } } } })).toThrow(RangeError)
+    expect(() => createCaregiver({ state: { ...st, rooms: { a: { fast: 1, slow: Infinity } } } })).toThrow(RangeError)
+    for (const rng of [-1, 1.5, 2 ** 32, NaN]) expect(() => createCaregiver({ state: { ...st, rng } })).toThrow(RangeError)
   })
 })
 

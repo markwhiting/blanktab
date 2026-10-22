@@ -95,7 +95,8 @@ describe("caregiver prior", () => {
     const bads: unknown[] = [
       undefined, "<html>", { schemaVersion: 2, settings: prior }, { schemaVersion: 1 }, { schemaVersion: 1, settings: [] },
       { schemaVersion: 1, settings: { ...prior, caregiverTau: "0.1" } }, { schemaVersion: 1, settings: { ...prior, caregiverPeriod: 5 } },
-      { schemaVersion: 1, settings: { ...prior, caregiverEpsilon: 2 } }, { schemaVersion: 1, settings: { caregiverPeriod: 300 } },
+      { schemaVersion: 1, settings: { ...prior, caregiverEpsilon: 2 } }, { schemaVersion: 1, settings: { ...prior, caregiverPeriod: 300.5 } },
+      { schemaVersion: 1, settings: { ...prior, caregiverStuckSteps: 1500.5 } }, { schemaVersion: 1, settings: { caregiverPeriod: 300 } },
     ]
     for (const bad of bads) {
       const files = { ...FILES, ...(bad === undefined ? {} : { "caregiver-prior.json": bad }) }

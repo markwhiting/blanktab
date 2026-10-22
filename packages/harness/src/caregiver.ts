@@ -65,7 +65,7 @@ export interface CaregiverState {
 }
 
 export interface Caregiver {
-  /** The loss of the transition just learned from, seen in `room`. NaN is ignored. */
+  /** The loss of the transition just learned from, seen in `room`. NaN and ±Infinity are ignored. */
   observe(room: string, loss: number): void
   /** Once per learner step, after observe: a room to carry the learner to, or null. */
   decide(current: string, rooms: readonly string[], afterSleep: boolean): string | null
@@ -76,13 +76,21 @@ export interface Caregiver {
   state(): CaregiverState
 }
 
+/** A restored state must not smuggle a non-finite learning progress or a bad RNG state into pick(). */
+function validateState(s: CaregiverState): void {
+  if (!(Number.isInteger(s.rng) && s.rng >= 0 && s.rng < 2 ** 32)) throw new RangeError(`caregiver state: rng must be a uint32, got ${s.rng}`)
+  for (const [room, r] of Object.entries(s.rooms))
+    if (!Number.isFinite(r.fast) || !Number.isFinite(r.slow)) throw new RangeError(`caregiver state: non-finite loss average for room ${room}`)
+}
+
 export function createCaregiver(init: { settings: CaregiverSettings; seed: number } | { state: CaregiverState }): Caregiver {
+  if ("state" in init) validateState(init.state)
   const rng = createRng("state" in init ? init.state.rng : init.seed)
   const st: CaregiverState = "state" in init
     ? structuredClone(init.state)
-    : { version: 1, settings: { ...init.settings }, rng: rng.getState(), rooms: {}, sinceDecision: 0, stuckFor: 0, m6Streak: 0, safetyNet: false, carries: 0, to: {} }
-  const { settings } = st
-
+    : { version: 1, settings: init.settings, rng: rng.getState(), rooms: {}, sinceDecision: 0, stuckFor: 0, m6Streak: 0, safetyNet: false, carries: 0, to: {} }
+  st.settings = clampCaregiverSettings(st.settings) // tau 0 etc. must not reach the softmax
+  
   /** Learning progress per room; an unvisited room is as promising as the best visited one (0 if none is visited). */
   function progress(rooms: readonly string[]): number[] {
     const visited = Object.values(st.rooms).map(learningProgress)
@@ -93,12 +101,12 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
   function pick(rooms: readonly string[]): string {
     const lp = progress(rooms)
     const top = Math.max(...lp)
-    const w = lp.map(x => Math.exp((x - top) / settings.caregiverTau))
+    const w = lp.map(x => Math.exp((x - top) / st.settings.caregiverTau))
     const z = w.reduce((a, b) => a + b, 0)
     const u = rng()
     let acc = 0
     for (let i = 0; i < rooms.length; i++) {
-      acc += (1 - settings.caregiverEpsilon) * (w[i]! / z) + settings.caregiverEpsilon / rooms.length
+      acc += (1 - st.settings.caregiverEpsilon) * (w[i]! / z) + st.settings.caregiverEpsilon / rooms.length
       if (u < acc) return rooms[i]!
     }
     return rooms[rooms.length - 1]!
@@ -106,7 +114,7 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
 
   return {
     observe(room, loss) {
-      if (Number.isNaN(loss)) return
+      if (!Number.isFinite(loss)) return
       const r = st.rooms[room]
       if (!r) st.rooms[room] = { fast: loss, slow: loss }
       else {
@@ -119,12 +127,12 @@ export function createCaregiver(init: { settings: CaregiverSettings; seed: numbe
       let go: boolean
       if (st.safetyNet) {
         const visited = Object.values(st.rooms)
-        const stuck = visited.length > 0 && visited.every(r => learningProgress(r) < settings.caregiverThreshold)
+        const stuck = visited.length > 0 && visited.every(r => learningProgress(r) < st.settings.caregiverThreshold)
         st.stuckFor = stuck ? st.stuckFor + 1 : 0
-        go = st.stuckFor >= settings.caregiverStuckSteps
+        go = st.stuckFor >= st.settings.caregiverStuckSteps
         if (go) st.stuckFor = 0
       } else {
-        go = afterSleep || st.sinceDecision >= settings.caregiverPeriod
+        go = afterSleep || st.sinceDecision >= st.settings.caregiverPeriod
       }
       if (!go || rooms.length === 0) return null
       st.sinceDecision = 0
