@@ -575,7 +575,7 @@ test("growing up: a 'Has it grown up?' panel with no checkup yet, a caregiver li
   await setup(page, { knowledge: "ok" })
   await page.goto(LONG)
   await expect(page.getByRole("heading", { name: "Has it grown up?" })).toBeVisible()
-  await expect(page.getByTestId("milestone-text")).toHaveText("no checkup yet (the first is at 8 CU)")
+  await expect(page.getByTestId("milestone-text")).toHaveText("no checkup yet (the first comes soon after it has lived 8 CU)")
   await expect(page.getByTestId("milestones")).toHaveAttribute("data-bars", "0")
   await expect(page.getByTestId("caregiver")).toHaveText(/^has (not carried it yet|carried it (once|\d+ times))/)
   await expect.poll(() => stepsLived(page)).toBeGreaterThan(0)
@@ -585,6 +585,28 @@ test("growing up: a 'Has it grown up?' panel with no checkup yet, a caregiver li
   expect(names.indexOf("Milestones")).toBe(names.indexOf("Own-stream ratio") + 1)
   await expect(page.getByTestId("history").locator("tbody tr").nth(0)).toContainText("—")
   expect(errors).toEqual([])
+})
+
+test.describe("on a 2x display", () => {
+  test.use({ deviceScaleFactor: 2 })
+  test("charts drawn while LEARNER is hidden keep their size, and are drawn again when it is shown", async ({ page }) => {
+    await setup(page, { knowledge: "ok" })
+    await page.goto(LONG)
+    await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+    const sizes = () => page.evaluate(() => ["curve", "milestones"].map(id => {
+      const c = document.querySelector<HTMLCanvasElement>(`[data-testid="${id}"]`)!
+      return [c.width, c.height]
+    }))
+    const shown = await sizes()
+    await page.getByRole("tab", { name: "History" }).click()
+    // A curve point arrives at every sleep (every 5 steps): several draws while the canvases are hidden.
+    const points = await curvePoints(page)
+    await expect.poll(() => curvePoints(page), { timeout: 30_000 }).toBeGreaterThan(points + 3)
+    expect(await sizes()).toEqual(shown)
+    await page.getByRole("tab", { name: "Learner" }).click()
+    expect(await sizes()).toEqual(shown)
+    await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  })
 })
 
 test("HISTORY says so when there are no past sessions", async ({ page }) => {

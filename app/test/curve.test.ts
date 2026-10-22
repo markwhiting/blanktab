@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import type { CurvePoint } from "@blanktab/harness"
-import { ownStreamText, ratioText, sparkline, appendPoints, MAX_SHOWN_POINTS } from "../src/curve"
+import { ownStreamText, ratioText, sparkline, appendPoints, MAX_SHOWN_POINTS, fitCanvas } from "../src/curve"
 
 /** A point whose held-out score is (loss, baseline); its own-stream losses are something else entirely. */
 const pt = (cu: number, loss: number, baseline: number, steps = Math.round(cu * 100)): CurvePoint => ({ cu, steps, predLoss: 9, baselineLoss: 10, heldOut: { loss, baseline } })
@@ -80,5 +80,15 @@ describe("appendPoints", () => {
     expect(many.length).toBeLessThanOrEqual(MAX_SHOWN_POINTS)
     expect(many.at(-1)!.steps).toBe(MAX_SHOWN_POINTS * 3 - 1)
     expect(many[0]!.steps).toBeLessThan(4) // the oldest survivor is still from the start of the life
+  })
+})
+
+describe("fitCanvas", () => {
+  it("sizes the bitmap to the CSS box times the pixel ratio; a box that is not laid out (a hidden tab) is not sized at all", () => {
+    expect(fitCanvas(386, 96, 2)).toEqual({ w: 386, h: 96, width: 772, height: 192, dpr: 2 })
+    expect(fitCanvas(100.4, 64, 1.5)).toEqual({ w: 100.4, h: 64, width: 151, height: 96, dpr: 1.5 })
+    expect(fitCanvas(0, 0, 2)).toBeNull()
+    expect(fitCanvas(0, 96, 2)).toBeNull()
+    expect(fitCanvas(100, 50, 0)).toEqual({ w: 100, h: 50, width: 100, height: 50, dpr: 1 })
   })
 })

@@ -1,7 +1,7 @@
 // Plain DOM rendering. No framework: three tabs, a handful of labelled fields, four canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
 import { REPO, type CheckupResult, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
-import { appendPoints, ownStreamText, ratioText, sparkline } from "./curve"
+import { appendPoints, fitCanvas, ownStreamText, ratioText, sparkline } from "./curve"
 import { appendCheckups, milestoneBars, milestoneText } from "./milestones"
 import { buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
@@ -24,6 +24,23 @@ function painter(canvas: HTMLCanvasElement, w: number, h: number): (rgb: Uint8Ar
   }
 }
 
+/**
+ * A chart canvas sized to its CSS box at this display's pixel ratio, cleared, with a transform to CSS pixels. Null while
+ * it is not laid out (its tab hidden): nothing is drawn or resized then (the tab redraws it when shown).
+ */
+function prepareCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number } | null {
+  const ctx = canvas.getContext("2d")
+  const fit = fitCanvas(canvas.clientWidth, canvas.clientHeight, globalThis.devicePixelRatio || 1)
+  if (!ctx || !fit) return null
+  if (canvas.width !== fit.width || canvas.height !== fit.height) {
+    canvas.width = fit.width
+    canvas.height = fit.height
+  }
+  ctx.setTransform(fit.dpr, 0, 0, fit.dpr, 0, 0)
+  ctx.clearRect(0, 0, fit.w, fit.h)
+  return { ctx, w: fit.w, h: fit.h }
+}
+
 /** Compute units as shown: three decimals below 10 CU, one above. */
 const fmtCU = (cu: number) => (cu < 10 ? cu.toFixed(3) : cu.toFixed(1))
 
@@ -32,16 +49,10 @@ const fmtCU = (cu: number) => (cu < 10 ? cu.toFixed(3) : cu.toFixed(1))
  * lazy guess dashed over them. data-points counts the points drawn (those with a held-out score).
  */
 function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): void {
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return
-  const dpr = globalThis.devicePixelRatio || 1
-  const w = canvas.clientWidth || canvas.width, h = canvas.clientHeight || canvas.height
-  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-    canvas.width = Math.round(w * dpr)
-    canvas.height = Math.round(h * dpr)
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, h)
+  canvas.dataset.points = String(sparkline(points, 1, 1).pred.length)
+  const p = prepareCanvas(canvas)
+  if (!p) return
+  const { ctx, w, h } = p
   const css = getComputedStyle(canvas)
   const line = (pts: [number, number][], color: string, dash: number[]) => {
     if (pts.length === 0) return
@@ -58,7 +69,6 @@ function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): vo
   // The lazy guess goes on top, dashed: where the learner is no better than it, the two lines coincide and both still show.
   line(pred, css.getPropertyValue("--curve-pred").trim() || "teal", [])
   line(base, css.getPropertyValue("--curve-base").trim() || "orange", [5, 4])
-  canvas.dataset.points = String(pred.length)
 }
 
 /**
@@ -66,16 +76,10 @@ function drawCurve(canvas: HTMLCanvasElement, points: readonly CurvePoint[]): vo
  * all six. data-bars counts the bars drawn.
  */
 function drawMilestones(canvas: HTMLCanvasElement, results: readonly CheckupResult[]): void {
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return
-  const dpr = globalThis.devicePixelRatio || 1
-  const w = canvas.clientWidth || canvas.width, h = canvas.clientHeight || canvas.height
-  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-    canvas.width = Math.round(w * dpr)
-    canvas.height = Math.round(h * dpr)
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, h)
+  canvas.dataset.bars = String(results.length)
+  const p = prepareCanvas(canvas)
+  if (!p) return
+  const { ctx, w, h } = p
   const css = getComputedStyle(canvas)
   const pad = 4
   ctx.beginPath()
@@ -89,13 +93,11 @@ function drawMilestones(canvas: HTMLCanvasElement, results: readonly CheckupResu
   ctx.globalAlpha = 1
   ctx.setLineDash([])
   ctx.fillStyle = css.getPropertyValue("--accent-green").trim() || "green"
-  const bars = milestoneBars(results, w, h, pad)
-  for (const b of bars) ctx.fillRect(b.x, b.y, b.w, b.h)
-  canvas.dataset.bars = String(bars.length)
+  for (const b of milestoneBars(results, w, h, pad)) ctx.fillRect(b.x, b.y, b.w, b.h)
 }
 
-/** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. */
-function setupTabs(): void {
+/** Client-side tabs: real buttons with aria-selected, arrow keys move between them. Idempotent. `shown` runs after each switch. */
+function setupTabs(shown: () => void): void {
   const tabs = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
   const select = (t: HTMLButtonElement, focus: boolean) => {
     for (const x of tabs) {
@@ -105,6 +107,7 @@ function setupTabs(): void {
       $(`#${x.getAttribute("aria-controls")!}`).hidden = !on
     }
     if (focus) t.focus()
+    shown()
   }
   tabs.forEach((t, i) => {
     t.onclick = () => select(t, false)
@@ -196,7 +199,11 @@ export function createUi(): Ui {
   let lifetime: number | undefined
   let curve: CurvePoint[] = []
   let checkups: CheckupResult[] = []
-  setupTabs()
+  // Charts are not drawn while their tab is hidden (they have no size then): drawn again when it is shown.
+  setupTabs(() => {
+    drawCurve(curveCanvas, curve)
+    drawMilestones(milestonesCanvas, checkups)
+  })
   renderStatic()
 
   return {

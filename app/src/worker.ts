@@ -13,7 +13,7 @@ import { DEFAULT_MAX_STEPS_PER_SEC, SessionInbox, curvePoint, runSession, type S
 import { chooseBackend } from "./backend"
 import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type RunLife } from "./life"
-import { checkupStatus, fmtLevel } from "./milestones"
+import { checkupStatus, createCarryTally, fmtLevel, type CarryFile } from "./milestones"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 
 const scope = self as unknown as {
@@ -52,16 +52,12 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
   let steps = 0
   let cu = 0
 
-  /** The caregiver as the page shows it: carries in the log files, plus this run's since the latest file. */
-  const care = { inFiles: 0, since: 0, to: null as string | null, safetyNet: false }
-  const postCare = () => post({ type: "carried", to: care.to, carries: care.inFiles + care.since, safetyNet: care.safetyNet })
-  /** The log files' share of the caregiver line (their carries, the latest one's safety-net mode). */
-  const careFromFiles = (files: readonly LogFile[]) => {
-    const v2 = files.flatMap(f => (f.schemaVersion === 2 ? [f] : []))
-    care.inFiles = v2.reduce((n, f) => n + (f.caregiver?.carries ?? 0), 0)
-    care.since = 0
-    care.safetyNet = v2.filter(f => f.caregiver).at(-1)?.caregiver?.safetyNet ?? false
-  }
+  /** The log files' share of the caregiver line (createCarryTally). */
+  const carryFiles = (files: readonly LogFile[]): CarryFile[] =>
+    files.flatMap(f => (f.schemaVersion === 2 ? [{ seq: f.seq, carries: f.caregiver?.carries ?? 0, safetyNet: f.caregiver?.safetyNet ?? false }] : []))
+  /** The caregiver line of the current run (made again by each run, from the files then in the queue). */
+  let care = createCarryTally([], 0)
+  const postCare = () => post({ type: "carried", ...care.line() })
 
   const run: RunLife = async (c, chosen, restore) => {
     // Every log file this learner has written comes before its checkpoint, so its curve (and its checkups) are the start
@@ -69,8 +65,11 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
     const files = await queue.files(id)
     const prior: CurvePoint[] = files.flatMap(f => (f.schemaVersion === 2 ? f.curve : []))
     const priorCheckups: CheckupResult[] = files.flatMap(f => (f.schemaVersion === 2 ? f.checkups ?? [] : []))
-    careFromFiles(files)
-    care.to = null
+    // The coming carries go into the file after the latest one (seq 0 for a newborn).
+    // Files the last run saw are kept: the queue may have deleted some since. Carries it saw but not in a file are
+    // dropped: a restore takes the life back to its checkpoint, whose own carries come with the next file.
+    care = createCarryTally([...care.files(), ...carryFiles(files)], files.reduce((n, f) => Math.max(n, f.seq + 1), 0))
+    const tally = care
     const adopted = record
     record = undefined
     return runSession(c, {
@@ -126,14 +125,11 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
           post({ type: "status", message: `its updates kept failing at step ${e.fromSteps}: restored from its checkpoint at step ${e.toSteps} (${e.restores} restore${e.restores === 1 ? "" : "s"} so far)` })
         } else if (e.type === "logged") {
           post({ type: "queued", seq: e.seq, steps: e.steps, cu: e.cu, final: e.final })
-          // The file holds the carries since the previous one: this run's so far, and any a reload's checkpoint carried over.
-          const counted = care.since
-          void queue.latest(id).then(f => {
-            if (f?.seq !== e.seq || f.schemaVersion !== 2 || !f.caregiver) return
-            care.inFiles += f.caregiver.carries
-            care.since -= counted
-            care.safetyNet = f.caregiver.safetyNet
-            postCare()
+          // The session emits this once the file is in the queue: its own count replaces the carries seen for it.
+          tally.logged(e.seq)
+          void queue.files(id).then(fs => {
+            for (const f of carryFiles(fs)) tally.file(f)
+            if (care === tally) postCare()
           }, () => {})
         } else if (e.type === "checkupStarted") {
           post({ type: "status", message: checkupStatus(e.level) })
@@ -141,8 +137,7 @@ async function start({ cfg, backend: force, widths, hidden, checkpointRecord }: 
           post({ type: "checkups", results: [e.result], reset: false })
           post({ type: "status", message: `checkup at ${fmtLevel(e.result.level)} CU done; learning again` })
         } else if (e.type === "carried") {
-          care.since++
-          care.to = e.to
+          tally.carried(e.to)
           postCare()
         }
       },

@@ -55,3 +55,14 @@ export function ownStreamText(points: readonly CurvePoint[]): string {
   if (!p || !(p.baselineLoss > 0) || !Number.isFinite(p.predLoss)) return ""
   return `On what it chose to look at (which it also trains on): ${(p.predLoss / p.baselineLoss).toPrecision(3)}`
 }
+
+/**
+ * A chart canvas's bitmap for its CSS box (`clientW`×`clientH`) at pixel ratio `dpr`: the CSS size it is drawn in (w, h)
+ * and its bitmap size. Null for a box that is not laid out (a hidden tab: client sizes 0), so a hidden canvas is never
+ * resized from its own bitmap (which is already scaled by dpr, and would grow at every draw).
+ */
+export function fitCanvas(clientW: number, clientH: number, dpr: number): { w: number; h: number; width: number; height: number; dpr: number } | null {
+  if (!(clientW > 0 && clientH > 0)) return null
+  const r = dpr > 0 && Number.isFinite(dpr) ? dpr : 1
+  return { w: clientW, h: clientH, width: Math.round(clientW * r), height: Math.round(clientH * r), dpr: r }
+}

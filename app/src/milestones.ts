@@ -47,7 +47,7 @@ export function milestoneBars(results: readonly CheckupResult[], w: number, h: n
 /** The latest checkup in plain words. */
 export function milestoneText(results: readonly CheckupResult[]): string {
   const last = results.reduce<CheckupResult | undefined>((a, r) => (!a || r.level > a.level ? r : a), undefined)
-  if (!last) return `no checkup yet (the first is at ${FIRST_LOG_CU} CU)`
+  if (!last) return `no checkup yet (the first comes soon after it has lived ${FIRST_LOG_CU} CU)`
   const names = last.passed.map(id => MILESTONE_NAMES[id] ?? id)
   return `Latest checkup at ${fmtLevel(last.level)} CU: passed ${last.passed.length} of ${SUITE_SIZE}${names.length ? ` (${names.join(", ")})` : ""}.`
 }
@@ -66,4 +66,56 @@ export function caregiverText({ carries, to, safetyNet }: CaregiverLine): string
   const last = carries > 0 && to !== null ? `; last to the ${ROOM_WORDS[to] ?? to} room` : ""
   const net = safetyNet ? "; it now uses the taskbar itself, so the caregiver only steps in when it is stuck" : ""
   return times + last + net
+}
+
+/** A log file's share of the caregiver line: its carries (since the file before it) and its safety-net mode. */
+export interface CarryFile { seq: number; carries: number; safetyNet: boolean }
+
+/**
+ * The caregiver's carries in a life, as the page counts them. Every carry belongs to the log file that will hold it: the
+ * one after the last logged (`nextSeq`). Once a file is known its own count replaces the carries seen for its seq (it
+ * also holds any a reload's checkpoint carried over, and none a restore undid), so a count is never added twice, never
+ * goes below what the files hold, and a file seen again (or out of order) changes nothing. Files once seen are kept,
+ * even if the queue later deletes them.
+ */
+export interface CarryTally {
+  /** A carry, to room `to`, during the file that comes after the last logged. */
+  carried(to: string): void
+  /** File `seq` was logged: later carries belong to the next one. */
+  logged(seq: number): void
+  /** A log file's own count (from the queue). */
+  file(f: CarryFile): void
+  line(): CaregiverLine
+  /** The files known so far (to seed the next run's tally: the queue may have deleted some since). */
+  files(): CarryFile[]
+}
+
+/** `files`: those already written; `nextSeq`: the seq of the file the coming carries go into. */
+export function createCarryTally(files: readonly CarryFile[], nextSeq: number): CarryTally {
+  const known = new Map<number, CarryFile>()
+  const seen = new Map<number, number>()
+  let next = nextSeq
+  let to: string | null = null
+  const tally: CarryTally = {
+    carried(room) {
+      seen.set(next, (seen.get(next) ?? 0) + 1)
+      to = room
+    },
+    logged(seq) {
+      next = Math.max(next, seq + 1)
+    },
+    file(f) {
+      known.set(f.seq, f)
+    },
+    line() {
+      let carries = 0
+      for (const f of known.values()) carries += f.carries
+      for (const [seq, n] of seen) if (!known.has(seq)) carries += n
+      const latest = [...known.values()].reduce<CarryFile | undefined>((a, f) => (!a || f.seq > a.seq ? f : a), undefined)
+      return { carries, to, safetyNet: latest?.safetyNet ?? false }
+    },
+    files: () => [...known.values()],
+  }
+  for (const f of files) tally.file(f)
+  return tally
 }
