@@ -1,7 +1,8 @@
 // Learner checkpoints: the IndexedDB store "checkpoints", holding the latest checkpoint per learnerId.
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, type CurvePoint } from "./log"
+import type { CaregiverState } from "./caregiver"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_SUITE_VERSION, isLogLevel, parseCheckups, type CheckupResult, type CurvePoint } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
@@ -36,6 +37,13 @@ export interface Checkpoint<S = LearnerState> {
    * of another version) is ended on the record under this code, the one it was lived on. Absent in older checkpoints.
    */
   codeSha?: string
+  /**
+   * Checkups (decision 0016): the highest level checked so far (0: none) and the results not yet in a log file. Absent
+   * in checkpoints written before checkups (lastLevel 0 then).
+   */
+  checkups?: { lastLevel: number; tail: CheckupResult[] }
+  /** The caregiver's state, when the life has one. Absent in older checkpoints (and lives without one). */
+  caregiver?: CaregiverState
   learnerState: S
 }
 
@@ -56,7 +64,43 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (r.knowledgeSha !== undefined && !(typeof r.knowledgeSha === "string" && KNOWLEDGE_SHA_RE.test(r.knowledgeSha))) fail("knowledgeSha must be 64 lowercase hex chars")
   if (r.sessionsSeenAtBirth !== undefined && !isNonNegInt(r.sessionsSeenAtBirth)) fail("sessionsSeenAtBirth must be a non-negative integer")
   if (r.codeSha !== undefined && !(typeof r.codeSha === "string" && CODE_SHA_RE.test(r.codeSha))) fail("codeSha must be 40 lowercase hex chars or \"dev\"")
+  if (r.checkups !== undefined) checkCheckups(r.checkups, r.cu as number, r.steps as number, fail)
+  if (r.caregiver !== undefined) checkCaregiver(r.caregiver, fail)
   if (!("learnerState" in r)) fail("no learnerState")
+}
+
+const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every(k => keys.includes(k))
+
+function checkCheckups(v: unknown, cu: number, steps: number, fail: (what: string) => void): void {
+  if (!isRec(v) || !onlyKeys(v, ["lastLevel", "tail"])) return fail("checkups must be { lastLevel, tail }")
+  const { lastLevel, tail } = v
+  if (!(lastLevel === 0 || (typeof lastLevel === "number" && isLogLevel(lastLevel) && lastLevel <= cu))) fail("checkups.lastLevel must be 0 or a log level no more than cu")
+  const parsed = parseCheckups(tail, MILESTONE_SUITE_VERSION, cu, steps)
+  if (typeof parsed === "string") return fail(`checkups.tail: ${parsed}`)
+  if (parsed.some(c => c.level > (lastLevel as number))) fail("checkups.tail has a level above lastLevel")
+}
+
+const CAREGIVER_STATE_KEYS = ["version", "settings", "rng", "rooms", "sinceDecision", "stuckFor", "m6Streak", "safetyNet", "carries", "to"]
+const CAREGIVER_SETTING_KEYS = ["caregiverPeriod", "caregiverTau", "caregiverEpsilon", "caregiverThreshold", "caregiverStuckSteps"]
+
+function checkCaregiver(v: unknown, fail: (what: string) => void): void {
+  if (!isRec(v) || !onlyKeys(v, CAREGIVER_STATE_KEYS)) return fail("caregiver must be a caregiver state")
+  if (v.version !== 1) fail("caregiver.version must be 1")
+  const st = v.settings
+  if (!isRec(st) || !onlyKeys(st, CAREGIVER_SETTING_KEYS) || !CAREGIVER_SETTING_KEYS.every(k => typeof st[k] === "number" && Number.isFinite(st[k]))) {
+    fail("caregiver.settings must hold the five caregiver settings as finite numbers")
+  }
+  if (!(Number.isInteger(v.rng) && (v.rng as number) >= 0 && (v.rng as number) < 2 ** 32)) fail("caregiver.rng must be a uint32")
+  if (!isRec(v.rooms)) return fail("caregiver.rooms must be an object")
+  for (const r of Object.values(v.rooms)) {
+    if (!isRec(r) || !onlyKeys(r, ["fast", "slow"]) || !(typeof r.fast === "number" && Number.isFinite(r.fast)) || !(typeof r.slow === "number" && Number.isFinite(r.slow))) {
+      fail("caregiver.rooms entries must be { fast, slow } finite numbers")
+    }
+  }
+  for (const k of ["sinceDecision", "stuckFor", "m6Streak", "carries"]) if (!isNonNegInt(v[k])) fail(`caregiver.${k} must be a non-negative integer`)
+  if (typeof v.safetyNet !== "boolean") fail("caregiver.safetyNet must be a boolean")
+  if (!isRec(v.to) || !Object.values(v.to).every(isNonNegInt)) fail("caregiver.to must map rooms to non-negative integers")
 }
 
 /**

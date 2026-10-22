@@ -89,6 +89,19 @@ describe("parseLogFile: checkups, milestoneSuiteVersion, caregiver", () => {
     expect(ok(mkFile(ID, 0))).toBe(true)
     expect(ok({ ...mkFile(ID, 0), checkups: [] })).toBe(false) // v1 has no such field
   })
+  it("checkups are billed inside the file's evalCU: non-empty checkups need evalCU, and their sum fits in it (1e-9 relative)", () => {
+    const noEval = v2(); delete noEval.evalCU
+    expect(parseLogFile(noEval)).toEqual({ ok: false, error: "checkups need the file's evalCU" })
+    const empty = v2({ checkups: [] }); delete empty.evalCU
+    expect(ok(empty)).toBe(true) // no checkups: nothing to bill
+    expect(ok(v2({ evalCU: 0.02 }))).toBe(true) // exactly the sum (0.01 + 0.01)
+    expect(ok(v2({ evalCU: 0.019 }))).toBe(false)
+    expect(ok(v2({ evalCU: 0, checkups: [checkup(64, { evalCU: 0 })] }))).toBe(true)
+    // Float sums: 0.1 + 0.2 > 0.3 by one ulp, within the tolerance; a real excess of 1e-6 relative is not.
+    const tenths = [checkup(64, { evalCU: 0.1 }), checkup(128, { evalCU: 0.2 })]
+    expect(ok(v2({ evalCU: 0.3, checkups: tenths }))).toBe(true)
+    expect(ok(v2({ evalCU: 0.3 * (1 - 1e-6), checkups: tenths }))).toBe(false)
+  })
 })
 
 describe("parseSessionRow checkupScore", () => {

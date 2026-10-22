@@ -325,7 +325,7 @@ const msg = (r: { errors: string[] }) => r.errors.join("\n")
 describe("validateSessionPr v2: checkups (decision 0016)", () => {
   const ck = (level: number) => ({ level, steps: 10, passed: ["M1"], measures: { M1: 1, M2: null, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0.01 })
   const withCk = (seq: number, levels: number[], over: Partial<LogFileV2> = {}) =>
-    logV2(seq, { cu: 1000 * (seq + 1), stepsTotal: 400_000 * (seq + 1), curve: [], milestoneSuiteVersion: 1, checkups: levels.map(ck), ...over })
+    logV2(seq, { cu: 1000 * (seq + 1), stepsTotal: 400_000 * (seq + 1), curve: [], milestoneSuiteVersion: 1, checkups: levels.map(ck), evalCU: 1, ...over }) // checkups are billed inside evalCU
   it("accepts increasing levels across the files on main and the PR", () => {
     expect(errs([file(withCk(1, [128, 256]))], [withCk(0, [32, 64])]).ok).toBe(true)
     expect(errs([file(withCk(1, []))], [withCk(0, [64])]).ok).toBe(true)

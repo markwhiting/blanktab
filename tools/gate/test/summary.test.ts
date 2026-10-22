@@ -103,7 +103,7 @@ describe("buildSummary", () => {
       curve: [], skippedUpdates: 0, restores: 0, lostCU: 0, ...over,
     })
     const ck = (level: number, passed: string[]) => ({ level, steps: 1, passed, measures: { M1: 1, M2: 1, M3: 0, M4: 0, M5: 0, M6: 0 }, evalCU: 0 })
-    put(v2(A, 0, { milestoneSuiteVersion: 1, checkups: [ck(64, ["M1"]), ck(128, ["M1", "M2"])] }))
+    put(v2(A, 0, { milestoneSuiteVersion: 1, checkups: [ck(64, ["M1"]), ck(128, ["M1", "M2"])], evalCU: 0 })) // checkups are billed inside evalCU
     put(v2(A, 1)) // newest file has none: the latest checkup on record stands
     put(v2(B, 0)); put(log(B, 1))
     const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))

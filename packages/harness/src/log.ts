@@ -308,6 +308,14 @@ export function parseLogFile(json: unknown): ParseResult {
     const r = parseCheckups(json.checkups, suiteVersion, cu, json.stepsTotal)
     if (typeof r === "string") return fail(r)
     checkups = r
+    // Honesty (decision 0016: checkups are billed to evalCU): a file with checkups carries evalCU, and what they cost
+    // fits inside it (evalCU is cumulative, so it holds this file's checkups and more).
+    if (checkups.length > 0) {
+      if (!("evalCU" in json)) return fail("checkups need the file's evalCU")
+      const ev = json.evalCU as number
+      const sum = checkups.reduce((a, c) => a + c.evalCU, 0)
+      if (sum - ev > EVAL_CU_TOLERANCE * Math.max(ev, sum)) return fail(`checkups' evalCU (${sum}) exceeds the file's evalCU (${ev})`)
+    }
   }
   let caregiver: CaregiverSummary | undefined
   if ("caregiver" in json) {
@@ -335,8 +343,14 @@ export function parseLogFile(json: unknown): ParseResult {
   }
 }
 
-/** The checkups array, or the error string. Strict like the curve: unknown keys, bad values and bad order all fail. */
-function parseCheckups(v: unknown, suiteVersion: number | undefined, cu: number, stepsTotal: number): CheckupResult[] | string {
+/** Relative float tolerance for the checkups' evalCU sum against the file's evalCU. */
+const EVAL_CU_TOLERANCE = 1e-9
+
+/**
+ * The checkups array, or the error string. Strict like the curve: unknown keys, bad values and bad order all fail.
+ * Also checks a checkpoint's pending tail (checkpoint.ts), against its own cu and steps.
+ */
+export function parseCheckups(v: unknown, suiteVersion: number | undefined, cu: number, stepsTotal: number): CheckupResult[] | string {
   if (!Array.isArray(v)) return "checkups must be an array"
   if (v.length > MAX_CHECKUPS_PER_FILE) return `checkups may have at most ${MAX_CHECKUPS_PER_FILE} entries (has ${v.length})`
   if (suiteVersion === undefined) return "checkups need a milestoneSuiteVersion"

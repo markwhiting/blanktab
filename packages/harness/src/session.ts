@@ -2,9 +2,13 @@
 import type { Observation, WorldView } from "@blanktab/interface"
 import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
+import { hashSeed, type CanvasLike, type RoomKind, type World } from "@blanktab/world"
+import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings, type CaregiverState } from "./caregiver"
+import { runCheckup } from "./checkup"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CURVE_POINTS, MAX_RESTORES, isCurveLoss, nextCrossing, type CurvePoint, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
+import type { Milestone } from "./milestones"
 import { openQueue } from "./queue"
 // The log schedule lives in log.ts (browser-safe, shared with the gate); re-exported for existing callers.
 export { FIRST_LOG_CU, LAST_DOUBLING_CU, LOG_STEP_CU, logThresholds, nextCrossing } from "./log"
@@ -40,13 +44,22 @@ export interface SessionConfig {
    * learning (log-file crossings always save, so it never loses a logged one).
    */
   checkpointEveryMs?: number
+  /**
+   * The caregiver's settings: a birth fact (a resumed life uses its checkpoint's caregiver state). The caregiver is on
+   * when these (or the checkpoint's caregiver) are set and the world has state, rooms and bringToFront.
+   */
+  caregiver?: CaregiverSettings
 }
 
 /**
  * What the session needs of a learner (a TrainableLearner has it). `onKnowledge`, if the learner has it, is handed
  * the manifest of each knowledge refresh (and, after a restore, the latest one); the 04a learner has none.
  */
-export type SessionLearner = Pick<TrainableLearner, "step" | "stats" | "sleep" | "save" | "dispose"> & { onKnowledge?(m: Manifest): void }
+export type SessionLearner = Pick<TrainableLearner, "step" | "stats" | "sleep" | "save" | "dispose"> & {
+  onKnowledge?(m: Manifest): void
+  /** Checkups need it (decision 0016); a learner without it gets none. */
+  frozenRun?: TrainableLearner["frozenRun"]
+}
 /** How the session asks for a learner: newborn, or from a checkpoint's state (createLearner's options minus the backend). */
 export type LearnerInit = { seed: number; widths: Widths; settings: LearnerSettings } | { state: LearnerState }
 
@@ -56,11 +69,17 @@ const realClock: Clock = { now: () => performance.now(), sleep: ms => new Promis
 
 export type SessionEvent =
   /** Resumed from the checkpoint at `steps` and `cu`; `curveTail` is its curve since the latest log file. */
-  | { type: "resumed"; steps: number; cu: number; curveTail: CurvePoint[] }
+  | { type: "resumed"; steps: number; cu: number; curveTail: CurvePoint[]; checkupTail: CheckupResult[] }
   /** After RESTORE_AFTER_SKIPS skipped updates in a row at `fromSteps`, the learner went back to its checkpoint at `toSteps`. */
   | { type: "restored"; fromSteps: number; toSteps: number; restores: number; lostCU: number }
   /** A log file was queued (with its checkpoint). A failed life's last file is final too (see runSession). */
   | { type: "logged"; seq: number; steps: number; cu: number; final: boolean }
+  /** A checkup for log level `level` began (at a sleep). */
+  | { type: "checkupStarted"; level: number }
+  /** A checkup finished; its result goes into the next log file. (An abandoned one has no event of its own.) */
+  | { type: "checkup"; result: CheckupResult }
+  /** The caregiver carried the learner to room `to` after step `steps`. */
+  | { type: "carried"; to: string; steps: number }
 
 /**
  * The page's requests to a running life (decision 0014), handled by runSession between steps, so never during a step
@@ -93,6 +112,9 @@ export class SessionInbox {
     return new Promise(resolve => this.#waiting.push({ resolve, halt: opts.halt ?? false }))
   }
 
+  /** Whether a waiting request asks to halt (a running checkup is abandoned for it). */
+  get haltWaiting(): boolean { return this.#waiting.some(r => r.halt) }
+
   /** Whether the last run halted at a forced save (and no run has started since). */
   get halted(): boolean { return this.#halted }
 
@@ -118,8 +140,11 @@ export class SessionInbox {
 }
 
 export interface SessionDeps {
-  /** drainTrace, if the world has one, is called after every action (nothing reads the trace yet). */
-  world: WorldView & { drainTrace?(): unknown }
+  /**
+   * drainTrace, if the world has one, is called after every action (nothing reads the trace yet). state, rooms and
+   * bringToFront (privileged, harness only) are what the caregiver needs; without them it is off.
+   */
+  world: WorldView & { drainTrace?(): unknown } & Partial<Pick<World, "state" | "rooms" | "bringToFront">>
   createLearner(init: LearnerInit): Promise<SessionLearner>
   /** Holds the outbox and the checkpoints (one database, so a log and its checkpoint commit together). */
   idb: IDBFactory
@@ -141,6 +166,11 @@ export interface SessionDeps {
   checkpointRecord?: unknown
   /** Refreshed knowledge and forced checkpoints from the page (SessionInbox). */
   inbox?: SessionInbox
+  /**
+   * Milestone checkups (decision 0016), on when this is set and the learner has frozenRun: a fresh canvas for each
+   * variant world, and the suite (default MILESTONES_V1).
+   */
+  checkups?: { canvas(): CanvasLike; suite?: readonly Milestone[] }
 }
 
 export interface SessionResult {
@@ -254,6 +284,15 @@ function birthOf(state: unknown, id: string): Birth {
  *   widths and settings from its learnerState, knowledgeSha and sessionsSeenAtBirth from the checkpoint; the config's
  *   are for newborns only); a learner with log files but
  *   no checkpoint cannot be resumed and throws, as does a checkpoint whose seq does not follow the latest log file.
+ * - Checkups (decision 0016; on with `deps.checkups` and a learner with frozenRun): at a clean sleep, if the highest
+ *   log level at or below cu has not been checked, the milestone suite runs on it through frozen runs (paced like the
+ *   life, billed to evalCU only). One per sleep; its result goes into the next log file written and the checkpoint is
+ *   saved at once. A halt asked during one abandons it (the level stays pending, so it runs once after the reload); a
+ *   recoverable error inside one is rethrown as any other. Checkpoints carry the last level and the pending results.
+ * - The caregiver (on with `cfg.caregiver` or a checkpoint's caregiver, in a world with state, rooms and
+ *   bringToFront): after every step it observes the learner's last loss in the room that step's frame was seen in and
+ *   may carry the learner to another room through world.bringToFront (never during a checkup). Nothing it reads or
+ *   decides reaches the learner. Its carries go into each log file, its settings into `settings`, its state into checkpoints.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
   const lifetimeCU = cfg.lifetimeCU ?? Number.POSITIVE_INFINITY // no lifetime: the life ends only by failure or the caller
@@ -308,7 +347,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cp?.codeSha ?? prior?.codeSha ?? cfg.codeSha, writtenAt: now().toISOString(), hostSig: { ...cfg.hostSig },
       final: true, condition: "A" as const,
     }
-    const birthFields = (b: Birth) => ({ settings: { ...b.settings, maxStepsPerSec, seed: b.seed }, widths: { ...b.widths }, knowledgeSha, sessionsSeenAtBirth })
+    const birthFields = (b: Birth, care?: CaregiverState) => ({
+      settings: { ...b.settings, maxStepsPerSec, seed: b.seed, ...(care ? care.settings : {}) }, widths: { ...b.widths }, knowledgeSha, sessionsSeenAtBirth,
+    })
     // Never below the latest file's counters (they never decrease across seq).
     const atLeast = (f: LogFileV2): LogFileV2 => !prior ? f : {
       ...f, stepsTotal: Math.max(f.stepsTotal, prior.stepsTotal), cu: Math.max(f.cu, prior.cu), restores: Math.max(f.restores, prior.restores),
@@ -322,16 +363,27 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       const st = (cp.learnerState as { stats?: Partial<LearnerStats> } | null)?.stats
       const savedSkips = typeof st?.skippedUpdates === "number" ? st.skippedUpdates : 0
       // The scoring done since the checkpoint is thrown away with the life (it is not training: not in lostCU).
-      return atLeast({
+      const f = atLeast({
         ...evalOf(st?.evalCU),
-        ...base, ...birthFields(birth), stepsTotal: cp.steps, cu: cp.cu, curve: thin([...cp.curveTail]), restores: cp.restores,
+        ...base, ...birthFields(birth, cp.caregiver), stepsTotal: cp.steps, cu: cp.cu, curve: thin([...cp.curveTail]), restores: cp.restores,
         // The CU lived since the checkpoint is thrown away with the life: on the record, as a restore's is.
         lostCU: cp.lostCU + Math.max(0, (lived?.stats.cu ?? cp.cu) - cp.cu),
         skippedUpdates: cp.lostSkips + Math.max(savedSkips, lived?.stats.skippedUpdates ?? 0),
       })
+      // The checkpoint's checkups not yet logged, billed inside the file's evalCU (so only with one).
+      if (cp.checkups && f.evalCU !== undefined) {
+        f.checkups = cp.checkups.tail.map(c => structuredClone(c))
+        f.milestoneSuiteVersion = MILESTONE_SUITE_VERSION
+      }
+      if (cp.caregiver) f.caregiver = { carries: cp.caregiver.carries, to: { ...cp.caregiver.to }, safetyNet: cp.caregiver.safetyNet }
+      return f
     }
     if (prior) {
-      return { ...prior, ...base, knowledgeSha: prior.knowledgeSha, sessionsSeenAtBirth: prior.sessionsSeenAtBirth, curve: [] }
+      // Its counters, not its checkups or carries: those are on the record already, once.
+      const { checkups: _c, caregiver: _g, ...counters } = prior
+      void _c
+      void _g
+      return { ...counters, ...base, knowledgeSha: prior.knowledgeSha, sessionsSeenAtBirth: prior.sessionsSeenAtBirth, curve: [] }
     }
     if (!last && birth && lived && lived.steps > 0) {
       return {
@@ -391,6 +443,20 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       knowledgeSha = k.knowledgeSha
       learner.onKnowledge?.(k)
     }
+    // Checkups (decision 0016): the highest level checked (0: none yet) and the results the next log file carries. A
+    // checkpoint from before checkups has neither: lastLevel 0.
+    const checkupsOf = (c: Checkpoint | undefined) => ({ lastLevel: c?.checkups?.lastLevel ?? 0, tail: (c?.checkups?.tail ?? []).map(r => structuredClone(r)) })
+    let { lastLevel, tail } = checkupsOf(cp)
+    /** Checkpoints carry the checkups' state once a life has had them configured. */
+    const keepCheckups = deps.checkups !== undefined || cp?.checkups !== undefined
+    // The caregiver (a harness component; it acts on the world only, through bringToFront): its checkpoint's state, else
+    // a newborn's from the config's settings, in a world it can carry the learner in.
+    const careWorld = typeof world.state === "function" && typeof world.rooms === "function" && typeof world.bringToFront === "function"
+    const careInit: Parameters<typeof createCaregiver>[0] | undefined = !careWorld ? undefined
+      : cp?.caregiver ? { state: cp.caregiver }
+      : cfg.caregiver ? { settings: clampCaregiverSettings(cfg.caregiver), seed: hashSeed(seed, "caregiver") }
+      : undefined
+    let caregiver: Caregiver | undefined = careInit ? createCaregiver(careInit) : undefined
     let learner = await deps.createLearner(cp ? { state: cp.learnerState } : { seed, widths, settings })
     try {
       let steps = cp?.steps ?? 0
@@ -405,19 +471,27 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       let lastSavedAt = clock.now()
       const resumedFrom = cp ? cp.steps : null
       live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, stats: learner.stats() })
-      if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail] })
+      if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)) })
 
       const checkpointNow = async (): Promise<Checkpoint> => ({
         learnerId: id, savedAt: now().toISOString(), steps, cu: learner.stats().cu, seq, curveTail: [...curve],
-        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha, learnerState: await learner.save(),
+        restores, lostCU, lostSkips, knowledgeSha, sessionsSeenAtBirth, codeSha: cfg.codeSha,
+        ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)) } } : {}),
+        ...(caregiver ? { caregiver: caregiver.state() } : {}),
+        learnerState: await learner.save(),
       })
+      const checkupsOn = () => deps.checkups !== undefined && typeof learner.frozenRun === "function"
+      /** The log file of this moment. It takes the checkup results and the caregiver's carries since the last file. */
       const logFile = (final: boolean): LogFileV2 => {
         const st = learner.stats()
+        const checked = checkupsOn() || tail.length > 0 ? { checkups: tail, milestoneSuiteVersion: MILESTONE_SUITE_VERSION } : {}
+        tail = []
         return {
           schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
-          stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed }, hostSig: { ...cfg.hostSig },
+          stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed, ...(caregiver ? caregiver.state().settings : {}) }, hostSig: { ...cfg.hostSig },
           sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
           skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU, evalCU: st.evalCU,
+          ...checked, ...(caregiver ? { caregiver: caregiver.takeSummary() } : {}),
         }
       }
       const addPoint = (atSleep: boolean) => {
@@ -441,9 +515,37 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       let restorePoint: Checkpoint = cp
       const pace = createPacer(maxStepsPerSec, clock)
       let halted = false
+      /**
+       * At a clean sleep: the checkup for the highest log level due and not yet checked, if any (one per sleep). True
+       * if one finished (its result waits in `tail` for the next log file; the caller saves a checkpoint at once). A halt
+       * asked meanwhile abandons it: the level stays pending. Its frozen steps are paced like the life's own.
+       */
+      const checkupAtSleep = async (): Promise<boolean> => {
+        const c = deps.checkups
+        const l = learner
+        if (!c || !l.frozenRun) return false
+        const st = l.stats()
+        if (st.consecutiveSkips !== 0) return false
+        const level = levelAtOrBelow(st.cu)
+        if (level === null || level <= lastLevel) return false
+        emit({ type: "checkupStarted", level })
+        const out = await runCheckup({
+          learnerId: id, level, steps, learner: { frozenRun: o => l.frozenRun!(o), stats: () => l.stats() },
+          canvas: () => c.canvas(), ...(c.suite ? { suite: c.suite } : {}),
+          ...(deps.recoverable ? { recoverable: deps.recoverable } : {}),
+          shouldStop: () => inbox?.haltWaiting ?? false, yieldNow: pace,
+        })
+        if (out.status !== "done") return false
+        tail.push(out.result)
+        lastLevel = level
+        emit({ type: "checkup", result: out.result })
+        caregiver?.onCheckup(out.result.passed) // after the checkup event: it takes no part in the checkup itself
+        return true
+      }
 
       while (learner.stats().cu < lifetimeCU) {
         await pace()
+        const room = caregiver ? world.state!().room : undefined // the room the coming frame is seen in
         const obs = world.observe()
         world.act(await learner.step(obs))
         world.drainTrace?.()
@@ -454,10 +556,20 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           throw new Interrupted(err)
         }
         let checkpointDue = false
+        let saveNow = false // a checkup finished: its level is saved at once, so a reload never checks it again
         if (steps % sleepInterval === 0) {
           await learner.sleep()
           addPoint(true)
           checkpointDue = true
+          saveNow = await checkupAtSleep()
+        }
+        if (caregiver) {
+          caregiver.observe(room!, learner.stats().lastLoss)
+          const to = caregiver.decide(world.state!().room, world.rooms!(), checkpointDue)
+          if (to !== null) {
+            world.bringToFront!(to as RoomKind)
+            emit({ type: "carried", to, steps })
+          }
         }
         const st = learner.stats()
         if (st.consecutiveSkips >= RESTORE_AFTER_SKIPS) {
@@ -477,6 +589,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           lostCU += st.cu - now_.cu
           lostSkips += st.skippedUpdates - now_.skippedUpdates
           // On the record at once, so a reload before the next save does not forget the restore.
+          // Checkups and caregiver go back with it (a checkpoint from before them: as this run began).
+          ;({ lastLevel, tail } = checkupsOf(back))
+          if (careInit) caregiver = createCaregiver(back.caregiver ? { state: back.caregiver } : careInit)
           cp = restorePoint = { ...back, restores, lostCU, lostSkips }
           await saveCheckpoint(idb, cp)
           lastSavedAt = clock.now()
@@ -510,7 +625,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           emit({ type: "logged", seq: f.seq, steps: f.stepsTotal, cu: f.cu, final: false })
         } else {
           if (fresh) takeKnowledge(fresh) // the same sha (new content): nothing to separate
-          if (forced.length > 0 || (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs)) {
+          if (forced.length > 0 || saveNow || (checkpointDue && clock.now() - lastSavedAt >= checkpointEveryMs)) {
             const next = await checkpointNow()
             await saveCheckpoint(idb, next)
             cp = restorePoint = next
