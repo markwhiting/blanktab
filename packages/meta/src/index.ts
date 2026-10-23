@@ -1,5 +1,5 @@
 export {
-  checkGenome, decodeGenome, fromUnit, legacyGenome, parseCentre, parseGenomeSpace, searched, toUnit,
+  checkGenome, decodeGenome, fromUnit, legacyGenome, parseCentre, parseGenomeSpace, searched, settingsMismatch, toUnit,
   GENOME_FILE_VERSION, MAX_GENES, PRE_05A_CONSTANTS, SETTING_KEY_RE,
 } from "./genome"
 export type { Decoded, GeneSpec, GeneValue, Genome, GenomeSpace, LegacyGenome } from "./genome"

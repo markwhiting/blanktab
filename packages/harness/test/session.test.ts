@@ -9,17 +9,17 @@ import { FILTER_FLOATS_PER_CONV1, MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE
 import { createWorld, hashSeed, type TraceEvent } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
 import { MILESTONES_V1, type Milestone } from "../src/milestones"
-import { CAREGIVER_DEFAULTS, clampCaregiverSettings } from "../src/caregiver"
+import { CAREGIVER_DEFAULTS, clampCaregiverSettings, type CaregiverSettings } from "../src/caregiver"
 import { validateSessionPr } from "../../../tools/gate/validate"
 import { createCanvas } from "@napi-rs/canvas"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
 import { buildHeldOut } from "../src/heldout"
-import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner, type SessionMeta } from "../src/session"
-import { GENOME_SPACE, birthBlock, legacyBlock, mkFile } from "./helpers"
+import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner, type SessionMeta, BadMetaBlockError } from "../src/session"
+import { CENTRE, GENOME_SPACE, birthBlock, legacyBlock, mkFile } from "./helpers"
 import { checkupSeed, panelSeed } from "../src/checkup"
 import { sweepCheckpoints } from "../src/orphans"
 import { FIRST_LAYER_PARAMS } from "@blanktab/learner"
-import { legacyGenome } from "@blanktab/meta"
+import { decodeGenome, genomeSha, legacyGenome } from "@blanktab/meta"
 import { pre04cCheckpointError } from "./pre04c-checkpoint"
 
 // Plan 04b: a spy on every caregiver the session makes (each delegates to a real one), in one call log with the events.
@@ -1866,9 +1866,16 @@ describe("session v2", { timeout: 60_000 }, () => {
     describe("the meta block (Plan 05a Task 6)", () => {
       /** cfg.meta as the page gives it: `birth` (default this learner's offline draw); `legacy` records its calls. */
       const metaOf = async (o: { birth?: MetaBlock; calls?: Record<string, number | string>[] } = {}): Promise<SessionMeta> => ({
-        birth: o.birth ?? await birthBlock(ID),
+        space: GENOME_SPACE, birth: o.birth ?? await birthBlock(ID),
         legacy: async flat => { o.calls?.push(structuredClone(flat)); return legacyBlock(flat) },
       })
+      /** What a life running the centre genome is configured with (its block must decode to what runs). */
+      const RAN = (() => {
+        const d = decodeGenome(CENTRE, GENOME_SPACE)
+        return { learnerSettings: d.learner as unknown as LearnerSettings, caregiver: d.caregiver as unknown as CaregiverSettings }
+      })()
+      /** grow, running the centre genome. */
+      const growM = (idb: IDBFactory, o: GrowOpts = {}) => grow(idb, { ...o, cfg: { ...RAN, ...o.cfg } })
       /** The block a file carries, without its per-file fields. */
       const constant = (f: LogFileV2) => {
         const { filters: _f, end: _e, ...m } = f.meta!
@@ -1885,7 +1892,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         const meta = await metaOf()
         const events: SessionEvent[] = []
         const checkpoints: unknown[] = []
-        await grow(idb, {
+        await growM(idb, {
           cfg: { lifetimeCU: 140, sleepInterval: 10, meta },
           deps: { onEvent: e => events.push(e), onTick: async () => { checkpoints.push((await loadCheckpoint(idb, ID))?.meta) } },
         })
@@ -1900,7 +1907,7 @@ describe("session v2", { timeout: 60_000 }, () => {
 
       it("a resumed checkpoint without meta gets the legacy block from its flat settings (gamma 0.9 included), logs it, and checkups keep checkupSeed", async () => {
         const idb = new IDBFactory()
-        await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
         const before = await logsOf(idb)
         expect(before.every(f => !("meta" in f))).toBe(true)
         // A pre-05a learner state: its settings have no gamma.
@@ -1911,7 +1918,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         const calls: Record<string, number | string>[] = []
         const frozenSeeds: number[] = []
         const events: SessionEvent[] = []
-        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ calls }) }, stub: { frozenSeeds }, deps: { onEvent: e => events.push(e) } })
+        await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ calls }) }, stub: { frozenSeeds }, deps: { onEvent: e => events.push(e) } })
         const logs = await logsOf(idb)
         const after = logs.slice(before.length)
         // The flat settings are the files' own settings, gamma (the pre-05a constant) included.
@@ -1932,11 +1939,11 @@ describe("session v2", { timeout: 60_000 }, () => {
       it("a resumed checkpoint with meta keeps it, even when cfg.meta.birth differs", async () => {
         const idb = new IDBFactory()
         const a = await metaOf()
-        await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
         const calls: Record<string, number | string>[] = []
         const b = await metaOf({ birth: await birthBlock("lrn_ffffffffffffffff"), calls })
         expect(b.birth).not.toEqual(a.birth)
-        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: b } })
+        await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: b } })
         const logs = await logsOf(idb)
         for (const f of logs) expect(f.meta).toEqual(a.birth)
         expect(calls).toEqual([])
@@ -1949,7 +1956,7 @@ describe("session v2", { timeout: 60_000 }, () => {
           const frozenSeeds: number[] = []
           const idb = new IDBFactory()
           const birth = { ...base, evalPanel: p }
-          await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ birth }) }, stub: { frozenSeeds } })
+          await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ birth }) }, stub: { frozenSeeds } })
           const logs = await logsOf(idb)
           expect(levelsOf(logs)).toEqual([16, 32, 64, 128])
           expect(frozenSeeds).toEqual([16, 32, 64, 128].flatMap(l => seedsAt(l, (lv, m) => panelSeed(p, lv, m))))
@@ -1961,7 +1968,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       it("crossing files at 512, 1024 and 2048 carry filters of 104·conv1 floats; the 8–256 and 3072 files do not", async () => {
         const idb = new IDBFactory()
         const meta = await metaOf()
-        await runSession(cfgFor({ lifetimeCU: 3300, sleepInterval: 50, meta }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 4, readParams: true }) }))
+        await growM(idb, { checkups: false, cfg: { lifetimeCU: 3300, sleepInterval: 50, meta }, stub: { cuPerStep: 4, readParams: true } })
         const logs = await logsOf(idb)
         expect(logs.map(f => levelAtOrBelow(f.cu))).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 2048, 3072, 3072])
         for (const f of logs) {
@@ -1980,14 +1987,155 @@ describe("session v2", { timeout: 60_000 }, () => {
         // A learner that cannot read its params writes none; without meta there are none either.
         for (const [m, readParams] of [[meta, false], [undefined, true]] as const) {
           const idb2 = new IDBFactory()
-          await runSession(cfgFor({ lifetimeCU: 1100, sleepInterval: 50, ...(m ? { meta: m } : {}) }), depsFor(idb2, { createLearner: stubFactory({ cuPerStep: 4, readParams }) }))
+          await growM(idb2, { checkups: false, cfg: { lifetimeCU: 1100, sleepInterval: 50, ...(m ? { meta: m } : {}) }, stub: { cuPerStep: 4, readParams } })
           expect((await logsOf(idb2)).some(f => f.meta?.filters !== undefined)).toBe(false)
         }
       })
 
+      it("fix round 1: a legacy() that throws or gives a bad block never ends a forever life: it runs on without meta", async () => {
+        const good = await legacyBlock({ ...DEFAULT_SETTINGS, maxStepsPerSec: 30, seed: 7 })
+        const bad: (() => Promise<MetaBlock>)[] = [
+          async () => { throw new Error("no genome space") },
+          async () => ({ ...good, end: "budget" }), // a final-only field
+          async () => ({ ...good, filters: "AAAA" }), // filters at the checkpoint's 66 CU: refused at cp.cu
+          async () => ({ ...good, role: "search", method: "centre" }), // not a legacy block
+        ]
+        for (const legacy of bad) {
+          const idb = new IDBFactory()
+          await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+          const events: SessionEvent[] = []
+          try {
+            const r = await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: { space: GENOME_SPACE, birth: await birthBlock(ID), legacy } }, deps: { onEvent: e => events.push(e) } })
+            expect(r.cu).toBeGreaterThanOrEqual(140)
+            expect(warn.mock.calls.some(c => String(c[0]).includes("no legacy meta block"))).toBe(true)
+          } finally {
+            warn.mockRestore()
+          }
+          const logs = await logsOf(idb)
+          expect(logs.at(-1)!.final).toBe(true)
+          expect(logs.some(f => "meta" in f)).toBe(false)
+          expect(events.some(e => e.type === "meta")).toBe(false)
+          await gateAccepts(logs)
+        }
+      })
+
+      it("fix round 1: a newborn's bad block throws BadMetaBlockError before any learner: no checkpoint, no files", async () => {
+        const birth = await birthBlock(ID)
+        const outside = { ...CENTRE, entropyWeight: 0.001 }
+        const cases: [string, Partial<SessionConfig>][] = [
+          ["bad meta block: meta.filters", { meta: await metaOf({ birth: { ...birth, filters: "AAAA" } }) }],
+          ["cannot be role legacy", { meta: await metaOf({ birth: await legacyBlock(decodeGenome(CENTRE, GENOME_SPACE).learner) }) }],
+          ["genomeSchema 1 is not the space's 2", { meta: { ...(await metaOf()), space: { ...GENOME_SPACE, schemaVersion: 2 } } }],
+          ["genome outside the space: entropyWeight", { meta: await metaOf({ birth: { ...birth, genome: outside, genomeSha: await genomeSha(1, outside) } }) }],
+          ["genome is not what runs: settings.lr is 0.01", { meta: await metaOf(), learnerSettings: SETTINGS }],
+          ["genome is not what runs: settings.caregiverPeriod is absent", { meta: await metaOf(), caregiver: undefined }],
+        ]
+        for (const [why, cfg] of cases) {
+          const idb = new IDBFactory()
+          const created: LearnerInit[] = []
+          const run = growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...cfg }, stub: { created } })
+          await expect(run, why).rejects.toThrow(BadMetaBlockError)
+          await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...cfg } })).rejects.toThrow(why)
+          expect(created).toEqual([])
+          expect(await logsOf(idb)).toEqual([])
+          expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+        }
+      })
+
+      it("fix round 1: a first layer of the wrong size is said on console.warn and the file has no filters; the life goes on", async () => {
+        const idb = new IDBFactory()
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          const base = stubFactory({ cuPerStep: 4, frozen: { evalPerStep: 0.001 } })
+          await growM(idb, {
+            checkups: false, cfg: { lifetimeCU: 1100, sleepInterval: 50, meta: await metaOf() },
+            deps: { createLearner: async init => ({ ...(await base(init)), readParams: async () => [new Float32Array(3)] }) },
+          })
+          expect(warn.mock.calls.filter(c => String(c[0]).includes("this file has no filters"))).toHaveLength(2) // 512, 1024
+        } finally {
+          warn.mockRestore()
+        }
+        const logs = await logsOf(idb)
+        expect(logs.at(-1)!.cu).toBeGreaterThanOrEqual(1100)
+        expect(logs.some(f => f.meta!.filters !== undefined)).toBe(false)
+        await gateAccepts(logs)
+      })
+
+      it("fix round 1: a block-carrying checkpoint resumed without cfg.meta keeps its block, and the switch ends it (decision 0022)", async () => {
+        const idb = new IDBFactory()
+        const meta = await metaOf()
+        await expect(growM(idb, { cfg: { lifetimeCU: undefined, sleepInterval: 5, meta }, stub: { cuPerStep: 64 }, deps: reload(s => s.steps === 20) })).rejects.toThrow("reload")
+        const inbox = new SessionInbox()
+        inbox.setShortLives(true)
+        const r = await growM(idb, { cfg: { lifetimeCU: undefined, sleepInterval: 5 }, stub: { cuPerStep: 64 }, deps: { inbox } })
+        expect(r).toMatchObject({ ended: "budget", steps: 35 })
+        const logs = await logsOf(idb)
+        for (const f of logs) expect(constant(f)).toEqual(meta.birth)
+        expect(logs.at(-1)!.meta!.end).toBe("budget")
+        await gateAccepts(logs)
+      })
+
+      it("fix round 1: after a legacy resume, a reload or a restore before the next crossing still carries the legacy block", async () => {
+        const prepare = async () => {
+          const idb = new IDBFactory()
+          await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+          return idb
+        }
+        // The first life's checkpoint is the 64 CU file's (step 32). A reload at step 36, before the next crossing (128 CU, step 64).
+        const calls: Record<string, number | string>[] = []
+        const idb = await prepare()
+        await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ calls }) }, deps: reload(s => s.steps === 36) })).rejects.toThrow("reload")
+        expect((await loadCheckpoint(idb, ID))!.meta).toMatchObject({ role: "legacy" })
+        await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ calls }) } })
+        expect(calls).toHaveLength(1) // the second resume found the block in its checkpoint
+        const legacy = await legacyBlock(calls[0]!)
+        const logs = await logsOf(idb)
+        expect(logs.filter(f => f.stepsTotal > 32).length).toBeGreaterThan(1)
+        for (const f of logs.filter(f => f.stepsTotal > 32)) expect(f.meta).toEqual(legacy)
+        await gateAccepts(logs)
+        // A restore: skipped updates from step 34 on bring the learner back to the save made at the resume (step 32).
+        const idb2 = await prepare()
+        let poisoned = true
+        const events: SessionEvent[] = []
+        await growM(idb2, {
+          cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf() }, stub: { skip: n => poisoned && n >= 34 },
+          deps: { onEvent: e => { events.push(e); if (e.type === "restored") poisoned = false } },
+        })
+        expect(events.find(e => e.type === "restored")).toMatchObject({ toSteps: 32 })
+        const logs2 = await logsOf(idb2)
+        expect(logs2.filter(f => f.stepsTotal > 32).length).toBeGreaterThan(1)
+        for (const f of logs2.filter(f => f.stepsTotal > 32)) expect(f.meta).toMatchObject({ role: "legacy" })
+        await gateAccepts(logs2)
+      })
+
+      it("fix round 1: a real CPU learner's readParams: the 512 file's filters are its first layer as read", async () => {
+        const idb = new IDBFactory()
+        const reads: Float32Array[][] = []
+        // The real learner at tiny widths, its CU scaled (+64 a step) so a short life crosses 512.
+        const make = async (init: LearnerInit): Promise<SessionLearner> => {
+          const l = await createLearner({ backend: createCpuBackend(), ...init })
+          return {
+            step: o => l.step(o), sleep: () => l.sleep(), save: () => l.save(), dispose: () => l.dispose(),
+            stats: () => { const st = l.stats(); return { ...st, cu: st.cu + 64 * st.steps } },
+            readParams: async () => { const p = await l.readParams(); reads.push(p); return p },
+          }
+        }
+        await growM(idb, { checkups: false, cfg: { lifetimeCU: 600, sleepInterval: 5, meta: await metaOf() }, deps: { createLearner: make } })
+        const logs = await logsOf(idb)
+        const at512 = logs.filter(f => f.meta!.filters !== undefined)
+        expect(at512.map(f => levelAtOrBelow(f.cu))).toEqual([512])
+        expect(reads).toHaveLength(1)
+        const got = floatsOf(at512[0]!.meta!.filters!)
+        expect(got.length).toBe(FILTER_FLOATS_PER_CONV1 * TINY.conv1)
+        expect([...got]).toEqual(FIRST_LAYER_PARAMS.flatMap(i => [...reads[0]![i]!]))
+        expect(got.some(v => v !== 0)).toBe(true)
+        await gateAccepts(logs)
+      })
+
       describe("short lives (Review Focus 2)", () => {
         /** 64 CU a step, a sleep every 5: the 2048 crossing at step 32, its checkup at the sleep at step 35. */
-        const live = (idb: IDBFactory, o: { meta?: SessionMeta; inbox: SessionInbox; sleepInterval?: number; deps?: Partial<SessionDeps> }) => grow(idb, {
+        const live = (idb: IDBFactory, o: { meta?: SessionMeta; inbox: SessionInbox; sleepInterval?: number; deps?: Partial<SessionDeps> }) => growM(idb, {
           cfg: { lifetimeCU: undefined, sleepInterval: o.sleepInterval ?? 5, ...(o.meta ? { meta: o.meta } : {}) },
           stub: { cuPerStep: 64, readParams: true },
           deps: { inbox: o.inbox, ...o.deps },
@@ -2121,7 +2269,7 @@ describe("session v2", { timeout: 60_000 }, () => {
           const meta = withMeta ? { meta: await metaOf() } : {}
           // Failed: the learner throws at step 13.
           const idb = new IDBFactory()
-          await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, stub: { throwAt: { steps: 13, error: new Error("boom") } } })).rejects.toThrow("boom")
+          await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, stub: { throwAt: { steps: 13, error: new Error("boom") } } })).rejects.toThrow("boom")
           const failed = await logsOf(idb)
           expect(failed.at(-1)!.final).toBe(true)
           if (withMeta) expect(failed.at(-1)!.meta).toEqual({ ...meta.meta!.birth, end: "failed" })
@@ -2129,7 +2277,7 @@ describe("session v2", { timeout: 60_000 }, () => {
           await gateAccepts(failed)
           // Orphan: the tab closes at step 33; a day later another tab's sweep deletes the checkpoint with a final file.
           const idb2 = new IDBFactory()
-          await expect(grow(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+          await expect(growM(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
           // The stub's state has no version: label it this code's, so the sweep reads it (not a version orphan).
           const c = (await loadCheckpoint(idb2, ID))!
           await saveCheckpoint(idb2, { ...c, learnerState: { ...c.learnerState, version: LEARNER_STATE_VERSION } })

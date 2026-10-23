@@ -1,6 +1,6 @@
 // Gate validator for session PRs. Runs in Node (GitHub Action) on PR files treated purely as data.
 import { EVAL_CU_TOLERANCE, FILTER_LEVELS, levelAtOrBelow, parseLogFile, type LogFile, type MetaBlock } from "@blanktab/harness/log"
-import { checkGenome, genomeSha, type GenomeSpace } from "@blanktab/meta"
+import { checkGenome, genomeSha, settingsMismatch, type GenomeSpace } from "@blanktab/meta"
 
 export interface PrFile { path: string; content: string }
 
@@ -143,6 +143,7 @@ const canonical = (v: unknown): string => JSON.stringify(v, (_k, x: unknown) =>
  * - schema: never newer than `space`'s;
  * - bounds: a non-legacy genome lies in `space` when it is of the space's schema (an older schema: structure only);
  *   legacy lives keep their pre-05a values (plan gap 4);
+ * - what ran: such a genome decodes (settingsMismatch) to the file's logged settings;
  * - integrity: genomeSha recomputes, for every role;
  * - constancy: every field but filters, heldOut and end equals the learner's first file with meta (absence allowed);
  * - filters: at most one file per FILTER_LEVELS level carries them.
@@ -161,6 +162,11 @@ async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFil
       else if (m.genomeSchema === space.schemaVersion) {
         const bad = checkGenome(space, m.genome)
         if (bad !== null) errors.push(`${path}: meta.genome is outside the genome space: ${bad}`)
+        else {
+          // The block describes the learner that ran: its genes decode to the file's own logged settings.
+          const off = settingsMismatch(space, m.genome, log.schemaVersion === 2 ? log.settings : {})
+          if (off !== null) errors.push(`${path}: meta.genome is not what ran: ${off}`)
+        }
       }
     }
     if (await genomeSha(m.genomeSchema, m.genome) !== m.genomeSha) errors.push(`${path}: meta.genomeSha does not match its genome`)

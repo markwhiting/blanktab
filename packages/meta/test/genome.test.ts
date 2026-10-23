@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { createRng } from "@blanktab/detmath"
 import {
-  checkGenome, decodeGenome, fromUnit, genomeSha, legacyGenome, parseCentre, parseGenomeSpace, searched, sha256Hex, toUnit,
+  checkGenome, decodeGenome, fromUnit, genomeSha, legacyGenome, parseCentre, parseGenomeSpace, searched, settingsMismatch, sha256Hex, toUnit,
   type GeneSpec, type Genome,
 } from "@blanktab/meta"
 
@@ -127,6 +127,19 @@ describe("decodeGenome", () => {
       caregiver: { caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000 },
       harness: { maxStepsPerSec: 30, sleepInterval: 250 },
     })
+  })
+  it("settingsMismatch: a log's flat settings run the genome when every learner, caregiver gene and maxStepsPerSec match exactly", () => {
+    const d = decodeGenome(centre, space)
+    const flat: Record<string, number> = { ...d.learner, ...d.caregiver, maxStepsPerSec: 30, seed: 7 } // seed and other keys are ignored
+    expect(settingsMismatch(space, centre, flat)).toBeNull()
+    expect(settingsMismatch(space, centre, { ...flat, lr: 6e-4 })).toBe("settings.lr is 0.0006, the genome's lr is 0.0005")
+    const { caregiverTau: _t, ...noTau } = flat
+    void _t
+    expect(settingsMismatch(space, centre, noTau)).toBe("settings.caregiverTau is absent, the genome's caregiverTau is 0.05")
+    expect(settingsMismatch(space, centre, { ...flat, maxStepsPerSec: 20 })).toContain("settings.maxStepsPerSec is 20")
+    // sleepInterval is not logged; a reserved slot never reaches code.
+    expect(settingsMismatch(space, centre, { ...flat, sleepInterval: 5, latentWeight: 9 })).toBeNull()
+    expect(settingsMismatch(space, { ...centre, lr: "x" }, flat)).toContain("gene lr")
   })
   it("decodeGenome never emits an implemented:false gene", () => {
     const reserved = space.genes.filter(g => g.implemented === false).map(g => g.name)

@@ -194,6 +194,25 @@ export function decodeGenome(g: Genome, space: GenomeSpace): Decoded {
   return { learner: out.learner, caregiver: out.caregiver, harness: { maxStepsPerSec: out.harness.maxStepsPerSec!, sleepInterval: out.harness.sleepInterval! } }
 }
 
+/**
+ * Why a log file's flat `settings` do not run genome `g`, or null (the writer and the gate share this check). Every
+ * implemented learner and caregiver gene, and maxStepsPerSec, must be in `settings` with exactly the genome's value.
+ * sleepInterval is not logged, so it is not compared; reserved slots never reach code (decodeGenome).
+ */
+export function settingsMismatch(space: GenomeSpace, g: Genome, settings: Readonly<Record<string, unknown>>): string | null {
+  let d: Decoded
+  try {
+    d = decodeGenome(g, space)
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
+  }
+  const want: Record<string, number> = { ...d.learner, ...d.caregiver, maxStepsPerSec: d.harness.maxStepsPerSec }
+  for (const [k, v] of Object.entries(want)) {
+    if (settings[k] !== v) return `settings.${k} is ${JSON.stringify(settings[k]) ?? "absent"}, the genome's ${k} is ${v}`
+  }
+  return null
+}
+
 /** A pre-05a life's genome, and which genes its settings did not record (filled with centres as placeholders only). */
 export interface LegacyGenome { genome: Genome; missing: string[] }
 

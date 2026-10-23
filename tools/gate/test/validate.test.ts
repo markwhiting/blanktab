@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { validateSessionPr, type PrFile, type ValidateOptions } from "../validate.ts"
 import { parseLogFile, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2, type MetaBlock } from "@blanktab/harness/log"
-import { genomeSha, parseCentre, parseGenomeSpace, type Genome } from "@blanktab/meta"
+import { decodeGenome, genomeSha, parseCentre, parseGenomeSpace, type Genome } from "@blanktab/meta"
 
 const KNOWLEDGE = join(__dirname, "../../../knowledge")
 const SPACE = parseGenomeSpace(JSON.parse(readFileSync(join(KNOWLEDGE, "genome-space.json"), "utf8")))
@@ -392,7 +392,13 @@ describe("validateSessionPr: the meta block (spec §7.3; Plan 05a)", () => {
   })
   const legacyOf = (genome: Genome, missing: string[] = []) => metaOf({ role: "legacy", method: "legacy", evalPanel: null, ...(missing.length ? { missing } : {}) }, genome)
   const outOfBounds = { ...CENTRE, entropyWeight: 0.001 } // today's picker spans 0.001–0.05; the v1 range is 0.0025–0.04
-  const withMeta = (seq: number, meta: MetaBlock | undefined, over: Partial<LogFileV2> = {}) => logV2(seq, { ...(meta ? { meta } : {}), ...over })
+  /** The flat settings a life running `g` logs (its decoded learner, caregiver and speed-cap genes, and a seed). */
+  const ranWith = (g: Genome): Record<string, number> => {
+    const d = decodeGenome(g, SPACE)
+    return { ...d.learner, ...d.caregiver, maxStepsPerSec: d.harness.maxStepsPerSec, seed: 7 }
+  }
+  const withMeta = (seq: number, meta: MetaBlock | undefined, over: Partial<LogFileV2> = {}) =>
+    logV2(seq, { ...(meta ? { meta, settings: ranWith(meta.genome) } : {}), ...over })
   const msg = async (files: PrFile[], prev: LogFile[] = []) => (await errs(files, prev)).errors.join("\n")
 
   it("a search genome out of bounds is rejected; the same values under role legacy are accepted", async () => {
@@ -436,6 +442,19 @@ describe("validateSessionPr: the meta block (spec §7.3; Plan 05a)", () => {
     const filters = Buffer.from(new Float32Array(104 * 16).buffer).toString("base64")
     const f9 = withMeta(9, { ...a, filters }), f10 = withMeta(10, { ...a, end: "budget" }, { final: true })
     expect((await errs([file(f9), file(f10)], [withMeta(8, a)])).errors).toEqual([])
+  })
+
+  it("a non-legacy genome must decode to the file's logged settings; legacy and older schemas are not compared", async () => {
+    const m = await metaOf()
+    expect((await errs([file(withMeta(0, m))])).errors).toEqual([])
+    expect(await msg([file(withMeta(0, m, { settings: { ...ranWith(CENTRE), lr: 6e-4 } }))])).toContain("meta.genome is not what ran: settings.lr is 0.0006, the genome's lr is 0.0005")
+    const { caregiverPeriod: _p, ...noCare } = ranWith(CENTRE)
+    void _p
+    expect(await msg([file(withMeta(0, m, { settings: noCare }))])).toContain("meta.genome is not what ran: settings.caregiverPeriod is absent")
+    // Legacy lives logged what they ran before 05a; an older schema's genes are not this space's.
+    expect((await errs([file(withMeta(0, await legacyOf(CENTRE), { settings: { ...ranWith(CENTRE), lr: 6e-4 } }))])).errors).toEqual([])
+    const newerMain = { ...SPACE, schemaVersion: SPACE.schemaVersion + 1 }
+    expect((await errs([file(withMeta(0, m, { settings: { lr: 1 } }))], [], { space: newerMain })).errors).toEqual([])
   })
 
   it("two files carrying filters for level 512 are rejected", async () => {

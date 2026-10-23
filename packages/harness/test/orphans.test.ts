@@ -383,7 +383,10 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     const meta = await birthBlock(id(1))
     const filters = btoa(String.fromCharCode(...new Uint8Array(new Float32Array(104 * W.conv1).buffer)))
     // Seq 0..6 at 8..512 CU; the 512 file carries the filters.
-    const files7 = (L: string) => Array.from({ length: 7 }, (_, s) => v2(L, s, { meta: { ...meta, ...(s === 6 ? { filters } : {}) } }))
+    // The files of a life that ran the block's genome (its settings decode from it: the gate checks).
+    const care = createCaregiver({ settings: CAREGIVER_DEFAULTS, seed: 3 }).state()
+    const settings = { ...SETTINGS, maxStepsPerSec: 30, seed: 7, ...CAREGIVER_DEFAULTS }
+    const files7 = (L: string) => Array.from({ length: 7 }, (_, s) => v2(L, s, { settings, meta: { ...meta, ...(s === 6 ? { filters } : {}) } }))
     // A version orphan: from its latest file.
     const idb = new IDBFactory()
     const L = id(1)
@@ -396,7 +399,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     // A stale orphan: from its checkpoint's block.
     const idb2 = new IDBFactory()
     await put(idb2, files7(L))
-    await saveCheckpoint(idb2, cp(L, 30 * HOUR, { steps: 60_000, cu: 600, seq: 7, knowledgeSha: K, sessionsSeenAtBirth: 2, meta, learnerState: state({ cu: 600, skippedUpdates: 1, evalCU: 0.5 }) }))
+    await saveCheckpoint(idb2, cp(L, 30 * HOUR, { steps: 60_000, cu: 600, seq: 7, knowledgeSha: K, sessionsSeenAtBirth: 2, meta, caregiver: care, learnerState: state({ cu: 600, skippedUpdates: 1, evalCU: 0.5 }) }))
     expect((await sweepCheckpoints({ idb: idb2, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })).verdicts).toEqual({ [L]: "stale" })
     const files2 = await filesOf(idb2, L)
     expect(files2[7]).toMatchObject({ final: true, stepsTotal: 60_000, meta: { ...meta, end: "orphan" } })

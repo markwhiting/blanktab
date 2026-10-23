@@ -3,6 +3,7 @@ import type { Observation, WorldView } from "@blanktab/interface"
 import { FIRST_LAYER_PARAMS, clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { hashSeed, type CanvasLike, type RoomKind, type World } from "@blanktab/world"
+import { checkGenome, settingsMismatch, type GenomeSpace } from "@blanktab/meta"
 import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings } from "./caregiver"
 import { panelSeed, runCheckup } from "./checkup"
 import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf, thin, birthOf, type Birth, type Lived } from "./final"
@@ -32,13 +33,26 @@ export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
  * every checkpoint and repeats it into every log file (with `filters` and `end` where they belong).
  */
 export interface SessionMeta {
-  /** A newborn's draw (role search). */
+  /** The genome space the page decoded `birth` with: a newborn's block is checked against it (newbornBlock). */
+  space: GenomeSpace
+  /**
+   * A newborn's draw (role search, or confirm). Its genome must decode to cfg.learnerSettings, cfg.caregiver and the
+   * speed cap, as logged; BadMetaBlockError otherwise.
+   */
   birth: MetaBlock
   /**
    * The block of a resumed life whose checkpoint has none (born before 05a): role and method "legacy", evalPanel null
    * (decision 0022: it keeps checkupSeed). `flat` is the life's settings as its log files record them.
    */
   legacy(flat: Record<string, number | string>): Promise<MetaBlock>
+}
+
+/** A newborn's cfg.meta.birth is not a block this life may write (runSession throws it before making a learner). */
+export class BadMetaBlockError extends Error {
+  constructor(learnerId: string, why: string) {
+    super(`learner ${learnerId}: bad meta block: ${why}`)
+    this.name = "BadMetaBlockError"
+  }
 }
 
 export interface SessionConfig {
@@ -326,7 +340,8 @@ export function curvePoint(
  *   to another room through world.bringToFront (never during a checkup). Nothing it reads or
  *   decides reaches the learner. Its carries go into each log file, its settings into `settings`, its state into checkpoints.
  * - The meta block (Plan 05a): the checkpoint's if it has one; else, with `cfg.meta`, a resumed life's legacy block
- *   (cfg.meta.legacy of its flat settings, saved in a checkpoint at once) or a newborn's `cfg.meta.birth`; else none.
+ *   (cfg.meta.legacy of its flat settings, saved in a checkpoint at once; a failing or bad one is warned about and the
+ *   life runs on without a block) or a newborn's `cfg.meta.birth` (checked: BadMetaBlockError); else none.
  *   It goes into every checkpoint and log file, and nothing of it reaches the learner. A crossing file at a FILTER_LEVELS level
  *   carries `filters` (the first layer, through learner.readParams). With a meta block evalPanel, checkups meet
  *   panelSeed variants. A failed life's final file has `end: "failed"`. With the inbox's short-lives switch on, at a
@@ -408,6 +423,40 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     throw e
   }
 
+  /**
+   * A resumed pre-05a life's legacy block, or undefined (said on console.warn) if cfg.meta.legacy throws or gives a block
+   * the parser refuses at the checkpoint's cu and steps, or one not of role legacy: a page bug never ends a forever life,
+   * which then runs on without a block, as before 05a.
+   */
+  async function legacyBlock(m: SessionMeta, c: Checkpoint, flat: Record<string, number>): Promise<MetaBlock | undefined> {
+    try {
+      const block = await m.legacy(flat)
+      const bad = block.role !== "legacy" ? `role ${JSON.stringify(block.role)}, not legacy` : parseMeta(block, { cu: c.cu, stepsTotal: c.steps, final: false })
+      if (typeof bad === "string") throw new Error(bad)
+      return block
+    } catch (e) {
+      console.warn(`learner ${id}: no legacy meta block (the life runs on without one):`, e)
+      return undefined
+    }
+  }
+  /**
+   * A newborn's block, checked: the parser accepts it (no filters, end or heldOut; not a newborn reference), its genome
+   * lies in cfg.meta.space at that space's schema, and it decodes to the settings this life runs and logs (`flat`).
+   * BadMetaBlockError otherwise, before any learner exists (the page falls back to another draw).
+   */
+  function newbornBlock(m: SessionMeta, flat: Record<string, number>): MetaBlock {
+    const b = m.birth
+    const bad = parseMeta(b, { cu: 0, stepsTotal: 0, final: false })
+    if (typeof bad === "string") throw new BadMetaBlockError(id, bad)
+    if (b.role === "legacy") throw new BadMetaBlockError(id, "a newborn's block cannot be role legacy")
+    if (b.genomeSchema !== m.space.schemaVersion) throw new BadMetaBlockError(id, `genomeSchema ${b.genomeSchema} is not the space's ${m.space.schemaVersion}`)
+    const outside = checkGenome(m.space, b.genome)
+    if (outside !== null) throw new BadMetaBlockError(id, `genome outside the space: ${outside}`)
+    const off = settingsMismatch(m.space, b.genome, flat)
+    if (off !== null) throw new BadMetaBlockError(id, `genome is not what runs: ${off}`)
+    return b
+  }
+
   async function liveTheLife(): Promise<SessionResult> {
     cp = deps.checkpointRecord !== undefined ? await fromRecord(deps.checkpointRecord, id) : await loadCheckpoint(idb, id)
     if (!cp && latest) throw new Error(`learner ${id} has log files up to seq ${latest.seq} but no checkpoint: its life cannot be resumed`)
@@ -458,13 +507,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const flatSettings = (): Record<string, number> => ({ ...settings, maxStepsPerSec, seed, ...(caregiver ? caregiver.state().settings : {}) })
     // The life's meta block (Plan 05a): its checkpoint's, kept whatever the config says (a life never changes its block,
     // and the gate holds it constant); else, with cfg.meta, a pre-05a life's legacy block or a newborn's draw.
-    const metaFromConfig = cp?.meta === undefined && cfg.meta !== undefined
-    const meta: MetaBlock | undefined = cp?.meta ?? (cfg.meta === undefined ? undefined : cp ? await cfg.meta.legacy(flatSettings()) : cfg.meta.birth)
-    if (metaFromConfig && meta) {
-      // Never write a block the parser refuses: no filters, end or heldOut here (they are per file), no newborn role.
-      const bad = parseMeta(meta, { cu: 0, stepsTotal: 0, final: false })
-      if (typeof bad === "string") throw new TypeError(`learner ${id}: cfg.meta gave a bad meta block: ${bad}`)
-    }
+    const meta: MetaBlock | undefined = cp?.meta ?? (cfg.meta === undefined ? undefined : cp ? await legacyBlock(cfg.meta, cp, flatSettings()) : newbornBlock(cfg.meta, flatSettings()))
     /** The room the previous frame was seen in (undefined: no previous frame this run, or a restore since). */
     let prevRoom: string | undefined
     /**
@@ -525,8 +568,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         const parts = FIRST_LAYER_PARAMS.map(i => params[i])
         const n = parts.reduce((a, p) => a + (p?.length ?? 0), 0)
         // Never a file the parser refuses: exactly FILTER_FLOATS_PER_CONV1 per unit of widths.conv1.
+        // A mismatch is said and the filters left out: a snapshot is not worth a life (decision 0022).
         if (parts.some(p => p === undefined) || n !== FILTER_FLOATS_PER_CONV1 * widths.conv1) {
-          throw new Error(`learner ${id}: the first layer has ${n} values, not ${FILTER_FLOATS_PER_CONV1}·${widths.conv1}`)
+          console.warn(`learner ${id}: the first layer has ${n} values, not ${FILTER_FLOATS_PER_CONV1}·${widths.conv1}; this file has no filters`)
+          return undefined
         }
         return float32Base64(parts as Float32Array[])
       }
