@@ -2023,6 +2023,8 @@ describe("session v2", { timeout: 60_000 }, () => {
       it("fix round 1: a newborn's bad block throws BadMetaBlockError before any learner: no checkpoint, no files", async () => {
         const birth = await birthBlock(ID)
         const outside = { ...CENTRE, entropyWeight: 0.001 }
+        const withoutBudget: MetaBlock = { ...birth }
+        delete withoutBudget.budget
         const cases: [string, Partial<SessionConfig>][] = [
           ["bad meta block: meta.filters", { meta: await metaOf({ birth: { ...birth, filters: "AAAA" } }) }],
           ["cannot be role legacy", { meta: await metaOf({ birth: await legacyBlock(decodeGenome(CENTRE, GENOME_SPACE).learner) }) }],
@@ -2030,6 +2032,9 @@ describe("session v2", { timeout: 60_000 }, () => {
           ["genome outside the space: entropyWeight", { meta: await metaOf({ birth: { ...birth, genome: outside, genomeSha: await genomeSha(1, outside) } }) }],
           ["genome is not what runs: settings.lr is 0.01", { meta: await metaOf(), learnerSettings: SETTINGS }],
           ["genome is not what runs: settings.caregiverPeriod is absent", { meta: await metaOf(), caregiver: undefined }],
+          // A new life is born under the current config's budget (decision 0020): none, or another, is refused.
+          ["must carry the config's budget (2048 CU at 512, 1024, 2048)", { meta: await metaOf({ birth: withoutBudget }) }],
+          ["must carry the config's budget (4096 CU at 1024, 2048, 4096)", { meta: { ...(await metaOf()), budget: { budgetCU: 4096, levels: [1024, 2048, 4096] } } }],
         ]
         for (const [why, cfg] of cases) {
           const idb = new IDBFactory()
@@ -2199,6 +2204,33 @@ describe("session v2", { timeout: 60_000 }, () => {
           expect(checkupStepOf(events, 3072)).toEqual([50]) // that sleep's own checkup ran first, and is in the final file
           expect(logs.at(-1)!.checkups!.map(c => c.level)).toEqual([3072])
           await gateAccepts(logs)
+        })
+
+        it("a resumed life keeps the budget it was born with after the config moves: it ends at its own budget, not the config's", async () => {
+          const idb = new IDBFactory()
+          // Born when the config said 1024 CU at 512, 1024 (hypothetical): its block carries that budget.
+          const OLD = { budgetCU: 1024, levels: [512, 1024] }
+          const born: SessionMeta = { ...(await metaOf({ birth: { ...(await birthBlock(ID)), budget: OLD } })), budget: OLD }
+          await expect(live(idb, { meta: born, inbox: new SessionInbox(), deps: reload(s => s.cu > 512 + 64) })).rejects.toThrow("reload")
+          // Resumed under today's config (2048 at 512, 1024, 2048) with the switch on: it ends after its own 1024 checkup.
+          const inbox = new SessionInbox()
+          inbox.setShortLives(true)
+          const events: SessionEvent[] = []
+          const r = await live(idb, { meta: await metaOf(), inbox, deps: { onEvent: e => events.push(e) } })
+          expect(r.ended).toBe("budget")
+          expect(checkupStepOf(events, 1024)).toEqual([r.steps])
+          expect(checkupStepOf(events, 2048)).toEqual([])
+          const logs = await logsOf(idb)
+          for (const f of logs) expect(f.meta!.budget).toEqual(OLD)
+          // Its filters are at its own levels only.
+          expect(logs.filter(f => f.meta!.filters !== undefined).map(f => levelAtOrBelow(f.cu))).toEqual([512, 1024])
+          // The gate under today's config accepts its later files (their own budget is read); its seq 0 was accepted
+          // under the config it was born with, and would not be a new life under today's.
+          for (const f of logs) expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
+          const pr = (fs: LogFileV2[]) => fs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f) }))
+          expect((await validateSessionPr(pr(logs.slice(1)), [logs[0]!], { space: GENOME_SPACE })).errors).toEqual([])
+          expect((await validateSessionPr(pr(logs.slice(0, 1)), [], { space: GENOME_SPACE, budget: OLD })).errors).toEqual([])
+          expect((await validateSessionPr(pr(logs.slice(0, 1)), [], { space: GENOME_SPACE })).errors.join("\n")).toContain("is not the config's")
         })
 
         it("switched on then off before 2048: no end", async () => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import evaluationConfig from "../../../config/evaluation.json" with { type: "json" }
-import { BUDGET_CU, evalBudgetOf, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { BUDGET_CU, evalBudgetOf, lifeBudget, V1_BUDGET, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 import { PANELS } from "@blanktab/meta"
 
@@ -275,6 +275,30 @@ describe("meta (spec §7.3; Plan 05a)", () => {
     for (const missing of [["lr", "bufferSize"], ["lr", "lr"], ["sleepInterval"], [1], "lr"]) {
       expect(err(withMeta(legacyMeta({ missing }))), JSON.stringify(missing)).toContain("meta.missing")
     }
+  })
+
+  it("meta.budget: strict when present; filters and newborn checkups follow the file's own budget, never the current config", () => {
+    const B4096 = { budgetCU: 4096, levels: [1024, 2048, 4096] }
+    const r = withMeta(searchMeta({ budget: B4096 }))
+    expect(err(r)).toBe("")
+    if (r.ok && r.value.schemaVersion === 2) expect(r.value.meta!.budget).toEqual(B4096)
+    // A file born under a hypothetical 4096 budget carries filters at 4096, not 512; one without budget (V1) the reverse.
+    const gpu = floats(104 * 16)
+    expect(err(withMeta(searchMeta({ budget: B4096, filters: gpu }), { cu: 4096 }))).toBe("")
+    expect(err(withMeta(searchMeta({ budget: B4096, filters: gpu }), { cu: 512 }))).toContain("meta.filters is only in a file at 1024, 2048, 4096 CU")
+    expect(err(withMeta(searchMeta({ filters: gpu }), { cu: 4096 }))).toContain("meta.filters is only in a file at 512, 1024, 2048 CU")
+    expect(lifeBudget(undefined)).toEqual(V1_BUDGET)
+    expect(lifeBudget({ budget: B4096 })).toEqual(B4096)
+    // A newborn reference's checkups are its own budget's levels.
+    const nb = newbornMeta({ budget: B4096 })
+    expect(err(parseLogFile(newbornFile(nb, { checkups: [1024, 2048, 4096].map(l => checkup(l, { steps: 0 })) })))).toBe("")
+    expect(err(parseLogFile(newbornFile(nb)))).toContain("a newborn file must hold exactly 3 checkups, at levels 1024, 2048, 4096")
+    for (const [budget, want] of [
+      [null, "meta.budget must be { budgetCU, levels }"], [{ budgetCU: 2048, levels: [512, 1024, 2048], x: 1 }, 'meta.budget has unknown key "x"'],
+      [{ budgetCU: 2048, levels: [512, 1024] }, "meta.budget levels must be"], [{ budgetCU: 0, levels: [] }, "meta.budget budgetCU"],
+      [{ budgetCU: 2048, levels: [1024, 512, 2048] }, "meta.budget levels must be"], [{ budgetCU: 2048, levels: [600, 2048] }, "meta.budget levels must be"],
+    ] as const) expect(err(withMeta(searchMeta({ budget }))), JSON.stringify(budget)).toContain(want)
+    expect(err(withMeta(legacyMeta({ budget: { budgetCU: 2048, levels: [512, 1024, 2048] } })))).toContain("meta.budget is not for role legacy")
   })
 
   it("meta.filters only in a file whose levelAtOrBelow(cu) is 512, 1024 or 2048, of exactly 104·conv1 floats", () => {

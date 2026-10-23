@@ -73,6 +73,12 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **A first layer of the wrong size is said and its filters left out** (controller ruling, Task 6 review). A missing snapshot costs one data point, while ending the life would cost the whole row.
 - **A legacy block is saved at once.** A pre-05a life resumed with `cfg.meta` saves a checkpoint with its new legacy block straight away. So every checkpoint it can be restored or ended from has that block.
 
+- **The meta block carries its life's evaluation budget** (controller ruling, Task 7 review; detail in 0020).
+  - **The field.** `meta.budget` (`{ budgetCU, levels }`) is optional and strict. It is constant across a life's files, as the other constant fields are, and it is not allowed on role `legacy`.
+  - **When it is absent,** the block reads as the v1 budget, 2,048 at 512, 1,024 and 2,048.
+  - **What reads it.** `meta.filters` levels and a newborn reference's checkup levels come from the block's own budget.
+  - **New lives.** A new life's block must carry the current config's budget, in the session and at the gate (seq 0).
+
 ### Settings an older life did not record (controller ruling) [agent]
 
 - **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings whose value is genuinely unknown (for example sleepInterval, the caregiver genes, and exploreEpsilon or residualDecay on older lives). Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.

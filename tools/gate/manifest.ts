@@ -23,11 +23,13 @@ export function computeKnowledgeSha(dir: string): string {
 
 /**
  * What the deployed page is built from (deploy.yml: `npm ci`, then `vite build` in app/): the app, the packages it
- * bundles, the root package files npm installs from, and the compiler settings app/ and packages/ extend. Nothing
- * else is code: session logs, docs, knowledge (it reaches learners by refresh, tracked by knowledgeSha), README and
- * AGENTS, tests, tools, workflows, and the root tsconfig.json (it covers tools and tests only).
+ * bundles, the root package files npm installs from, the compiler settings app/ and packages/ extend, and
+ * config/evaluation.json (the harness bundles its evaluation budget, decision 0020; only that file: the rest of config/,
+ * such as its references, is read by the gate and tools only). Nothing else is code: session logs, docs, knowledge (it
+ * reaches learners by refresh, tracked by knowledgeSha), README and AGENTS, tests, tools, workflows, and the root
+ * tsconfig.json (it covers tools and tests only).
  */
-export const BUILD_INPUTS = ["app", "packages", "package.json", "package-lock.json", "tsconfig.base.json"] as const
+export const BUILD_INPUTS = ["app", "packages", "package.json", "package-lock.json", "tsconfig.base.json", "config/evaluation.json"] as const
 
 /**
  * The code a build is made of: the last commit under `repoDir` that changed a BUILD_INPUTS path, or "dev" without one

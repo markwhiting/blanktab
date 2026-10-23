@@ -419,6 +419,36 @@ describe("validateSessionPr: the meta block (spec §7.3; Plan 05a)", () => {
     expect((await errs([file(withMeta(0, await legacyOf(outOfBounds)))], [], {})).ok).toBe(true)
   })
 
+  it("meta.budget: a life validates under the budget it was born with after the config moves; a new life must be born under the current config's", async () => {
+    const V1 = { budgetCU: 2048, levels: [512, 1024, 2048] }
+    const HYPOTHETICAL = { budgetCU: 4096, levels: [1024, 2048, 4096] } // the config after a (hypothetical) move
+    const born = await metaOf({ budget: V1 })
+    // Today's config: a new life under it is accepted; so is one written before the field (absent reads as v1).
+    expect((await errs([file(withMeta(0, born))])).errors).toEqual([])
+    expect((await errs([file(withMeta(0, await metaOf()))])).errors).toEqual([])
+    // The config moves to 4096: a file of a life born under 2048 still validates, filters at its own 512 level (not a 4096-budget level) included.
+    const gpu = btoa(String.fromCharCode(...new Uint8Array(new Float32Array(104 * 16).buffer)))
+    const later = [file(withMeta(1, born)), file(withMeta(2, { ...born, filters: gpu }, { cu: 512 }))]
+    expect((await errs(later, [withMeta(0, born)], { space: SPACE, budget: HYPOTHETICAL })).errors).toEqual([])
+    // But a new life (seq 0) under the moved config must carry it: the old budget, or none (v1), is rejected; the new one passes.
+    for (const m of [born, await metaOf()]) {
+      expect((await errs([file(withMeta(0, m))], [], { space: SPACE, budget: HYPOTHETICAL })).errors.join("\n"))
+        .toContain("a new life's meta.budget (2048 CU at 512, 1024, 2048) is not the config's (4096 CU at 1024, 2048, 4096)")
+    }
+    expect((await errs([file(withMeta(0, await metaOf({ budget: HYPOTHETICAL })))], [], { space: SPACE, budget: HYPOTHETICAL })).errors).toEqual([])
+    // Under today's config, a new life born under 4096 is rejected, and a newborn reference at seq 0 too.
+    expect(await msg([file(withMeta(0, await metaOf({ budget: HYPOTHETICAL })))])).toContain("is not the config's (2048 CU at 512, 1024, 2048)")
+    const newborn = await metaOf({ role: "newborn", method: "newborn", evalPanel: 2, budget: HYPOTHETICAL, heldOut: { loss: 1, baseline: 1 } })
+    const nbFile = withMeta(0, newborn, {
+      cu: 0, stepsTotal: 0, final: true, curve: [], evalCU: 3, milestoneSuiteVersion: 1,
+      checkups: [1024, 2048, 4096].map(level => ({ level, steps: 0, passed: [], measures: { M1: null, M2: null, M3: null, M4: null, M5: null, M6: null }, evalCU: 1 })),
+    })
+    expect(parseLogFile(JSON.parse(JSON.stringify(nbFile))).ok).toBe(true)
+    expect(await msg([file(nbFile)])).toContain("a new life's meta.budget (4096 CU at 1024, 2048, 4096) is not the config's")
+    // Constancy: the budget never changes within a life.
+    expect(await msg([file(withMeta(1, { ...born, budget: HYPOTHETICAL }))], [withMeta(0, born)])).toContain("meta.budget differs from the learner's earlier files")
+  })
+
   it("a genomeSha that does not match its genome is rejected", async () => {
     const m = await metaOf()
     expect(await msg([file(withMeta(0, { ...m, genomeSha: "0".repeat(64) }))])).toContain("meta.genomeSha does not match its genome")

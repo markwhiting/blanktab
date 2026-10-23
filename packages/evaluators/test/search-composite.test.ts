@@ -85,10 +85,13 @@ describe("search-composite@1 (spec §2.4)", () => {
     const id = lid(0xb0)
     const typical = typicalLife(id)
     expect(score(lifeOf(id, typical)).eligible).toBe(true)
+    // Born under the v1 budget explicitly is the same as written before the field.
+    expect(score(lifeOf(id, typicalLife(id, { meta: meta({ budget: { budgetCU: 2048, levels: [512, 1024, 2048] } }) }))).eligible).toBe(true)
     const cases: [string, LogFile[], object?][] = [
       ["not a search life", typicalLife(id, { meta: meta({ role: "legacy", method: "legacy", evalPanel: null, drawSeed: null, posteriorSha: null }) })],
       ["no meta block before the checkup", [file({ learnerId: id, seq: 0, cu: 512, meta: null, checkups: [checkup(512, {})] }), ...typical.slice(1)]],
       ["not gpu widths", typicalLife(id, { widths: CPU })],
+      ["different evaluation budget", typicalLife(id, { meta: meta({ budget: { budgetCU: 4096, levels: [1024, 2048, 4096] } }) })],
       ["no newborn reference", typical, {}],
       ["no 2048 checkup", [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: 3072, curve: [point(3000, 0.9)] })]],
       ["fewer than 2 of 3 levels", [

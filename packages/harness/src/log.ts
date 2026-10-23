@@ -94,7 +94,15 @@ export interface MetaBlock {
   heldOut?: HeldOutScore
   /** Final files only. */
   end?: MetaEnd
+  /**
+   * The evaluation protocol the life was born under (decision 0020): its CU budget and checkup/filter levels, written at
+   * birth from config/evaluation.json and constant across its files. Absent (files written before the field, and
+   * legacy lives): V1_BUDGET. Every check of a file reads its own budget (lifeBudget), never the current config.
+   */
+  budget?: EvalBudget
 }
+/** An evaluation budget: `budgetCU` CU, with checkups (and filter snapshots) at `levels`, the last being `budgetCU`. */
+export interface EvalBudget { budgetCU: number; levels: readonly number[] }
 /** Floats in `meta.filters` per unit of widths.conv1: periphery 5·5·3 weights + 1 bias, fovea 3·3·3 + 1 (spec §5.1). */
 export const FILTER_FLOATS_PER_CONV1 = 104
 /** The number of shared checkup panels: @blanktab/meta PANELS (log.ts imports no package; log.test.ts pins it). */
@@ -135,28 +143,52 @@ export function isLogLevel(n: number): boolean {
   return n % LOG_STEP_CU === 0
 }
 
+/** At most this many levels in a budget. */
+const MAX_BUDGET_LEVELS = 16
 /**
- * The evaluation budget of config/evaluation.json (decision 0020), checked at load: `budgetCU` a positive integer, and
- * `levels` increasing log-schedule levels ending at `budgetCU`. A malformed config fails loudly rather than run lives
- * on a budget no evaluator reads.
+ * What is wrong with `v` as an EvalBudget, or null: `budgetCU` a positive integer, `levels` 1 to MAX_BUDGET_LEVELS
+ * increasing log-schedule levels ending at `budgetCU`. Shared by the config check and the meta block parser.
  */
-export function evalBudgetOf(c: unknown): { budgetCU: number; levels: readonly number[] } {
-  const o = (typeof c === "object" && c !== null ? c : {}) as { budgetCU?: unknown; levels?: unknown }
-  const b = o.budgetCU, lv = o.levels
-  if (!(typeof b === "number" && Number.isInteger(b) && b > 0)) throw new Error("config/evaluation.json: budgetCU must be a positive integer")
-  if (!(Array.isArray(lv) && lv.length > 0 && lv.every((x, i) => typeof x === "number" && isLogLevel(x) && (i === 0 || x > lv[i - 1]))
-    && lv[lv.length - 1] === b)) {
-    throw new Error("config/evaluation.json: levels must be increasing log-schedule levels ending at budgetCU")
+export function budgetError(v: unknown, keys: "any" | "strict" = "any"): string | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return "must be { budgetCU, levels }"
+  const o = v as Record<string, unknown>
+  if (keys === "strict") {
+    const k = Object.keys(o).find(x => x !== "budgetCU" && x !== "levels")
+    if (k !== undefined) return `has unknown key ${JSON.stringify(k.slice(0, 80))}`
   }
-  return { budgetCU: b, levels: Object.freeze([...(lv as number[])]) }
+  const b = o.budgetCU, lv = o.levels
+  if (!(typeof b === "number" && Number.isInteger(b) && b > 0)) return "budgetCU must be a positive integer"
+  if (!(Array.isArray(lv) && lv.length > 0 && lv.length <= MAX_BUDGET_LEVELS
+    && lv.every((x, i) => typeof x === "number" && isLogLevel(x) && (i === 0 || x > lv[i - 1])) && lv[lv.length - 1] === b)) {
+    return `levels must be 1 to ${MAX_BUDGET_LEVELS} increasing log-schedule levels ending at budgetCU`
+  }
+  return null
 }
-const EVAL_BUDGET = evalBudgetOf(evaluationConfig)
-/** A search life's evaluation budget (spec §4.2): its first budgetCU CU (2,048 in v1), from config/evaluation.json. */
-export const BUDGET_CU: number = EVAL_BUDGET.budgetCU
-/** The log levels whose file carries `meta.filters` (spec §5.1): the config's checkup levels (512, 1,024, 2,048 in v1). */
-export const FILTER_LEVELS: readonly number[] = EVAL_BUDGET.levels
-/** A newborn reference's checkups (spec §7.3): the levels a search life is checked at, so the same config's levels. */
-export const NEWBORN_LEVELS: readonly number[] = EVAL_BUDGET.levels
+/**
+ * The evaluation budget of config/evaluation.json (decision 0020), checked at load (budgetError). A malformed config
+ * fails loudly rather than run lives on a budget no evaluator reads.
+ */
+export function evalBudgetOf(c: unknown): EvalBudget {
+  const e = budgetError(c)
+  if (e !== null) throw new Error(`config/evaluation.json: ${e}`)
+  const o = c as { budgetCU: number; levels: number[] }
+  return Object.freeze({ budgetCU: o.budgetCU, levels: Object.freeze([...o.levels]) })
+}
+/** Whether two budgets are the same protocol. */
+export const sameBudget = (a: EvalBudget, b: EvalBudget): boolean =>
+  a.budgetCU === b.budgetCU && a.levels.length === b.levels.length && a.levels.every((x, i) => x === b.levels[i])
+/** The budget of a meta block without `budget` (written before the field; legacy lives): spec §4.2's v1 protocol. */
+export const V1_BUDGET: EvalBudget = Object.freeze({ budgetCU: 2048, levels: Object.freeze([512, 1024, 2048]) })
+/** The budget a life runs and is checked under: its meta block's own, else V1_BUDGET. Never the current config. */
+export const lifeBudget = (meta: Pick<MetaBlock, "budget"> | undefined): EvalBudget => meta?.budget ?? V1_BUDGET
+/** The current config's budget: what a NEW life is born under (a resumed life keeps its own, lifeBudget). */
+export const CONFIG_BUDGET: EvalBudget = evalBudgetOf(evaluationConfig)
+/** A new search life's evaluation budget (spec §4.2): its first budgetCU CU (2,048 in v1), from config/evaluation.json. */
+export const BUDGET_CU: number = CONFIG_BUDGET.budgetCU
+/** A new life's filter-snapshot levels (spec §5.1): the config's checkup levels (512, 1,024, 2,048 in v1). */
+export const FILTER_LEVELS: readonly number[] = CONFIG_BUDGET.levels
+/** A new newborn reference's checkups (spec §7.3): the levels a search life is checked at, so the same config's levels. */
+export const NEWBORN_LEVELS: readonly number[] = CONFIG_BUDGET.levels
 
 /** The highest log level <= cu, or null below FIRST_LOG_CU. */
 export function levelAtOrBelow(cu: number): number | null {
@@ -279,7 +311,7 @@ const HELD_OUT_KEYS = ["loss", "baseline"]
 const CHECKUP_KEYS = ["level", "steps", "passed", "measures", "evalCU", "error", "errorReasons"]
 const CAREGIVER_KEYS = ["carries", "to", "safetyNet", "lostCarries"]
 const META_KEYS = ["v", "role", "method", "genomeSchema", "genome", "genomeSha", "drawSeed", "posteriorSha", "evalPanel", "evalSeed",
-  "confirmation", "inheritance", "missing", "filters", "heldOut", "end"]
+  "confirmation", "inheritance", "missing", "filters", "heldOut", "end", "budget"]
 const CARE_DEST_RE = /^[a-z]{1,16}$/
 const MAX_CARE_DESTS = 16
 const unknownKey = (o: Record<string, unknown>, allowed: readonly string[], where: string): string | null => {
@@ -406,8 +438,10 @@ export function parseLogFile(json: unknown): ParseResult {
       if (sum - ev > EVAL_CU_TOLERANCE * Math.max(ev, sum)) return fail(`checkups' evalCU (${sum}) exceeds the file's evalCU (${ev})`)
     }
   }
-  if (newborn && !(checkups && checkups.length === NEWBORN_LEVELS.length && checkups.every((c, i) => c.level === NEWBORN_LEVELS[i]))) {
-    return fail(`a newborn file must hold exactly ${NEWBORN_LEVELS.length} checkups, at levels ${NEWBORN_LEVELS.join(", ")}`)
+  // A newborn reference is checked at its own budget's levels (lifeBudget), whatever the config says now.
+  const newbornLevels = lifeBudget(meta).levels
+  if (newborn && !(checkups && checkups.length === newbornLevels.length && checkups.every((c, i) => c.level === newbornLevels[i]))) {
+    return fail(`a newborn file must hold exactly ${newbornLevels.length} checkups, at levels ${newbornLevels.join(", ")}`)
   }
   let caregiver: CaregiverSummary | undefined
   if ("caregiver" in json) {
@@ -528,7 +562,8 @@ function base64Bytes(s: string, expectBytes: number): number | null {
  * The `meta` block (spec §7.3), or what is wrong with it, checked against the file (or checkpoint) it sits in.
  * `f.widths` is needed only to check `filters` (a checkpoint, which never stores filters, gives none).
  * Structure only, browser-safe: genome bounds, the genomeSha and constancy across files are the gate's (validate.ts).
- * Strict keys; `filters` only in a file whose levelAtOrBelow(cu) is a FILTER_LEVELS level, of exactly
+ * Strict keys; `budget`, when present, a strict EvalBudget, never for role "legacy" (which runs under V1_BUDGET);
+ * `filters` only in a file whose levelAtOrBelow(cu) is one of the block's own budget levels (lifeBudget), of exactly
  * FILTER_FLOATS_PER_CONV1·widths.conv1 float32; `heldOut` only for role "newborn"; `missing` only for role "legacy";
  * `end` only in a final file. A newborn's file has cu 0, stepsTotal 0, final true, method "newborn" and a panel.
  */
@@ -595,10 +630,19 @@ export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final
     }
     missing = [...(m as string[])]
   }
+  let budget: EvalBudget | undefined
+  if ("budget" in v) {
+    if (role === "legacy") return "meta.budget is not for role legacy (a legacy life runs under the v1 budget)"
+    const e = budgetError(v.budget, "strict")
+    if (e !== null) return `meta.budget ${e}`
+    const b = v.budget as EvalBudget
+    budget = { budgetCU: b.budgetCU, levels: [...b.levels] }
+  }
   let filters: string | undefined
   if ("filters" in v) {
     const level = levelAtOrBelow(f.cu)
-    if (level === null || !FILTER_LEVELS.includes(level)) return `meta.filters is only in a file at ${FILTER_LEVELS.join(", ")} CU`
+    const levels = lifeBudget({ budget }).levels // the file's own budget, never the current config
+    if (level === null || !levels.includes(level)) return `meta.filters is only in a file at ${levels.join(", ")} CU`
     if (!f.widths) return "meta.filters needs the file's widths"
     const bytes = FILTER_FLOATS_PER_CONV1 * f.widths.conv1 * 4
     if (typeof v.filters !== "string" || base64Bytes(v.filters, bytes) !== bytes) {
@@ -631,6 +675,7 @@ export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final
     drawSeed: v.drawSeed as number | null, posteriorSha: v.posteriorSha as string | null,
     evalPanel: v.evalPanel as number | null, evalSeed: v.evalSeed as number | null, confirmation, inheritance: { filters: "none" },
     ...(missing ? { missing } : {}), ...(filters !== undefined ? { filters } : {}), ...(heldOut ? { heldOut } : {}), ...(end ? { end } : {}),
+    ...(budget ? { budget } : {}),
   }
 }
 

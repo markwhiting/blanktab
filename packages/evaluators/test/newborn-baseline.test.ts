@@ -52,10 +52,14 @@ describe("newborn-baseline@1 (spec §2.3)", () => {
     const suite2 = newborn(101, wild, 5, { milestoneSuiteVersion: 2 })
     const schema2 = newborn(102, wild, 5)
     ;(schema2.files[0] as LogFileV2).meta!.genomeSchema = 2
+    // Born under another evaluation budget (its checkups at that budget's levels).
+    const otherBudget = newborn(103, [1024, 2048, 4096].map(level => checkup(level, { M2: 50 }, ["M2"])), 5)
+    ;(otherBudget.files[0] as LogFileV2).meta!.budget = { budgetCU: 4096, levels: [1024, 2048, 4096] }
+    expect(parses(otherBudget)).toBe(true)
     // A search life in the group is not a newborn.
     const search: LifeInput = { learnerId: lid(0xd0), files: typicalLife(lid(0xd0)) }
     // Order must not matter: shuffle the cohort deterministically, extras in the middle.
-    const shuffled = [...lives.slice(40), cpu, suite2, schema2, search, ...lives.slice(0, 40).reverse()]
+    const shuffled = [...lives.slice(40), cpu, suite2, schema2, otherBudget, search, ...lives.slice(0, 40).reverse()]
     const out = newbornBaseline.evaluateCohort!({ newborn: shuffled }, {})
     expect(out).toMatchObject({ evaluator: "newborn-baseline", version: 1, eligible: true, score: null })
     const reference = (out.diagnostics as { reference: unknown }).reference
@@ -78,7 +82,7 @@ describe("newborn-baseline@1 (spec §2.3)", () => {
       heldOutMedian: expect.closeTo(0.92, 12),
     })
     expect(out.components).toEqual({ lives: 64, heldOutMedian: expect.closeTo(0.92, 12) })
-    expect((out.diagnostics as { ignored: number }).ignored).toBe(4)
+    expect((out.diagnostics as { ignored: number }).ignored).toBe(5)
   })
 
   it("no counted newborns is ineligible; the output is byte-identical for the same input", () => {

@@ -1,6 +1,6 @@
 // newborn-baseline@1 (spec §2.3): the newborn reference, computed from newborn lives (untrained learners of the centre
 // genome, frozen checkups at 512, 1,024 and 2,048 on the panels search lives meet, and one held-out score each).
-import type { LogFileV2 } from "@blanktab/harness/log"
+import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
 import { isGpuWidths, isV2, median } from "./life"
 import { REFERENCE_MILESTONES } from "./reference"
 import type { EvalOutput, Evaluator, LifeInput, NewbornReference } from "./types"
@@ -9,16 +9,19 @@ const ID = "newborn-baseline"
 const VERSION = 1
 /** The levels a newborn is checked at: those of the budget it stands in for (config/evaluation.json must agree). */
 const LEVELS: readonly number[] = Object.freeze([512, 1024, 2048])
-const BUDGET_CU = 2048
+const BUDGET = Object.freeze({ budgetCU: 2048, levels: LEVELS })
 /** A sustained pass: passing at this many of the LEVELS or more (spec §2.3, V2 §6.3). */
 const SUSTAINED = 2
 
-/** The newborn file this version counts: role newborn, genome schema 1, suite 1, GPU widths, checkups at exactly LEVELS. */
+/**
+ * The newborn file this version counts: role newborn, genome schema 1, suite 1, GPU widths, born under this version's
+ * budget, checkups at exactly LEVELS.
+ */
 function newbornFile(life: LifeInput): LogFileV2 | null {
   const f = life.files.find(x => isV2(x) && x.meta?.role === "newborn")
   if (!f || !isV2(f) || f.learnerId !== life.learnerId) return null
   const cks = f.checkups ?? []
-  const ok = f.meta!.genomeSchema === 1 && f.milestoneSuiteVersion === 1 && isGpuWidths(f.widths)
+  const ok = f.meta!.genomeSchema === 1 && f.milestoneSuiteVersion === 1 && isGpuWidths(f.widths) && sameBudget(lifeBudget(f.meta), BUDGET)
     && cks.length === LEVELS.length && cks.every((c, i) => c.level === LEVELS[i])
   return ok ? f : null
 }
@@ -63,5 +66,5 @@ function evaluateCohort(groups: Record<string, LifeInput[]>): EvalOutput {
 }
 
 export const newbornBaseline: Evaluator = Object.freeze({
-  id: ID, version: VERSION, kind: "cohort" as const, needs: [], budget: Object.freeze({ budgetCU: BUDGET_CU, levels: LEVELS }), evaluateCohort,
+  id: ID, version: VERSION, kind: "cohort" as const, needs: [], budget: BUDGET, evaluateCohort,
 })

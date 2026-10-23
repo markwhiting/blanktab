@@ -10,8 +10,8 @@ import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf, thin, birthOf, type Birth, type 
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, tailEvalCUError, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
 import {
-  BUDGET_CU, parseMeta, FILTER_FLOATS_PER_CONV1, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing,
-  type CheckupResult, type CurvePoint, type LogFileV2, type MetaBlock, type MetaEnd,
+  CONFIG_BUDGET, lifeBudget, parseMeta, sameBudget, FILTER_FLOATS_PER_CONV1, MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing,
+  type CheckupResult, type CurvePoint, type EvalBudget, type LogFileV2, type MetaBlock, type MetaEnd,
 } from "./log"
 import type { Milestone } from "./milestones"
 import { openQueue } from "./queue"
@@ -37,9 +37,14 @@ export interface SessionMeta {
   space: GenomeSpace
   /**
    * A newborn's draw (role search, or confirm). Its genome must decode to cfg.learnerSettings, cfg.caregiver and the
-   * speed cap, as logged; BadMetaBlockError otherwise.
+   * speed cap, as logged, and it must carry `budget` equal to the current config's (below); BadMetaBlockError otherwise.
    */
   birth: MetaBlock
+  /**
+   * The current config's evaluation budget, which a newborn's block must carry (default CONFIG_BUDGET, from
+   * config/evaluation.json). A resumed life keeps the budget its checkpoint's block was born with (decision 0020).
+   */
+  budget?: EvalBudget
   /**
    * The block of a resumed life whose checkpoint has none (born before 05a): role and method "legacy", evalPanel null
    * (decision 0022: it keeps checkupSeed). `flat` is the life's settings as its log files record them.
@@ -98,7 +103,7 @@ export type SessionLearner = Pick<TrainableLearner, "step" | "stats" | "sleep" |
   onKnowledge?(m: Manifest): void
   /** Checkups need it (decision 0016); a learner without it gets none. */
   frozenRun?: TrainableLearner["frozenRun"]
-  /** The filter snapshots (meta.filters at FILTER_LEVELS) need it; a learner without it gets none. */
+  /** The filter snapshots (meta.filters at the life's budget levels) need it; a learner without it gets none. */
   readParams?: TrainableLearner["readParams"]
 }
 /** How the session asks for a learner: newborn, or from a checkpoint's state (createLearner's options minus the backend). */
@@ -158,7 +163,7 @@ export class SessionInbox {
 
   /**
    * The short-lives switch (decisions 0019, 0022), off by default. runSession reads it at clean sleeps only: a life with
-   * a meta block ends at the first clean sleep where it is on, its budget checkup (BUDGET_CU) is done and no checkup is
+   * a meta block ends at the first clean sleep where it is on, its budget checkup (lifeBudget(meta).budgetCU) is done and no checkup is
    * still due. So a life already past its budget ends at the next clean sleep once it is switched on; switching it off
    * never ends a life. Like the inbox, it outlives a run.
    */
@@ -342,10 +347,10 @@ export function curvePoint(
  * - The meta block (Plan 05a): the checkpoint's if it has one; else, with `cfg.meta`, a resumed life's legacy block
  *   (cfg.meta.legacy of its flat settings, saved in a checkpoint at once; a failing or bad one is warned about and the
  *   life runs on without a block) or a newborn's `cfg.meta.birth` (checked: BadMetaBlockError); else none.
- *   It goes into every checkpoint and log file, and nothing of it reaches the learner. A crossing file at a FILTER_LEVELS level
+ *   It goes into every checkpoint and log file, and nothing of it reaches the learner. A crossing file at one of the life's budget levels
  *   carries `filters` (the first layer, through learner.readParams). With a meta block evalPanel, checkups meet
  *   panelSeed variants. A failed life's final file has `end: "failed"`. With the inbox's short-lives switch on, at a
- *   clean sleep with the BUDGET_CU checkup done, no checkup due and no halt waiting, the life ends: its final file has
+ *   clean sleep with its budget checkup (lifeBudget) done, no checkup due and no halt waiting, the life ends: its final file has
  *   `end: "budget"` and the result says `ended: "budget"`.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
@@ -449,6 +454,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const bad = parseMeta(b, { cu: 0, stepsTotal: 0, final: false })
     if (typeof bad === "string") throw new BadMetaBlockError(id, bad)
     if (b.role === "legacy") throw new BadMetaBlockError(id, "a newborn's block cannot be role legacy")
+    const now = m.budget ?? CONFIG_BUDGET
+    if (!b.budget || !sameBudget(b.budget, now)) {
+      throw new BadMetaBlockError(id, `a newborn's block must carry the config's budget (${now.budgetCU} CU at ${now.levels.join(", ")})`)
+    }
     if (b.genomeSchema !== m.space.schemaVersion) throw new BadMetaBlockError(id, `genomeSchema ${b.genomeSchema} is not the space's ${m.space.schemaVersion}`)
     const outside = checkGenome(m.space, b.genome)
     if (outside !== null) throw new BadMetaBlockError(id, `genome outside the space: ${outside}`)
@@ -559,11 +568,12 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       const checkupsOn = () => deps.checkups !== undefined && typeof learner.frozenRun === "function"
       /**
        * meta.filters for a file at `cu` (spec §5.1): the first layer's filters (FIRST_LAYER_PARAMS) when levelAtOrBelow(cu)
-       * is a FILTER_LEVELS level, the life has a meta block and the learner can read its params; else undefined.
+       * is one of the life's own budget levels (lifeBudget(meta)), the life has a meta block and the learner can read its
+       * params; else undefined.
        */
       const filtersAt = async (cu: number): Promise<string | undefined> => {
         const level = levelAtOrBelow(cu)
-        if (!meta || !learner.readParams || level === null || !FILTER_LEVELS.includes(level)) return undefined
+        if (!meta || !learner.readParams || level === null || !lifeBudget(meta).levels.includes(level)) return undefined
         const params = await learner.readParams()
         const parts = FIRST_LAYER_PARAMS.map(i => params[i])
         const n = parts.reduce((a, p) => a + (p?.length ?? 0), 0)
@@ -732,7 +742,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         }
         // Short lives (decisions 0019, 0022): the switch is read at clean sleeps only. A life with a meta block ends once
         // its budget checkup is done and no checkup is still due; a halt waiting goes first (the resumed run ends).
-        if (slept && meta && inbox?.shortLives && !inbox.haltWaiting && lastLevel >= BUDGET_CU && !checkupDue(st.cu)) {
+        // The budget is the life's own (born with it), never the current config's.
+        if (slept && meta && inbox?.shortLives && !inbox.haltWaiting && lastLevel >= lifeBudget(meta).budgetCU && !checkupDue(st.cu)) {
           ended = "budget"
           break
         }

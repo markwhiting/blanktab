@@ -1,5 +1,5 @@
 // Gate validator for session PRs. Runs in Node (GitHub Action) on PR files treated purely as data.
-import { EVAL_CU_TOLERANCE, FILTER_LEVELS, levelAtOrBelow, parseLogFile, type LogFile, type MetaBlock } from "@blanktab/harness/log"
+import { CONFIG_BUDGET, EVAL_CU_TOLERANCE, levelAtOrBelow, lifeBudget, parseLogFile, sameBudget, type EvalBudget, type LogFile, type MetaBlock } from "@blanktab/harness/log"
 import { checkGenome, genomeSha, settingsMismatch, type GenomeSpace } from "@blanktab/meta"
 
 export interface PrFile { path: string; content: string }
@@ -10,6 +10,12 @@ const PATH_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\/(\d+\.json)$/
 export interface ValidateOptions {
   /** Main's knowledge/genome-space.json: the bounds a non-legacy meta.genome must lie in. Without it such a file is rejected. */
   space?: GenomeSpace
+  /**
+   * The current config's evaluation budget (default CONFIG_BUDGET, config/evaluation.json): a new life's (seq 0) block
+   * must be born under it. Every other check reads the file's own budget (lifeBudget), so a config change never
+   * invalidates a life already running (decision 0020).
+   */
+  budget?: EvalBudget
 }
 
 /**
@@ -126,7 +132,7 @@ export async function validateSessionPr(files: PrFile[], previous: LogFile[], op
   if (finals.length > 1) errors.push(`at most one final file allowed (found ${finals.length})`)
   else if (finals.length === 1 && finals[0] !== sorted[sorted.length - 1]) errors.push(`${finals[0]!.path}: final file must have the highest seq`)
 
-  errors.push(...await metaErrors(sorted, prevSorted, opts.space))
+  errors.push(...await metaErrors(sorted, prevSorted, opts.space, opts.budget ?? CONFIG_BUDGET))
   return { ok: errors.length === 0, errors, kind }
 }
 
@@ -146,9 +152,11 @@ const canonical = (v: unknown): string => JSON.stringify(v, (_k, x: unknown) =>
  * - what ran: such a genome decodes (settingsMismatch) to the file's logged settings;
  * - integrity: genomeSha recomputes, for every role;
  * - constancy: every field but filters, heldOut and end equals the learner's first file with meta (absence allowed);
- * - filters: at most one file per FILTER_LEVELS level carries them.
+ * - budget: a new life's (seq 0) block is born under `budget`, the current config's (absent reads as V1_BUDGET);
+ *   constancy keeps it for the rest of the life;
+ * - filters: at most one file per level of the life's own budget carries them.
  */
-async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFile[], space: GenomeSpace | undefined): Promise<string[]> {
+async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFile[], space: GenomeSpace | undefined, budget: EvalBudget): Promise<string[]> {
   const errors: string[] = []
   const metaOf = (l: LogFile): MetaBlock | undefined => (l.schemaVersion === 2 ? l.meta : undefined)
   for (const { path, log } of pr) {
@@ -170,6 +178,10 @@ async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFil
       }
     }
     if (await genomeSha(m.genomeSchema, m.genome) !== m.genomeSha) errors.push(`${path}: meta.genomeSha does not match its genome`)
+    if (log.seq === 0 && m.role !== "legacy" && !sameBudget(lifeBudget(m), budget)) {
+      const b = lifeBudget(m)
+      errors.push(`${path}: a new life's meta.budget (${b.budgetCU} CU at ${b.levels.join(", ")}) is not the config's (${budget.budgetCU} CU at ${budget.levels.join(", ")})`)
+    }
   }
   const all = [...previous.map(log => ({ path: null as string | null, log })), ...pr]
   let first: MetaBlock | undefined
@@ -187,7 +199,7 @@ async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFil
     }
     if (m.filters !== undefined && log.schemaVersion === 2) {
       const level = levelAtOrBelow(log.cu)
-      if (level !== null && FILTER_LEVELS.includes(level)) {
+      if (level !== null && lifeBudget(m).levels.includes(level)) {
         if (filterLevels.has(level) && path !== null) errors.push(`${path}: a second file carries meta.filters for level ${level}`)
         filterLevels.add(level)
       }

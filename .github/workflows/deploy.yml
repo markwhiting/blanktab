@@ -30,7 +30,7 @@ jobs:
           cache: npm
       - run: npm ci
       # The code, not the commit: the last commit that changed a build input (app, packages, the root package files,
-      # tsconfig.base.json: tools/gate/manifest.ts BUILD_INPUTS). The page bakes it in, the manifest carries it, every log records it.
+      # tsconfig.base.json, config/evaluation.json: tools/gate/manifest.ts BUILD_INPUTS). The page bakes it in, the manifest carries it, every log records it.
       - id: sha
         run: |
           sha=$(npx tsx tools/gate/manifest.ts --code-sha)

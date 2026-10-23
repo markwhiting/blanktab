@@ -71,15 +71,16 @@ describe("codeShaOf: the last commit that changed a build input (BUILD_INPUTS)",
   }
   beforeEach(() => { git("init", "-q") })
 
-  it("the build inputs: the app, the packages, the root package files and the shared compiler settings", () => {
-    expect([...BUILD_INPUTS]).toEqual(["app", "packages", "package.json", "package-lock.json", "tsconfig.base.json"])
+  it("the build inputs: the app, the packages, the root package files, the shared compiler settings and the evaluation config", () => {
+    expect([...BUILD_INPUTS]).toEqual(["app", "packages", "package.json", "package-lock.json", "tsconfig.base.json", "config/evaluation.json"])
   })
-  it("a commit touching only data/runs, docs, knowledge, README, AGENTS, tests, tools or workflows leaves it unchanged; one touching app/ changes it", () => {
+  it("a commit touching only data/runs, docs, knowledge, README, AGENTS, tests, tools, workflows or config/ besides evaluation.json leaves it unchanged; one touching app/ changes it", () => {
     const code = commit("app/src/main.ts", "1")
     expect(codeShaOf(dir)).toBe(code)
     for (const path of [
       "data/runs/lrn_0123456789abcdef/0.json", "docs/decisions/0099-x.md", "knowledge/settings-space.json", "README.md", "AGENTS.md",
       "tests/e2e/x.spec.ts", "tools/gate/gate.ts", ".github/workflows/gate.yml", "tsconfig.json", "eslint.config.js", "playwright.config.ts",
+      "config/references/newborn-baseline@1-gpu-suite1-genome1.json", "config/other.json",
     ]) {
       commit(path, `x ${path}`)
       expect(codeShaOf(dir), path).toBe(code)
@@ -91,7 +92,7 @@ describe("codeShaOf: the last commit that changed a build input (BUILD_INPUTS)",
   })
   it("a commit to any other build input changes it", () => {
     commit("app/a.ts", "1")
-    for (const path of ["packages/learner/src/version.ts", "package.json", "package-lock.json", "tsconfig.base.json"]) {
+    for (const path of ["packages/learner/src/version.ts", "package.json", "package-lock.json", "tsconfig.base.json", "config/evaluation.json"]) {
       const c = commit(path, `x ${path}`)
       expect(codeShaOf(dir), path).toBe(c)
     }

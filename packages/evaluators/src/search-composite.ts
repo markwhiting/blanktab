@@ -1,13 +1,14 @@
 // search-composite@1 (spec §2.4): a search life's score, behaviour C (checkup measures against newborns) plus prediction
 // H (the held-out ratio), from its first 2,048 CU only. Changing anything here means a new version (decision 0020).
 import { dlog, normInv } from "@blanktab/detmath"
-import type { LogFileV2 } from "@blanktab/harness/log"
+import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
 import { budgetWindow, clip, isGpuWidths, isV2, median } from "./life"
 import type { EvalOutput, Evaluator, LifeInput, MilestoneKey, References } from "./types"
 
 /** This version's own budget and levels, published as `searchComposite.budget` (config/evaluation.json must agree). */
 const SEARCH_BUDGET_CU = 2048
 const SEARCH_LEVELS: readonly number[] = Object.freeze([512, 1024, 2048])
+const BUDGET = Object.freeze({ budgetCU: SEARCH_BUDGET_CU, levels: SEARCH_LEVELS })
 /** The milestone suite this version reads (the newborn reference's suite). */
 const SUITE = 1
 /** C's milestones and κ_m = 0.1 × each pass threshold (decision 0016). M1 is left out of C (H covers prediction). */
@@ -49,6 +50,8 @@ function evaluateLife(life: LifeInput, refs: References): EvalOutput {
   if (metas.length !== window.length) return ineligible("no meta block before the checkup")
   const files = window as LogFileV2[] // every file has a meta block, so every file is v2
   if (!files.every(f => isGpuWidths(f.widths))) return ineligible("not gpu widths")
+  // A life is scored under the protocol it was born with: one of another budget needs an evaluator of that budget.
+  if (!metas.every(m => sameBudget(lifeBudget(m), BUDGET))) return ineligible("different evaluation budget", { budget: lifeBudget(metas[0]) })
   const ref = refs.newborn
   if (!ref) return ineligible("no newborn reference")
   const suites = files.filter(f => (f.checkups ?? []).length > 0).map(f => f.milestoneSuiteVersion)
@@ -160,5 +163,5 @@ function targets(outs: EvalOutput[]): number[] {
 
 export const searchComposite: Evaluator = Object.freeze({
   id: ID, version: VERSION, kind: "life" as const, needs: Object.freeze(["newborn"]) as string[],
-  budget: Object.freeze({ budgetCU: SEARCH_BUDGET_CU, levels: SEARCH_LEVELS }), evaluateLife, targets,
+  budget: BUDGET, evaluateLife, targets,
 })
