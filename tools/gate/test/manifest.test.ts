@@ -45,6 +45,18 @@ describe("the committed knowledge directory", () => {
     rmSync(join(dir, "caregiver-prior.json"))
     expect(computeKnowledgeSha(dir)).not.toBe(withIt)
   })
+  it("knowledgeSha changes when genome-space.json or genome.json changes", () => {
+    const committed = fileURLToPath(new URL("../../../knowledge", import.meta.url))
+    cpSync(committed, dir, { recursive: true })
+    const seen = new Set([computeKnowledgeSha(dir)])
+    for (const name of ["genome-space.json", "genome.json"]) {
+      writeFileSync(join(dir, name), "{}\n")
+      seen.add(computeKnowledgeSha(dir))
+      rmSync(join(dir, name))
+      seen.add(computeKnowledgeSha(dir))
+    }
+    expect(seen.size).toBe(5)
+  })
 })
 
 // Each case runs git several times in a temporary repository: slow on a busy machine, so a generous timeout.

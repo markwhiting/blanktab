@@ -9,7 +9,7 @@ import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 
-const PRIOR_FILES = ["caregiver-prior.json", "consolidation-prior.json", "settings-space.json"] // sorted
+const PRIOR_FILES = ["caregiver-prior.json", "consolidation-prior.json", "genome-space.json", "genome.json", "settings-space.json"] // sorted
 
 export function computeKnowledgeSha(dir: string): string {
   const h = createHash("sha256")
