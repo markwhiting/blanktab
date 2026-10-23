@@ -60,3 +60,40 @@ describe("world determinism and text walls (packages/world/src)", () => {
     expect(await errors(`import "@blanktab/tensor"`, SRC)).toHaveLength(1)
   })
 })
+
+describe("walls for detmath, meta and evaluators", () => {
+  it("detmath imports nothing; meta only detmath; evaluators only detmath and @blanktab/harness/log", async () => {
+    for (const p of ["interface", "tensor", "learner", "world", "harness", "meta", "evaluators"])
+      expect(await errors(`import "@blanktab/${p}"`, "packages/detmath/src/x.ts"), p).toHaveLength(1)
+    for (const p of ["interface", "tensor", "learner", "world", "harness", "evaluators"])
+      expect(await errors(`import "@blanktab/${p}"`, "packages/meta/src/x.ts"), p).toHaveLength(1)
+    for (const p of ["interface", "tensor", "learner", "world", "harness", "meta"])
+      expect(await errors(`import "@blanktab/${p}"`, "packages/evaluators/src/x.ts"), p).toHaveLength(1)
+    expect(await errors(`import "@blanktab/harness/session"`, "packages/evaluators/src/x.ts")).toHaveLength(1)
+    expect(await errors(`await import("@blanktab/harness/session")`, "packages/evaluators/src/x.ts")).toHaveLength(1)
+    expect(await errors(`import "../../harness/src/session"`, "packages/evaluators/src/x.ts")).toHaveLength(1)
+    expect(await errors(`await import("@blanktab/world")`, "packages/meta/src/x.ts")).toHaveLength(1)
+    expect(await errors(`require("@blanktab/meta")`, "packages/detmath/test/x.ts")).toHaveLength(1)
+    expect(await errors(`import "@blanktab/detmath"`, "packages/meta/src/x.ts")).toHaveLength(0)
+    expect(await errors(`import "@blanktab/detmath"; import "@blanktab/harness/log"`, "packages/evaluators/src/x.ts")).toHaveLength(0)
+    expect(await errors(`await import("@blanktab/harness/log")`, "packages/evaluators/src/x.ts")).toHaveLength(0)
+    expect(await errors(`import "@blanktab/evaluators"; import "@blanktab/meta"`, "packages/harness/src/x.ts")).toHaveLength(0)
+  })
+  it("learner and world cannot import meta, evaluators or detmath", async () => {
+    for (const pkg of ["learner", "world"])
+      for (const p of ["meta", "evaluators", "detmath"])
+        expect(await errors(`import "@blanktab/${p}"`, `packages/${pkg}/src/x.ts`), `${pkg} -> ${p}`).toHaveLength(1)
+  })
+  it("Math.random, Date, performance and node:fs are errors in packages/{detmath,meta,evaluators}/src", async () => {
+    for (const pkg of ["detmath", "meta", "evaluators"]) {
+      const src = `packages/${pkg}/src/x.ts`
+      for (const code of ["Math.random()", "Date.now()", "new Date()", "performance.now()", "globalThis.Date.now()", "process.env.X"])
+        expect(await determinismErrors(code, src), `${pkg}: ${code}`).toHaveLength(1)
+      for (const code of [`import "node:fs"`, `import "node:path"`, `import "fs"`, `import "path"`, `import "fs/promises"`, `await import("node:fs")`])
+        expect(await errors(code, src), `${pkg}: ${code}`).toHaveLength(1)
+      // Tests may use Node and the clock.
+      expect(await errors(`import "node:fs"`, `packages/${pkg}/test/x.test.ts`)).toHaveLength(0)
+      expect(await determinismErrors("Date.now()", `packages/${pkg}/test/x.test.ts`)).toHaveLength(0)
+    }
+  })
+})
