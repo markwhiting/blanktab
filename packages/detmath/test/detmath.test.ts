@@ -66,6 +66,13 @@ describe("normal distribution", () => {
       expect(Math.abs(normInv(p) - x), `x=${x}`).toBeLessThanOrEqual(1e-12 + floor)
     }
   })
+  it("the upper tail agrees: 1 − normCdf(x) = normCdf(−x) to one rounding on [0, 8]", () => {
+    // normCdf(x) for x > 0 is 1 − tail, rounded once; 1 − that is exact (Sterbenz), so it is within ½ ulp of 1.
+    for (let i = 0; i <= 800; i++) {
+      const x = i / 100
+      expect(Math.abs((1 - normCdf(x)) - normCdf(-x)), `x=${x}`).toBeLessThanOrEqual(2 ** -54)
+    }
+  })
   it("normInv(0.975) = 1.959963984540054", () => {
     // 1.959963984540054 is the textbook value to 16 digits, not a double result: Φ⁻¹ of the double 0.975 is
     // 1.95996398454005386 (mpmath), whose nearest double is 1.9599639845400538. AS241 returns
@@ -101,6 +108,9 @@ describe("sobolPoints", () => {
     expect(new Set(pts.map(p => p.join(","))).size).toBe(9)
     const golden = JSON.parse(readFileSync(GOLDEN, "utf8")) as Golden
     expect(pts.map(p => p.map(bits))).toEqual(golden.sobol["calib/1"])
+  })
+  it("n = 0 gives no points", () => {
+    expect(sobolPoints(3, 0, "s")).toEqual([])
   })
   it("rejects dims outside 1..16 and non-integer n", () => {
     expect(() => sobolPoints(17, 1, "s")).toThrow(RangeError)

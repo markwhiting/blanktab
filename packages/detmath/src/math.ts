@@ -3,7 +3,8 @@
 // Node and in every browser. Math.exp, Math.log and Math.pow are not used: engines may implement them differently.
 // Loops run in a fixed order with fixed iteration caps.
 
-// ln 2 split so that k·LN2_HI is exact for |k| < 2^20 (LN2_HI has its low 32 bits zero); fdlibm's constants.
+// ln 2 split so that k·LN2_HI is exact for |k| < 2^21 (LN2_HI, 0x3fe62e42fee00000, has 21 trailing zero bits);
+// fdlibm's constants.
 const LN2_HI = 0.6931471803691238
 const LN2_LO = 1.9082149292705877e-10
 const INV_LN2 = 1.4426950408889634
@@ -160,7 +161,9 @@ export function normCdf(x: number): number {
   return x < 0 ? tail : 1 - tail
 }
 
-// Wichura (1988), Algorithm AS 241, PPND16: Φ⁻¹ to about 1e-16 relative.
+// Wichura, M. J. (1988), "Algorithm AS 241: The percentage points of the normal distribution", Applied
+// Statistics 37(3), 477–484, PPND16: Φ⁻¹ to about 1e-16 relative. Coefficients A–F are the paper's, shortened to
+// their shortest round-trip doubles (same values).
 const A = [
   3.3871328727963665, 133.14166789178438, 1971.5909503065513, 13731.69376550946,
   45921.95393154987, 67265.7709270087, 33430.57558358813, 2509.0809287301227,

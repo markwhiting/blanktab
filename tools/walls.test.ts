@@ -91,9 +91,33 @@ describe("walls for detmath, meta and evaluators", () => {
         expect(await determinismErrors(code, src), `${pkg}: ${code}`).toHaveLength(1)
       for (const code of [`import "node:fs"`, `import "node:path"`, `import "fs"`, `import "path"`, `import "fs/promises"`, `await import("node:fs")`])
         expect(await errors(code, src), `${pkg}: ${code}`).toHaveLength(1)
+      for (const g of ["crypto.getRandomValues(new Uint8Array(1))", "fetch('x')", "indexedDB.open('x')", "localStorage.x",
+        "sessionStorage.x", "setTimeout(() => 0)", "setInterval(() => 0)", "navigator.userAgent", "globalThis.process.env"])
+        expect(await determinismErrors(g, src), `${pkg}: ${g}`).toHaveLength(1)
+      for (const b of ["os", "child_process", "crypto", "http", "https", "net", "worker_threads", "node:os"])
+        expect(await errors(`import "${b}"`, src), `${pkg}: import ${b}`).toHaveLength(1)
+      expect(await errors(`require("child_process")`, src)).toHaveLength(1)
       // Tests may use Node and the clock.
       expect(await errors(`import "node:fs"`, `packages/${pkg}/test/x.test.ts`)).toHaveLength(0)
       expect(await determinismErrors("Date.now()", `packages/${pkg}/test/x.test.ts`)).toHaveLength(0)
     }
+  })
+  it("all maths goes through detmath: Math transcendentals and ** are errors in packages/{detmath,meta,evaluators}/src", async () => {
+    const MATH = ["exp", "expm1", "log", "log1p", "log2", "log10", "pow", "sin", "cos", "tan", "asin", "acos", "atan",
+      "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "cbrt", "hypot"]
+    for (const pkg of ["detmath", "meta", "evaluators"]) {
+      const src = `packages/${pkg}/src/x.ts`
+      for (const f of MATH) expect(await determinismErrors(`Math.${f}(1, 2)`, src), `${pkg}: Math.${f}`).toHaveLength(1)
+      expect(await errors("const y = 2 ** 3", src), `${pkg}: **`).toHaveLength(1)
+      expect(await errors("let y = 2; y **= 3", src), `${pkg}: **=`).toHaveLength(1)
+      // The exactly rounded and integer operations stay allowed.
+      expect(await determinismErrors("Math.sqrt(2); Math.abs(-1); Math.floor(1.5); Math.imul(3, 5)", src)).toHaveLength(0)
+      // Tests use Math.exp and friends as oracles.
+      const test = `packages/${pkg}/test/x.test.ts`
+      expect(await determinismErrors("Math.exp(1); Math.log(2)", test)).toHaveLength(0)
+      expect(await errors("const y = 2 ** 3", test)).toHaveLength(0)
+    }
+    // The world and learner are not under this rule.
+    expect(await errors("const y = 2 ** 3", "packages/learner/src/x.ts")).toHaveLength(0)
   })
 })

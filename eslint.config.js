@@ -63,33 +63,38 @@ const worldPurity = {
   },
 }
 
-// Purity for detmath, meta and evaluators (plan 05a): pure and deterministic, so no clock, no Math.random and
-// no IO. The same globals and properties as the world's ban, plus Node built-ins and bare fs/path. A later
-// config's rule replaces an earlier one's options, so these blocks restate the package wall alongside the new bans.
+// Purity for detmath, meta and evaluators (plan 05a): pure and deterministic, so no clock, no randomness, no IO,
+// no timers and no host state. All their maths goes through @blanktab/detmath: Math's transcendental functions and
+// the ** operator are banned because engines may round them differently (detmath uses only + − × ÷ and
+// Math.sqrt, which IEEE-754 rounds exactly). A later config's rule replaces an earlier one's options, so these
+// blocks restate the package wall alongside the new bans.
 const PURE = ["detmath", "meta", "evaluators"]
 const IMPURE = "is not allowed in packages/{detmath,meta,evaluators}/src: they must be pure and deterministic."
-const NODE_MODULES = ["fs", "fs/*", "path", "path/*"]
-const impureSpecifier = "/^(node:.*|fs|fs\\/.*|path|path\\/.*)$/"
+const IMPURE_GLOBALS = ["Date", "performance", "process", "crypto", "fetch", "indexedDB", "localStorage", "sessionStorage",
+  "setTimeout", "setInterval", "navigator"]
+const ENGINE_MATH = ["exp", "expm1", "log", "log1p", "log2", "log10", "pow", "sin", "cos", "tan", "asin", "acos", "atan",
+  "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "cbrt", "hypot"]
+const BUILTINS = ["fs", "path", "os", "child_process", "crypto", "http", "https", "net", "worker_threads"]
+const impureSpecifier = `/^(node:.*|(${BUILTINS.join("|")})(\\/.*)?)$/`
 const purity = pkg => ({
   files: [`packages/${pkg}/src/**/*.{ts,tsx,js}`],
   rules: {
-    "no-restricted-globals": ["error",
-      { name: "Date", message: `Date ${IMPURE}` },
-      { name: "performance", message: `performance ${IMPURE}` },
-      { name: "process", message: `process ${IMPURE}` }, // detmath's tests have Node types; its src must not use them
-    ],
+    "no-restricted-globals": ["error", ...IMPURE_GLOBALS.map(name => ({ name, message: `${name} ${IMPURE}` }))],
     "no-restricted-properties": ["error",
       { object: "Math", property: "random", message: `Math.random ${IMPURE} Use createRng from @blanktab/detmath.` },
-      ...GLOBAL_HOSTS.flatMap(object => ["Date", "performance"].map(property => ({ object, property, message: `${object}.${property} ${IMPURE}` }))),
+      ...ENGINE_MATH.map(property => ({ object: "Math", property, message: `Math.${property} ${IMPURE} Use @blanktab/detmath.` })),
+      ...GLOBAL_HOSTS.flatMap(object => IMPURE_GLOBALS.map(property => ({ object, property, message: `${object}.${property} ${IMPURE}` }))),
     ],
     "no-restricted-imports": ["error", { patterns: [
       ...wallPatterns(pkg),
-      { group: ["node:*", ...NODE_MODULES], message: `Node built-ins (IO) ${IMPURE}` },
+      { group: ["node:*", ...BUILTINS.flatMap(b => [b, `${b}/*`])], message: `Node built-ins (IO) ${IMPURE}` },
     ] }],
     "no-restricted-syntax": ["error",
       ...dynamicSelectors(pkg),
       { selector: `ImportExpression > Literal.source[value=${impureSpecifier}]`, message: `Node built-ins (IO) ${IMPURE}` },
       { selector: `CallExpression[callee.name='require'] > Literal.arguments:first-child[value=${impureSpecifier}]`, message: `Node built-ins (IO) ${IMPURE}` },
+      { selector: "BinaryExpression[operator='**']", message: `The ** operator ${IMPURE} Use literal constants, shifts or @blanktab/detmath.` },
+      { selector: "AssignmentExpression[operator='**=']", message: `The **= operator ${IMPURE} Use literal constants, shifts or @blanktab/detmath.` },
     ],
   },
 })
