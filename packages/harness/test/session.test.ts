@@ -1195,12 +1195,12 @@ describe("session v2", { timeout: 60_000 }, () => {
     const results = (logs: LogFileV2[]) => logs.flatMap(f => f.checkups ?? [])
     const levelsOf = (logs: LogFileV2[]) => results(logs).map(c => c.level)
     /** Writer/validator agreement: the files as written parse, and the gate accepts them as one PR. */
-    const gateAccepts = (logs: LogFileV2[]) => {
+    const gateAccepts = async (logs: LogFileV2[]) => {
       for (const f of logs) {
         const p = parseLogFile(JSON.parse(JSON.stringify(f)))
         expect(p.ok, p.ok ? "" : p.error).toBe(true)
       }
-      const v = validateSessionPr(logs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [])
+      const v = await validateSessionPr(logs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [])
       expect(v.errors).toEqual([])
       expect(v.ok).toBe(true)
     }
@@ -1229,7 +1229,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         for (const f of logs) expect(f.milestoneSuiteVersion).toBe(MILESTONE_SUITE_VERSION)
         expect(MILESTONE_SUITE_VERSION).toBe(1)
         for (const c of results(logs)) expect(c.passed.every(id => typeof id === "string") && Object.keys(c.measures).length === 6).toBe(true)
-        gateAccepts(logs)
+        await gateAccepts(logs)
       }
     })
 
@@ -1301,7 +1301,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       // Carries only on the period (50 steps), not at the sleeps in between (decision 0016).
       for (const e of carried) expect(e.steps % 50).toBe(0)
       for (const f of logs) expect(f.settings).toMatchObject(clampCaregiverSettings(CARE))
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("the caregiver observes a loss only when the previous frame was seen in the same room: not the first transition after a carry, nor a run's first", async () => {
@@ -1340,7 +1340,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(levelsOf(logs)).toEqual([16])
       expect(logs.at(-1)!.caregiver).toBeDefined()
       expect(logs.at(-1)!.settings).toMatchObject(clampCaregiverSettings(CARE))
-      gateAccepts(logs)
+      await gateAccepts(logs)
       // A corrupt checkpoint after the 32 CU file: the final file repeats that file's counters, not its checkups.
       const idb2 = new IDBFactory()
       await expect(grow(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: { onTick: ({ steps }) => { if (steps === 33) throw new Error("reload") } } })).rejects.toThrow("reload")
@@ -1352,7 +1352,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(after.at(-1)!.final).toBe(true)
       expect(after.at(-1)!.checkups).toBeUndefined()
       expect(levelsOf(after)).toEqual([16, 32])
-      gateAccepts(after)
+      await gateAccepts(after)
     })
 
     it("a finished checkup is checkpointed at once, inside the throttle window (a reload never checks its level again)", async () => {
@@ -1384,7 +1384,7 @@ describe("session v2", { timeout: 60_000 }, () => {
           const logs = await logsOf(idb)
           expect(levelsOf(logs), JSON.stringify(c)).toEqual([16, 32])
           expect(logs.map(strip), JSON.stringify(c)).toEqual(wholeLogs.map(strip))
-          gateAccepts(logs)
+          await gateAccepts(logs)
         }
       })
     })
@@ -1414,7 +1414,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(checkupEvents(again)).toEqual([["start", 16], ["done", 16, 15], ["start", 32], ["done", 32, 20]])
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a restore after 20 skips rolls back lastLevel, tail and caregiver to the checkpoint's, with no duplicate level in the logs", async () => {
@@ -1436,7 +1436,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
       expect(logs.at(-1)).toMatchObject({ final: true, restores: 1 })
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     /** Every carry the caregiver made (the carried events) is on the record once: in a file's carries or its lostCarries. */
@@ -1469,7 +1469,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(logs.reduce((a, f) => a + (f.caregiver!.lostCarries ?? 0), 0)).toBe(lost)
       expect(logs.filter(f => f.caregiver!.lostCarries !== undefined)).toHaveLength(1)
       expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a reload right after a restore keeps lostCarries", async () => {
@@ -1485,7 +1485,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       const logs = await logsOf(idb)
       expect(logs.reduce((a, f) => a + (f.caregiver!.lostCarries ?? 0), 0)).toBe(lost)
       expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a failed life's final file carries the lost carries", async () => {
@@ -1502,7 +1502,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       const logs = await logsOf(idb)
       expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 128, caregiver: { carries: 0, lostCarries: lost } })
       expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     describe("a save or log write that fails after the caregiver's summary was taken (fix round 1)", () => {
@@ -1524,7 +1524,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         const logs = await logsOf(idb)
         expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 128, caregiver: { lostCarries: lost } })
         expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
-        gateAccepts(logs)
+        await gateAccepts(logs)
       })
       it("queue.put of the final log throws: the failed life's final file holds the carries since the checkpoint as lost carries", async () => {
         const idb = new IDBFactory()
@@ -1549,7 +1549,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         const logs = await logsOf(idb)
         expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 256, caregiver: { carries: 0, lostCarries: lost } })
         expect(carriesOnRecord(logs)).toBe(events.filter(e => e.type === "carried").length)
-        gateAccepts(logs)
+        await gateAccepts(logs)
       })
       it("a learner too broken to report its stats: the carries since the checkpoint are still lost carries", async () => {
         const idb = new IDBFactory()
@@ -1599,7 +1599,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       for (const c of saved as { checkups?: { tail: unknown[] } }[]) expect(c.checkups!.tail).toEqual([]) // none with a tail was stored
       const logs = await logsOf(idb)
       expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 4 })
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a failed life's final log that cannot be written is reported on console.error, not silently dropped", async () => {
@@ -1644,7 +1644,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(order).toEqual(["logged 27", "checkup 2048", "logged 31", "logged 32"])
       const logs = await logsOf(idb)
       expect(logs.map(f => (f.checkups ?? []).map(x => x.level)).filter(l => l.length > 0)).toEqual([levels, [2048]])
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("after a checkup event, a checkpoint holding its level is saved before the next learner step", async () => {
@@ -1688,7 +1688,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(checkupEvents(events).filter(e => e[1] === 8)).toEqual([["start", 8], ["done", 8, 5], ["start", 8], ["done", 8, 5]])
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a checkup whose milestone throws: the life goes on, the result has error true, the next log is written", async () => {
@@ -1703,7 +1703,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         expect(c.passed).not.toContain("M2")
       }
       expect(logs.at(-1)!.final).toBe(true)
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("a recoverable error inside a checkup propagates (resume from checkpoint) and the level reruns once", async () => {
@@ -1724,7 +1724,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
       expect(results(logs).some(c => c.error)).toBe(false) // it was not recorded as a milestone error
-      gateAccepts(logs)
+      await gateAccepts(logs)
     })
 
     it("every checkpoint a 04c life writes (caregiver, world, checkups, tails empty and not) loads on pre-04c code (decision 0017, rollback)", async () => {
@@ -1760,7 +1760,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(levelAtOrBelow(30)).toBe(16)
       expect(checkupEvents(events)).toEqual([["start", 16], ["done", 16, 15], ["start", 32], ["done", 32, 20]])
       expect(cgSpy.inits).toEqual([{ settings: clampCaregiverSettings(CARE), seed: hashSeed(7, "caregiver") }])
-      gateAccepts(await logsOf(idb))
+      await gateAccepts(await logsOf(idb))
     })
 
     /** A learner factory that records every call made to the learner it makes (its frozen runs' too) and every init. */
@@ -1925,7 +1925,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         // The learner was handed nothing but what it always is.
         expect(inits.some(i => "state" in i)).toBe(true)
         expectWall(calls, inits)
-        gateAccepts(logs)
+        await gateAccepts(logs)
       })
 
       it("a checkpoint without world (pre-04c) resumes where the world starts", async () => {
@@ -1940,7 +1940,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         await grow(idb, { checkups: false, cfg: LIFE, deps: { world: second.w } })
         expect(second.rooms[0]).toBe("crib")
         expect(second.trace.flat().filter(e => e.kind === "focus" && e.source === "harness")).toEqual([])
-        gateAccepts(await logsOf(idb))
+        await gateAccepts(await logsOf(idb))
       })
 
       it("a checkpoint's room this world does not have is skipped, not an error", async () => {
@@ -1990,7 +1990,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         // Not a carry: the files' carries and lostCarries are the carried events, once each.
         const logs = await logsOf(idb)
         expect(logs.reduce((a, f) => a + f.caregiver!.carries + (f.caregiver!.lostCarries ?? 0), 0)).toBe(events.filter(e => e.type === "carried").length)
-        gateAccepts(logs)
+        await gateAccepts(logs)
       })
     })
   })

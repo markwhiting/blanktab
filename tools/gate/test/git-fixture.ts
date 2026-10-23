@@ -1,13 +1,16 @@
 // A throwaway GitHub stand-in for gate tests: a bare "origin" served over file:// (with filters allowed), a "work"
 // clone that plays the gate's checkout of main, and an author clone that pushes main commits and refs/pull/N/head.
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { gitRunner, type Git } from "../github.ts"
 
 /** A file's content, or a symlink to a target, or a submodule (gitlink) at a commit. */
 export type Entry = string | Buffer | { symlink: string } | { submodule: string }
+
+/** The repo's knowledge/genome-space.json, which main carries in every fixture (the gate reads it from its checkout). */
+export const SPACE_JSON = readFileSync(join(__dirname, "../../../knowledge/genome-space.json"), "utf8")
 
 /** Isolates every git the fixture and the code under test run from the user's and the system's git config. */
 export const FIXTURE_ENV = {
@@ -52,7 +55,7 @@ export function makeFixture(): Fixture {
     run(src, "commit", "-q", "--allow-empty", "-m", "c")
     return run(src, "rev-parse", "HEAD")
   }
-  apply({ "README.md": "x\n" }, [])
+  apply({ "README.md": "x\n", "knowledge/genome-space.json": SPACE_JSON }, [])
   run(src, "push", "-q", "origin", "main")
   run(dir, "clone", "-q", `file://${bare}`, work)
   return {

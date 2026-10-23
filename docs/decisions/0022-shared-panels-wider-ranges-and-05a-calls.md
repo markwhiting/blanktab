@@ -7,7 +7,7 @@
 
 ## Context
 
-Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/2026-10-22-meta-learner-v1-design.md`). Several choices along the way belong to the user but were not asked. This file records each as an agent's call, so it can be confirmed or reversed. Later 05a tasks add their sections here; shared panels are added by Task 5.
+Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/2026-10-22-meta-learner-v1-design.md`). Several choices along the way belong to the user but were not asked. This file records each as an agent's call, so it can be confirmed or reversed. Later 05a tasks add their sections here.
 
 ## Decision
 
@@ -36,6 +36,22 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **Every range lies inside the learner's and caregiver's clamps.** `tools/genome-centre.test.ts` checks this, so a decoded genome runs as drawn.
 - **The ranges are guesses.** None has been tested at its ends. A range that is too wide costs search rows on bad learners. One that is too narrow hides the optimum. Changing a range is a new genome-space `schemaVersion` (0021).
 
+### Shared panels [agent; spec §4.1 step 4]
+
+- **What changes.** A life whose `meta.evalPanel` is set (every 05a search life and every newborn reference) meets checkup variants seeded `panelSeed(p, level, milestoneId) = hashSeed(0, "panel/p/level/milestoneId")`, with p = `evalPanel` (1–16). This amends 0016's per-learner variant seeds (`checkupSeed(learnerId, level, milestoneId)`), **for new lives only**.
+- **Existing lives keep theirs.** A life without `meta`, and a `legacy` life (born before 05a and resumed on 05a code), keeps `checkupSeed`, so its checkpoints and its record go on as they were.
+- **Why.** Lives on one panel meet the same variants, so two genomes on a panel are compared on the same worlds (blocking [OLS O20]). The newborn reference uses the same panels, so a life is measured against newborns that met its worlds.
+- **What does not change.** Thresholds, budgets and the suite (0016). The policy seed is still `hashSeed(variant seed, "policy")`.
+- **Cost if wrong.** Lives on one panel share their luck in the variants (16 panels spread it). A grinder could pick its panel by its learnerId (a known limit, spec §7.4).
+
+### The meta block's strict rules beyond the spec (Task 5) [agent]
+
+- **A role and its method agree.** `search` has `centre`, `calibrate`, `uniform` or `ts`; `confirm`, `newborn` and `legacy` have the method of their own name.
+- **`drawSeed` and `posteriorSha` are null together**, as `birthDraw` makes them.
+- **`meta.missing`** (role `legacy` only): legacyGenome's sorted list of genes the life's settings did not record. Their values in `genome` are placeholders, not claims (see "Settings an older life did not record" below). It is constant across the life's files.
+- **The gate never accepts a genome unchecked.** `validateSessionPr` rejects a non-legacy `meta` when it has no genome space; the gate and `validate-cli` read main's `knowledge/genome-space.json` and stop before deciding anything if it is missing or invalid.
+- **Cost if wrong.** A parser is easier to relax than to tighten: loosening a rule later accepts every file accepted now.
+
 ### A life already past budget when short lives are switched on (controller ruling A) [agent]
 
 - 0019 does not say what happens to a life already past 2,048 CU when the short-lives switch goes on.
@@ -56,4 +72,4 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 ## Consequences
 
 - Each range and call here can be reversed by a later decision. A range change is a new genome-space schema and a fresh fit.
-- Later 05a tasks append their calls here: shared panels (Task 5), the switch and orphan lines, and the result of the noise check.
+- Later 05a tasks append their calls here: the switch and orphan lines, and the result of the noise check.

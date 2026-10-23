@@ -1,12 +1,22 @@
 // Gate validator for session PRs. Runs in Node (GitHub Action) on PR files treated purely as data.
-import { EVAL_CU_TOLERANCE, parseLogFile, type LogFile } from "@blanktab/harness/log"
+import { EVAL_CU_TOLERANCE, FILTER_LEVELS, levelAtOrBelow, parseLogFile, type LogFile, type MetaBlock } from "@blanktab/harness/log"
+import { checkGenome, genomeSha, type GenomeSpace } from "@blanktab/meta"
 
 export interface PrFile { path: string; content: string }
 
 const MAX_BYTES = 1_048_576
 const PATH_RE = /^data\/runs\/(lrn_[0-9a-f]{16})\/(\d+\.json)$/
 
-export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: boolean; errors: string[]; kind: "log" | "needs-human" } {
+export interface ValidateOptions {
+  /** Main's knowledge/genome-space.json: the bounds a non-legacy meta.genome must lie in. Without it such a file is rejected. */
+  space?: GenomeSpace
+}
+
+/**
+ * Checks a session PR's files against the learner's files on main (`previous`). Async: meta.genomeSha is recomputed
+ * (sha256 through Web Crypto).
+ */
+export async function validateSessionPr(files: PrFile[], previous: LogFile[], opts: ValidateOptions = {}): Promise<{ ok: boolean; errors: string[]; kind: "log" | "needs-human" }> {
   const errors: string[] = []
   let kind: "log" | "needs-human" = "log"
   if (files.length === 0) return { ok: false, errors: ["PR contains no files"], kind }
@@ -116,5 +126,62 @@ export function validateSessionPr(files: PrFile[], previous: LogFile[]): { ok: b
   if (finals.length > 1) errors.push(`at most one final file allowed (found ${finals.length})`)
   else if (finals.length === 1 && finals[0] !== sorted[sorted.length - 1]) errors.push(`${finals[0]!.path}: final file must have the highest seq`)
 
+  errors.push(...await metaErrors(sorted, prevSorted, opts.space))
   return { ok: errors.length === 0, errors, kind }
+}
+
+/** The meta fields that may differ between a learner's files; every other field is constant (spec §7.3). */
+const META_VARIABLE = new Set<string>(["filters", "heldOut", "end"])
+
+/** JSON with object keys sorted, so equal values compare equal whatever their key order. */
+const canonical = (v: unknown): string => JSON.stringify(v, (_k, x: unknown) =>
+  x !== null && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x)
+
+/**
+ * The gate's meta checks (spec §7.3; plan 05a Task 5), over the PR's files (`pr`) after the learner's files on main
+ * (`previous`), both in seq order:
+ * - bounds: a non-legacy genome lies in `space` when it is of the space's schema (another schema: structure only);
+ *   legacy lives keep their pre-05a values (plan gap 4);
+ * - integrity: genomeSha recomputes, for every role;
+ * - constancy: every field but filters, heldOut and end equals the learner's first file with meta (absence allowed);
+ * - filters: at most one file per FILTER_LEVELS level carries them.
+ */
+async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFile[], space: GenomeSpace | undefined): Promise<string[]> {
+  const errors: string[] = []
+  const metaOf = (l: LogFile): MetaBlock | undefined => (l.schemaVersion === 2 ? l.meta : undefined)
+  for (const { path, log } of pr) {
+    const m = metaOf(log)
+    if (!m) continue
+    if (m.role !== "legacy") {
+      if (!space) errors.push(`${path}: no genome space to check meta.genome against`)
+      else if (m.genomeSchema === space.schemaVersion) {
+        const bad = checkGenome(space, m.genome)
+        if (bad !== null) errors.push(`${path}: meta.genome is outside the genome space: ${bad}`)
+      }
+    }
+    if (await genomeSha(m.genomeSchema, m.genome) !== m.genomeSha) errors.push(`${path}: meta.genomeSha does not match its genome`)
+  }
+  const all = [...previous.map(log => ({ path: null as string | null, log })), ...pr]
+  let first: MetaBlock | undefined
+  const filterLevels = new Set<number>()
+  for (const { path, log } of all) {
+    const m = metaOf(log)
+    if (!m) continue
+    if (!first) first = m
+    else if (path !== null) {
+      const keys = new Set([...Object.keys(first), ...Object.keys(m)].filter(k => !META_VARIABLE.has(k)))
+      for (const k of keys) {
+        const a = (first as unknown as Record<string, unknown>)[k], b = (m as unknown as Record<string, unknown>)[k]
+        if (canonical(a) !== canonical(b)) errors.push(`${path}: meta.${k} differs from the learner's earlier files`)
+      }
+    }
+    if (m.filters !== undefined && log.schemaVersion === 2) {
+      const level = levelAtOrBelow(log.cu)
+      if (level !== null && FILTER_LEVELS.includes(level)) {
+        if (filterLevels.has(level) && path !== null) errors.push(`${path}: a second file carries meta.filters for level ${level}`)
+        filterLevels.add(level)
+      }
+    }
+  }
+  return errors
 }

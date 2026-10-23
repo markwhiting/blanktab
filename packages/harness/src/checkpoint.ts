@@ -2,7 +2,7 @@
 import type { LearnerState } from "@blanktab/learner"
 import { CHECKPOINTS, CHECKPOINT_META, CHECKPOINT_STORES, OUTBOX, done, metaOf, openDb, result, type CheckpointMeta } from "./db"
 import { checkCaregiverState, type CaregiverState } from "./caregiver"
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_IDS, isLogLevel, parseCheckups, type CheckupResult, type CurvePoint } from "./log"
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, MILESTONE_IDS, isLogLevel, parseCheckups, parseMeta, type CheckupResult, type CurvePoint, type MetaBlock } from "./log"
 import { packLearnerState, unpackLearnerState } from "./pack"
 
 /**
@@ -52,6 +52,11 @@ export interface Checkpoint<S = LearnerState> {
    * restore. Absent in checkpoints written before it and in lives whose world has no state().
    */
   world?: { room: string }
+  /**
+   * The life's meta block (spec §7.3; Plan 05a), repeated into every log file it writes. Never holds `filters` (they go
+   * only into the file at their level) or `end` (final files only). Absent in checkpoints written before 05a.
+   */
+  meta?: MetaBlock
   learnerState: S
 }
 
@@ -90,6 +95,16 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
   if (r.world !== undefined) {
     const w = r.world
     if (!isRec(w) || !onlyKeys(w, ["room"]) || !(typeof w.room === "string" && WORLD_ROOM_RE.test(w.room))) fail("world must be { room } with room matching /^[a-z]{1,16}$/")
+  }
+  if (r.meta !== undefined) {
+    const m = r.meta
+    if (isRec(m) && "filters" in m) fail("meta.filters is never stored in a checkpoint")
+    if (isRec(m) && "end" in m) fail("meta.end is never stored in a checkpoint")
+    // Without filters, parseMeta reads no widths; the learner state's own are passed when it has them.
+    const ls = r.learnerState
+    const widths = isRec(ls) && isRec(ls.widths) ? (ls.widths as { conv1: number; conv2: number; enc: number; hidden: number }) : { conv1: 1, conv2: 1, enc: 1, hidden: 1 }
+    const e = parseMeta(m, { cu: r.cu as number, stepsTotal: r.steps as number, final: false, widths })
+    if (typeof e === "string") fail(e)
   }
   if (!("learnerState" in r)) fail("no learnerState")
 }

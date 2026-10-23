@@ -12,6 +12,14 @@ export function checkupSeed(learnerId: string, level: number, milestoneId: strin
 }
 
 /**
+ * hashSeed(0, `panel/${panel}/${level}/${milestoneId}`): the shared variant every life on panel `panel` meets (spec
+ * §4.1 step 4; decision 0022 §Shared panels). Lives on one panel are compared on the same worlds (blocking).
+ */
+export function panelSeed(panel: number, level: number, milestoneId: string): number {
+  return hashSeed(0, `panel/${panel}/${level}/${milestoneId}`)
+}
+
+/**
  * `${name}: ${message}` (name: e.name for an Error, else "thrown"), whitespace runs become " ", anything outside printable
  * ASCII "?", at most 80 characters, never empty ("unknown"). Short and bounded so a log stays small: no stack, and at most
  * an 80-character fragment of the message (decision 0017). An empty message leaves just the name.
@@ -45,13 +53,18 @@ export interface CheckupDeps {
   shouldStop?: () => boolean
   /** Awaited after every frozen step (the session's pacer); without it, recordRun yields (setTimeout 0) every YIELD_EVERY steps. */
   yieldNow?: () => Promise<void>
+  /**
+   * Each milestone's variant seed. Default checkupSeed(learnerId, level, id): a life without meta, or a legacy life.
+   * A life with a shared panel (meta.evalPanel) passes (l, m) => panelSeed(panel, l, m) (decision 0022).
+   */
+  variantSeed?: (level: number, milestoneId: string) => number
 }
 
 export type CheckupOutcome = { status: "done"; result: CheckupResult } | { status: "abandoned" }
 
 /**
- * Runs every milestone of the suite in order. Milestone m acts in m.makeVariant(checkupSeed(learnerId, level, m.id))
- * through a frozen run seeded hashSeed(that seed, "policy"), for m.budgetSteps steps. A milestone that throws (not
+ * Runs every milestone of the suite in order. Milestone m acts in m.makeVariant(seed), with seed variantSeed(level, m.id)
+ * (default checkupSeed(learnerId, level, m.id)), through a frozen run seeded hashSeed(that seed, "policy"), for m.budgetSteps steps. A milestone that throws (not
  * recoverable), or whose run's dispose() throws, is not passed, its measure is null and the result has `error: true`;
  * the rest still run. A recoverable error is rethrown once the open run is disposed. A halt (shouldStop) abandons the
  * checkup: no result. `evalCU` is the learner's stats().evalCU delta over the whole checkup.
@@ -65,7 +78,7 @@ export async function runCheckup(d: CheckupDeps): Promise<CheckupOutcome> {
   const errorReasons: Record<string, string> = {}
   for (const m of suite) {
     if (d.shouldStop?.()) return { status: "abandoned" }
-    const seed = checkupSeed(d.learnerId, d.level, m.id)
+    const seed = d.variantSeed ? d.variantSeed(d.level, m.id) : checkupSeed(d.learnerId, d.level, m.id)
     let run: ReturnType<typeof d.learner.frozenRun> | null = null
     let outcome: { value: number; pass: boolean } | null = null // null: the milestone threw
     let thrown: { e: unknown } | null = null // what a non-recoverable milestone threw

@@ -1,8 +1,9 @@
 // Gate: decide what to do with open `run: ...` PRs, then act. Runs from main's copy; never executes PR code.
-import { appendFileSync } from "node:fs"
+import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { parseLogFile, type LogFile } from "@blanktab/harness/log"
+import { parseGenomeSpace, type GenomeSpace } from "@blanktab/meta"
 import { validateSessionPr, type PrFile } from "./validate.ts"
 import { readLearnerLogs } from "./summary.ts"
 import { boundAuthor, closePr, FetchBoundError, gh, ghCalls, git, gitBuf, isShallow, labelNeedsHuman, listOpenPrs, loadPrViaGit, mergePr, type Git } from "./github.ts"
@@ -42,34 +43,52 @@ function logsIn(files: PrFile[]): LogFile[] {
   })
 }
 
+/** Where a checkout keeps the genome space the gate checks meta.genome against (spec §3.1, §7.3). */
+export const GENOME_SPACE_PATH = "knowledge/genome-space.json"
+
+/**
+ * The genome space in the checkout at `root` (main's). Throws when it is missing or invalid: the gate and the
+ * validator stop before deciding anything rather than accept a genome unchecked.
+ */
+export function loadGenomeSpace(root: string): GenomeSpace {
+  const path = join(root, GENOME_SPACE_PATH)
+  let text: string
+  try { text = readFileSync(path, "utf8") } catch (e) { throw new Error(`${GENOME_SPACE_PATH} could not be read from main's checkout (${e instanceof Error ? e.message : e})`, { cause: e }) }
+  try { return parseGenomeSpace(JSON.parse(text)) } catch (e) { throw new Error(`${GENOME_SPACE_PATH} on main is invalid (${e instanceof Error ? e.message : e})`, { cause: e }) }
+}
+
 /**
  * Learners live as long as their tab (decision 0014), so there is no "final" or "gone quiet" signal to wait for:
  * every valid session PR is merged each run. A tab that pushes after validation makes the head-pinned merge fail;
- * the PR stays open and is validated again next run.
+ * the PR stays open and is validated again next run. `space` is main's genome space (loadGenomeSpace).
  */
-export function decide(prs: OpenPr[]): GateDecision[] {
+export async function decide(prs: OpenPr[], space: GenomeSpace): Promise<GateDecision[]> {
   // Oldest PR first, whatever order they come in: an unbound learner's first merge goes to the earliest PR, never a later copy.
-  return [...prs].sort((a, b) => a.number - b.number).map((pr): GateDecision => {
-    if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
-    if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
-    const ids = learnersIn(pr.files)
-    if (ids.length === 1) {
-      const id = ids[0]!
-      if (pr.title !== `run: ${id}`) return { pr: pr.number, action: "close", reason: `A session PR's title must be "run: ${id}", the learner whose files it carries.` }
-      // A learner belongs to the author of its first merged PR: nobody else may add to its record.
-      const owner = pr.boundAuthor
-      if (owner && pr.author?.toLowerCase() !== owner.toLowerCase()) return { pr: pr.number, action: "close", reason: `Learner ${id} belongs to @${owner}.` }
-    }
-    const v = validateSessionPr(pr.files, pr.previous)
-    if (!v.ok) {
-      return v.kind === "needs-human"
-        ? { pr: pr.number, action: "label-needs-human", reason: v.errors.join("\n") }
-        : { pr: pr.number, action: "close", reason: v.errors.join("\n") }
-    }
-    const logs = logsIn(pr.files)
-    if (logs.some(l => l.codeSha === "dev")) return { pr: pr.number, action: "close", reason: DEV_BUILD_REASON }
-    return { pr: pr.number, action: "merge", reason: "valid" }
-  })
+  const out: GateDecision[] = []
+  for (const pr of [...prs].sort((a, b) => a.number - b.number)) out.push(await decideOne(pr, space))
+  return out
+}
+
+async function decideOne(pr: OpenPr, space: GenomeSpace): Promise<GateDecision> {
+  if (pr.baseRef !== "main") return { pr: pr.number, action: "close", reason: "Session PRs must target main." }
+  if (pr.loadErrors && pr.loadErrors.length > 0) return { pr: pr.number, action: "close", reason: pr.loadErrors.join("\n") }
+  const ids = learnersIn(pr.files)
+  if (ids.length === 1) {
+    const id = ids[0]!
+    if (pr.title !== `run: ${id}`) return { pr: pr.number, action: "close", reason: `A session PR's title must be "run: ${id}", the learner whose files it carries.` }
+    // A learner belongs to the author of its first merged PR: nobody else may add to its record.
+    const owner = pr.boundAuthor
+    if (owner && pr.author?.toLowerCase() !== owner.toLowerCase()) return { pr: pr.number, action: "close", reason: `Learner ${id} belongs to @${owner}.` }
+  }
+  const v = await validateSessionPr(pr.files, pr.previous, { space })
+  if (!v.ok) {
+    return v.kind === "needs-human"
+      ? { pr: pr.number, action: "label-needs-human", reason: v.errors.join("\n") }
+      : { pr: pr.number, action: "close", reason: v.errors.join("\n") }
+  }
+  const logs = logsIn(pr.files)
+  if (logs.some(l => l.codeSha === "dev")) return { pr: pr.number, action: "close", reason: DEV_BUILD_REASON }
+  return { pr: pr.number, action: "merge", reason: "valid" }
 }
 
 /** What act() does to GitHub (gh in production; injected in tests). */
@@ -135,13 +154,15 @@ export interface GateDeps {
 
 /**
  * One gate run over the open `run: ` PRs; resolves to the number merged. Aborts before deciding anything if the
- * checkout of main is shallow (who owns a learner needs main's full history). A PR that cannot be decided safely
+ * checkout of main is shallow (who owns a learner needs main's full history), or if its genome space is missing or
+ * invalid (meta genomes are never accepted unchecked). A PR that cannot be decided safely
  * (no head commit or author, a head that moved since it was read, a base newer than the checkout, an owner lookup or
  * a load that failed or timed out) is logged and left open for the next run. The checkout (HEAD) is the one main the
  * whole run uses: merge bases, earlier logs (its working tree) and owners (its history).
  */
-export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
+export async function runGate(repo: string, runsDir: string, deps: GateDeps): Promise<number> {
   if (isShallow(deps.git)) throw new Error("the checkout of main is shallow: who owns a learner cannot be told (gate.yml needs fetch-depth 0)")
+  const space = loadGenomeSpace(deps.git(["rev-parse", "--show-toplevel"]).trim())
   let calls = 0
   const ghFn = (args: string[]) => { calls++; return deps.gh(args) }
   const prs: (OpenPr & { learnerId: string | null })[] = []
@@ -185,7 +206,7 @@ export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
       deps.log(`PR #${listed.number}: ${calls - before} gh calls`)
     }
   }
-  return act(decide(prs), prs, {
+  return act(await decide(prs, space), prs, {
     close: (n, reason) => closePr(repo, n, reason, ghFn),
     label: n => labelNeedsHuman(repo, n, ghFn),
     merge: (n, sha) => mergePr(repo, n, sha, ghFn),
@@ -194,12 +215,12 @@ export function runGate(repo: string, runsDir: string, deps: GateDeps): number {
   })
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const repo = process.env.REPO
   if (!repo) throw new Error("REPO env var is required (owner/name)")
-  const merged = runGate(repo, process.argv[2] ?? "data/runs", { gh, git, gitBuf, log: m => console.log(m), error: m => console.error(m) })
+  const merged = await runGate(repo, process.argv[2] ?? "data/runs", { gh, git, gitBuf, log: m => console.log(m), error: m => console.error(m) })
   console.log(`merged ${merged} (${ghCalls()} gh calls in all)`)
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `merged=${merged}\n`)
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) main()
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main()

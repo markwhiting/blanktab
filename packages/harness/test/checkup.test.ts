@@ -7,7 +7,7 @@ import { createWorld, hashSeed, type World } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
 import { ERROR_REASON_RE, MILESTONE_IDS, MILESTONE_SUITE_VERSION } from "../src/log"
 import { MILESTONES_V1, YIELD_EVERY, type Milestone } from "../src/milestones"
-import { checkupSeed, errorReason, runCheckup, type CheckupDeps } from "../src/checkup"
+import { checkupSeed, errorReason, panelSeed, runCheckup, type CheckupDeps } from "../src/checkup"
 
 const TINY: Widths = { conv1: 4, conv2: 4, enc: 16, hidden: 16 }
 const canvas = () => createCanvas(WORLD.width, WORLD.height)
@@ -88,6 +88,28 @@ describe("checkups (decision 0016)", { timeout: 60_000 }, () => {
     // The policy: a frozen run per milestone, seeded hashSeed(variant seed, "policy"), measuring loss for M1 only.
     expect(first.log.opened.map(o => o.seed)).toEqual(SUITE_IDS.map(id => hashSeed(checkupSeed("abc", 8, id), "policy")))
     expect(first.log.opened.map(o => o.measureLoss)).toEqual(SUITE_IDS.map(id => id === "M1"))
+  })
+
+  it("with variantSeed, milestone m meets makeVariant(panelSeed(p, level, m.id)); two learners on panel p meet identical variants; without it, checkupSeed as before", async () => {
+    expect(panelSeed(3, 512, "M1")).toBe(hashSeed(0, "panel/3/512/M1"))
+    expect(new Set([panelSeed(3, 512, "M1"), panelSeed(4, 512, "M1"), panelSeed(3, 1024, "M1"), panelSeed(3, 512, "M2")]).size).toBe(4)
+    const seen = (learnerId: string, variantSeed?: CheckupDeps["variantSeed"]) => {
+      const seeds: [string, number][] = []
+      const suite = small(5).map(m => ({ ...m, makeVariant(seed: number, c: Parameters<Milestone["makeVariant"]>[1]) { seeds.push([m.id, seed]); return m.makeVariant(seed, c) } }))
+      const { learner, log } = stubLearner()
+      return runCheckup(base({ learnerId, level: 512, learner, suite, ...(variantSeed ? { variantSeed } : {}) })).then(o => ({ o, seeds, policy: log.opened.map(r => r.seed) }))
+    }
+    const onPanel = (l: number, m: string) => panelSeed(3, l, m)
+    const a = await seen("lrn_aaaaaaaaaaaaaaaa", onPanel), b = await seen("lrn_bbbbbbbbbbbbbbbb", onPanel)
+    expect(a.o.status).toBe("done")
+    expect(a.seeds).toEqual(SUITE_IDS.map(id => [id, panelSeed(3, 512, id)]))
+    expect(b.seeds).toEqual(a.seeds)
+    // The policy seed follows the variant seed, so two learners on one panel differ only by what they learned.
+    expect(a.policy).toEqual(SUITE_IDS.map(id => hashSeed(panelSeed(3, 512, id), "policy")))
+    expect(b.policy).toEqual(a.policy)
+    const c = await seen("lrn_aaaaaaaaaaaaaaaa")
+    expect(c.seeds).toEqual(SUITE_IDS.map(id => [id, checkupSeed("lrn_aaaaaaaaaaaaaaaa", 512, id)]))
+    expect((await seen("lrn_bbbbbbbbbbbbbbbb")).seeds).not.toEqual(c.seeds)
   })
 
   it("a dispose() that throws marks that milestone not passed, measure null, error true; the rest still run", async () => {

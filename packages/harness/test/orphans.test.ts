@@ -285,13 +285,13 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
   const put = async (idb: IDBFactory, files: LogFileV2[]) => { const q = await openQueue(idb); for (const f of files) await q.put(f) }
   const filesOf = async (idb: IDBFactory, learnerId: string) => (await (await openQueue(idb)).files(learnerId)) as LogFileV2[]
   /** Writer/validator agreement: every file parses, and the gate accepts the final one after the files before it. */
-  const gateAccepts = (files: LogFileV2[]) => {
+  const gateAccepts = async (files: LogFileV2[]) => {
     for (const f of files) {
       const p = parseLogFile(JSON.parse(JSON.stringify(f)))
       expect(p.ok, p.ok ? "" : p.error).toBe(true)
     }
     const last = files.at(-1)!
-    const v = validateSessionPr([{ path: `data/runs/${last.learnerId}/${last.seq}.json`, content: JSON.stringify(last, null, 2) }], files.slice(0, -1))
+    const v = await validateSessionPr([{ path: `data/runs/${last.learnerId}/${last.seq}.json`, content: JSON.stringify(last, null, 2) }], files.slice(0, -1))
     expect(v.errors).toEqual([])
     expect(v.ok).toBe(true)
   }
@@ -323,7 +323,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
       caregiver: { carries: 0, to: {}, safetyNet: false, lostCarries: 2 },
     })
     for (const k of ["stepsTotal", "cu", "restores", "lostCU", "skippedUpdates", "evalCU"] as const) expect(f[k]!).toBeGreaterThanOrEqual(files[1]![k]!)
-    gateAccepts(files)
+    await gateAccepts(files)
   })
 
   it("the final file and the checkpoint's removal are one transaction: a log that cannot be queued leaves the checkpoint", async () => {
@@ -361,7 +361,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     void _g
     // Its counters, an empty curve, final: not its checkups or carries (on the record already).
     expect(files[2]).toEqual({ ...counters, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
-    gateAccepts(files)
+    await gateAccepts(files)
   })
 
   it("a version orphan whose old state has full birth facts still gets its final from the latest log: its settings are not read (or re-clamped) by this code", async () => {
@@ -376,7 +376,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     expect(r.verdicts).toEqual({ [L]: "version" })
     const files = await filesOf(idb, L)
     expect(files[2]).toEqual({ ...files[1]!, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
-    gateAccepts(files)
+    await gateAccepts(files)
   })
 
   it("a final that cannot be built from the checkpoint is built from the latest log file instead (said on console.warn)", async () => {
@@ -398,7 +398,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     expect(await checkpointIds(idb)).toEqual([])
     const files = await filesOf(idb, L)
     expect(files[2]).toEqual({ ...files[1]!, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
-    gateAccepts(files)
+    await gateAccepts(files)
   })
 
   it("a surplus orphan gets one; an adopted or kept one does not", async () => {
@@ -414,7 +414,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
       expect(files.map(f => f.final), id(n)).toEqual(n >= 4 ? [false, true] : [false])
       if (n >= 4) {
         expect(files[1]).toMatchObject({ seq: 1, stepsTotal: 900, cu: 9 })
-        gateAccepts(files)
+        await gateAccepts(files)
       }
     }
     expect((await checkpointIds(idb)).sort()).toEqual([id(1), id(2), id(3)])
@@ -437,7 +437,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
       expect(files.map(f => ({ seq: f.seq, final: f.final, stepsTotal: f.stepsTotal, cu: f.cu }))).toEqual([
         { seq: 0, final: false, stepsTotal: 800, cu: 8 }, { seq: 1, final: true, stepsTotal: 800, cu: 8 },
       ])
-      gateAccepts(files)
+      await gateAccepts(files)
     }
     expect(await filesOf(idb, id(2))).toEqual([])
   })
@@ -467,7 +467,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     expect(files).toHaveLength(1)
     // No latest file: maxStepsPerSec is the default; the code is the checkpoint's, else this page's; the host this tab's.
     expect(files[0]).toMatchObject({ seq: 0, final: true, stepsTotal: 500, cu: 5, codeSha: FINAL.codeSha, hostSig: HOST, settings: { maxStepsPerSec: 30 } })
-    gateAccepts(files)
+    await gateAccepts(files)
   })
 
   it("without the final option the sweep writes no log (as before)", async () => {

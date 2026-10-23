@@ -10,6 +10,7 @@ import { DEFAULT_SETTINGS, createLearner, type LearnerState } from "@blanktab/le
 import { CHECKPOINTS, result } from "../src/db"
 import { packLearnerState, unpackLearnerState } from "../src/pack"
 import { CAREGIVER_DEFAULTS, createCaregiver } from "../src/caregiver"
+import type { MetaBlock } from "../src/log"
 
 const A = "lrn_aaaaaaaaaaaaaaaa", B = "lrn_bbbbbbbbbbbbbbbb"
 const cp = (learnerId: string, steps: number): Checkpoint<{ w: Float32Array }> => ({
@@ -39,6 +40,35 @@ describe("checkpoints", () => {
     for (const world of [{ room: "Toys" }, { room: "" }, { room: 1 }, { room: "a".repeat(17) }, {}, { room: "toys", x: 1 }, "toys", null]) {
       await saveCheckpoint(idb, { ...cp(A, 1), world: world as unknown as { room: string } })
       await expect(loadCheckpoint(idb, A), JSON.stringify(world)).rejects.toThrow(RangeError)
+    }
+  })
+
+  it("a checkpoint with meta loads; one with a malformed meta is a RangeError; a pre-05a checkpoint (no meta) loads", async () => {
+    const idb = new IDBFactory()
+    const meta: MetaBlock = {
+      v: 1, role: "search", method: "centre", genomeSchema: 1, genome: { lr: 5e-4 }, genomeSha: "ab".repeat(32),
+      drawSeed: null, posteriorSha: null, evalPanel: 7, evalSeed: null, confirmation: null, inheritance: { filters: "none" },
+    }
+    await saveCheckpoint(idb, cp(A, 1))
+    expect((await loadCheckpoint(idb, A))!.meta).toBeUndefined()
+    await saveCheckpoint(idb, { ...cp(A, 1), meta })
+    expect((await loadCheckpoint(idb, A))!.meta).toEqual(meta)
+    const legacy: MetaBlock = { ...meta, role: "legacy", method: "legacy", evalPanel: null, genome: { entropyWeight: 0.001 }, missing: ["entropyWeight"] }
+    await saveCheckpoint(idb, { ...cp(A, 1), meta: legacy })
+    expect((await loadCheckpoint(idb, A))!.meta).toEqual(legacy)
+    const bad: [string, unknown][] = [
+      ["meta.method", { ...meta, method: "guess" }],
+      ["meta.genomeSha", { ...meta, genomeSha: "x" }],
+      ["unknown key", { ...meta, extra: 1 }],
+      // A checkpoint never stores filters (they go only into the log file at their level) or an end (final files only).
+      ["meta.filters", { ...meta, filters: "AAAA" }],
+      ["meta.end", { ...meta, end: "budget" }],
+      ["meta must be an object", "x"],
+    ]
+    for (const [want, m] of bad) {
+      await saveCheckpoint(idb, { ...cp(A, 1), meta: m as MetaBlock })
+      await expect(loadCheckpoint(idb, A), want).rejects.toThrow(RangeError)
+      await expect(loadCheckpoint(idb, A), want).rejects.toThrow(want)
     }
   })
 

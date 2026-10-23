@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest"
-import { ERROR_REASON_RE, MAX_CHECKUPS_PER_FILE, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { BUDGET_CU, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, NEWBORN_LEVELS, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
+import { PANELS } from "@blanktab/meta"
 
 const ID = "lrn_0123456789abcdef"
 const IDS = MILESTONE_IDS[MILESTONE_SUITE_VERSION]!
@@ -160,5 +161,146 @@ describe("caregiver.lostCarries", () => {
     // Not part of the to-sum: carries 2 with lost 3 needs to summing to 2, not 5.
     expect(parseLogFile(v2({ caregiver: { carries: 5, to: { a: 2 }, safetyNet: false, lostCarries: 3 } })).ok).toBe(false)
     expect(parseLogFile(v2({ caregiver: { carries: 0, to: {}, safetyNet: false, lostCarries: 3 } })).ok).toBe(true)
+  })
+})
+
+describe("meta (spec §7.3; Plan 05a)", () => {
+  const SHA = "ab".repeat(32), PSHA = "cd".repeat(32)
+  const searchMeta = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    v: 1, role: "search", method: "uniform", genomeSchema: 1, genome: { lr: 5e-4, bufferSize: 2000, creditMode: "off" }, genomeSha: SHA,
+    drawSeed: 123_456, posteriorSha: PSHA, evalPanel: 3, evalSeed: null, confirmation: null, inheritance: { filters: "none" }, ...over,
+  })
+  const withMeta = (meta: unknown, over: Record<string, unknown> = {}) => parseLogFile(v2({ meta, ...over }))
+  const err = (r: ReturnType<typeof parseLogFile>) => (r.ok ? "" : r.error)
+  /** base64 of n float32 (little-endian), as the tab writes it. */
+  const floats = (n: number) => btoa(String.fromCharCode(...new Uint8Array(Float32Array.from({ length: n }, (_, i) => i / n).buffer)))
+  const legacyMeta = (over: Record<string, unknown> = {}) =>
+    searchMeta({ role: "legacy", method: "legacy", drawSeed: null, posteriorSha: null, evalPanel: null, ...over })
+  const newbornMeta = (over: Record<string, unknown> = {}) =>
+    searchMeta({ role: "newborn", method: "newborn", drawSeed: null, posteriorSha: null, evalPanel: 5, heldOut: { loss: 0.03, baseline: 0.025 }, ...over })
+  /** A newborn reference's file; `meta` null leaves meta out. */
+  const newbornFile = (meta: unknown = newbornMeta(), over: Record<string, unknown> = {}) => v2({
+    seq: 0, cu: 0, stepsTotal: 0, final: true, curve: [], evalCU: 3, caregiver: { carries: 0, to: {}, safetyNet: false },
+    checkups: NEWBORN_LEVELS.map(l => checkup(l, { steps: 0 })), ...(meta === null ? {} : { meta }), ...over,
+  })
+
+  it("MAX_EVAL_PANEL is @blanktab/meta's PANELS", () => {
+    expect(MAX_EVAL_PANEL).toBe(PANELS)
+  })
+
+  it("meta: a full search block parses; each wrong key or value fails with a named error (one case per field)", () => {
+    const r = withMeta(searchMeta())
+    expect(err(r)).toBe("")
+    if (r.ok && r.value.schemaVersion === 2) expect(r.value.meta).toEqual(searchMeta())
+    // Round trip: what parses is what was written.
+    if (r.ok) expect(JSON.parse(JSON.stringify(r.value))).toEqual(v2({ meta: searchMeta() }))
+    const cases: [string, unknown, string][] = [
+      ["not an object", "x", "meta must be an object"],
+      ["unknown key", searchMeta({ extra: 1 }), 'unknown key "extra" in meta'],
+      ["v", searchMeta({ v: 2 }), "meta.v"],
+      ["role", searchMeta({ role: "elder" }), "meta.role"],
+      ["method off the list", searchMeta({ method: "guess" }), "meta.method"],
+      ["method of another role", searchMeta({ method: "newborn" }), "meta.method"],
+      ["genomeSchema 0", searchMeta({ genomeSchema: 0 }), "meta.genomeSchema"],
+      ["genomeSchema fractional", searchMeta({ genomeSchema: 1.5 }), "meta.genomeSchema"],
+      ["genome not an object", searchMeta({ genome: [] }), "meta.genome must be an object"],
+      ["genome 41 keys", searchMeta({ genome: Object.fromEntries(Array.from({ length: 41 }, (_, i) => [`g${i}`, i])) }), "meta.genome may have at most 40"],
+      ["genome key", searchMeta({ genome: { "bad-key": 1 } }), "meta.genome key"],
+      ["genome NaN", searchMeta({ genome: { lr: NaN } }), "meta.genome.lr"],
+      ["genome boolean", searchMeta({ genome: { lr: true } }), "meta.genome.lr"],
+      ["genome 65-char string", searchMeta({ genome: { mode: "x".repeat(65) } }), "meta.genome.mode"],
+      ["genomeSha", searchMeta({ genomeSha: "AB".repeat(32) }), "meta.genomeSha"],
+      ["drawSeed negative", searchMeta({ drawSeed: -1 }), "meta.drawSeed"],
+      ["drawSeed above uint32", searchMeta({ drawSeed: 2 ** 32 }), "meta.drawSeed"],
+      ["posteriorSha", searchMeta({ posteriorSha: "x" }), "meta.posteriorSha"],
+      ["drawSeed without posteriorSha", searchMeta({ posteriorSha: null }), "meta.drawSeed and meta.posteriorSha must be null together"],
+      ["evalPanel 0", searchMeta({ evalPanel: 0 }), "meta.evalPanel"],
+      ["evalPanel 17", searchMeta({ evalPanel: 17 }), "meta.evalPanel"],
+      ["evalSeed 9999", searchMeta({ evalSeed: 9999 }), "meta.evalSeed"],
+      ["evalSeed fractional", searchMeta({ evalSeed: 10_000.5 }), "meta.evalSeed"],
+      ["confirmation shape", searchMeta({ confirmation: { id: 1 } }), "meta.confirmation.arm"],
+      ["confirmation key", searchMeta({ confirmation: { id: 1, arm: "centre", x: 1 } }), 'unknown key "x" in meta.confirmation'],
+      ["confirmation id", searchMeta({ confirmation: { id: -1, arm: "centre" } }), "meta.confirmation.id"],
+      ["inheritance", searchMeta({ inheritance: { filters: "abc" } }), "meta.inheritance.filters"],
+      ["inheritance key", searchMeta({ inheritance: { filters: "none", x: 1 } }), 'unknown key "x" in meta.inheritance'],
+      ["missing on search", searchMeta({ missing: [] }), "meta.missing is only for role legacy"],
+      ["filters off level", searchMeta({ filters: floats(1664) }), "meta.filters is only in a file at"],
+      ["heldOut on search", searchMeta({ heldOut: { loss: 0.1, baseline: 0.1 } }), "meta.heldOut is only for role newborn"],
+      ["end in a non-final file", searchMeta({ end: "budget" }), "meta.end is only in a final file"],
+    ]
+    for (const [name, meta, want] of cases) expect(err(withMeta(meta)), name).toContain(want)
+    // Optional fields stay optional; nulls are accepted where the spec allows them.
+    expect(err(withMeta(searchMeta({ drawSeed: null, posteriorSha: null, evalPanel: null, evalSeed: 10_000, confirmation: { id: 0, arm: "candidate" } })))).toBe("")
+    expect(err(withMeta(searchMeta({ method: "ts", drawSeed: 2 ** 32 - 1 })))).toBe("")
+  })
+
+  it("meta.missing (role legacy): sorted unique names of meta.genome; legacy accepts any genome values (bounds are the gate's, and not for legacy)", () => {
+    expect(err(withMeta(legacyMeta({ missing: ["bufferSize", "creditMode"] })))).toBe("")
+    expect(err(withMeta(legacyMeta({ genome: { entropyWeight: 0.001 } })))).toBe("")
+    expect(err(withMeta(legacyMeta()))).toBe("")
+    for (const missing of [["lr", "bufferSize"], ["lr", "lr"], ["sleepInterval"], [1], "lr"]) {
+      expect(err(withMeta(legacyMeta({ missing }))), JSON.stringify(missing)).toContain("meta.missing")
+    }
+  })
+
+  it("meta.filters only in a file whose levelAtOrBelow(cu) is 512, 1024 or 2048, of exactly 104·conv1 floats", () => {
+    const gpu = floats(104 * 16)
+    for (const cu of [512, 700, 1024, 1500, 2048, 3071.9]) expect(err(withMeta(searchMeta({ filters: gpu }), { cu })), String(cu)).toBe("")
+    for (const cu of [300, 511.9, 3072, 4096]) expect(err(withMeta(searchMeta({ filters: gpu }), { cu })), String(cu)).toContain("meta.filters is only in a file at")
+    expect(err(withMeta(searchMeta({ filters: floats(1663) }), { cu: 512 }))).toContain("meta.filters must be base64 of 1664 float32")
+    expect(err(withMeta(searchMeta({ filters: floats(1665) }), { cu: 512 }))).toContain("meta.filters must be base64")
+    // CPU widths (conv1 8): 832 floats, and the GPU length is rejected there.
+    const cpu = { conv1: 8, conv2: 16, enc: 64, hidden: 128 }
+    expect(err(withMeta(searchMeta({ filters: floats(832) }), { cu: 1024, widths: cpu }))).toBe("")
+    expect(err(withMeta(searchMeta({ filters: gpu }), { cu: 1024, widths: cpu }))).toContain("meta.filters must be base64 of 832 float32")
+    // Not base64 at the right length; not a string.
+    const bad = "!" + gpu.slice(1)
+    expect(err(withMeta(searchMeta({ filters: bad }), { cu: 512 }))).toContain("meta.filters must be base64")
+    expect(err(withMeta(searchMeta({ filters: 1 }), { cu: 512 }))).toContain("meta.filters must be base64")
+  })
+
+  it("newborn file: cu 0, three checkups at 512/1024/2048 above cu parse; the same checkups without role newborn fail 'level is ahead'", () => {
+    expect(err(parseLogFile(newbornFile()))).toBe("")
+    expect(err(parseLogFile(newbornFile(searchMeta(), { final: false })))).toContain("level is ahead")
+    expect(err(parseLogFile(newbornFile(null, { final: false })))).toContain("level is ahead")
+    expect(err(parseLogFile(newbornFile(legacyMeta(), { final: false })))).toContain("level is ahead")
+    const cases: [string, Record<string, unknown>, string][] = [
+      ["seq 1", newbornFile(newbornMeta(), { seq: 1 }), "seq 0"],
+      ["not final", newbornFile(newbornMeta(), { final: false }), "meta.role newborn needs a final file at cu 0"],
+      ["cu 1", newbornFile(newbornMeta(), { cu: 1 }), "meta.role newborn needs a final file at cu 0"],
+      ["steps", newbornFile(newbornMeta(), { stepsTotal: 1 }), "meta.role newborn needs a final file at cu 0"],
+      ["no panel", newbornFile(newbornMeta({ evalPanel: null })), "meta.evalPanel must be set for role newborn"],
+      ["method centre", newbornFile(newbornMeta({ method: "centre" })), "meta.method"],
+      ["two checkups", newbornFile(newbornMeta(), { checkups: [checkup(512, { steps: 0 }), checkup(1024, { steps: 0 })] }), "exactly 3 checkups"],
+      ["no checkups", newbornFile(newbornMeta(), { checkups: [] }), "exactly 3 checkups"],
+      ["wrong levels", newbornFile(newbornMeta(), { checkups: [256, 1024, 2048].map(l => checkup(l, { steps: 0 })) }), "exactly 3 checkups"],
+      ["steps above 0", newbornFile(newbornMeta(), { checkups: NEWBORN_LEVELS.map(l => checkup(l, { steps: 1 })) }), "steps"],
+    ]
+    for (const [name, f, want] of cases) expect(err(parseLogFile(f)), name).toContain(want)
+    const noCk = newbornFile(); delete noCk.checkups
+    expect(err(parseLogFile(noCk))).toContain("exactly 3 checkups")
+  })
+
+  it("meta.end only in a final file; heldOut only for newborn", () => {
+    for (const end of ["failed", "orphan", "budget"]) expect(err(withMeta(searchMeta({ end }), { final: true })), end).toBe("")
+    expect(err(withMeta(searchMeta({ end: "budget" }), { final: false }))).toContain("meta.end is only in a final file")
+    expect(err(withMeta(searchMeta({ end: "done" }), { final: true }))).toContain("meta.end must be one of")
+    expect(err(parseLogFile(newbornFile(newbornMeta({ end: "budget" }))))).toBe("")
+    expect(err(parseLogFile(JSON.parse(JSON.stringify(newbornFile(newbornMeta({ heldOut: undefined }))))))).toBe("") // heldOut is optional
+    for (const role of ["search", "legacy"]) {
+      const m = role === "search" ? searchMeta({ heldOut: { loss: 1, baseline: 1 } }) : legacyMeta({ heldOut: { loss: 1, baseline: 1 } })
+      expect(err(withMeta(m)), role).toContain("meta.heldOut is only for role newborn")
+    }
+    for (const heldOut of [{ loss: -1, baseline: 1 }, { loss: 1 }, { loss: 1, baseline: 1, x: 1 }, null]) {
+      expect(err(parseLogFile(newbornFile(newbornMeta({ heldOut })))), JSON.stringify(heldOut)).toContain("meta.heldOut")
+    }
+  })
+
+  it("files without meta still parse, and BUDGET_CU / FILTER_LEVELS / NEWBORN_LEVELS are the spec's", () => {
+    expect(ok(v2())).toBe(true)
+    expect(BUDGET_CU).toBe(2048)
+    expect(FILTER_LEVELS).toEqual([512, 1024, 2048])
+    expect(NEWBORN_LEVELS).toEqual([512, 1024, 2048])
+    expect(ok({ ...mkFile(ID, 0), meta: searchMeta() })).toBe(false) // v1 has no such field
   })
 })

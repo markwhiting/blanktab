@@ -6,6 +6,7 @@
 - **Amends:** spec §7.3 (caregiver) and §8 (milestones, checkups, scoring); builds on 0005, 0008 and 0014
 - **Plan:** `docs/plans/2026-10-21-04b-growing-up.md` (Task 3)
 - **Amended by:** [0017](0017-hardening-calls.md) (carries lost to a restore are now counted)
+- **Amended by:** [0022](0022-shared-panels-wider-ranges-and-05a-calls.md) (new lives meet shared variant panels)
 
 ## Context
 The spec (§8.2) named six spontaneous-behaviour milestones and gave their thresholds in words. Before a checkup can produce a score, each milestone needs four things: a world, a budget, an exact measure and a pass rule. These must be precise enough that a learner can't pass by flailing and success can't be quietly redefined (AGENTS.md invariant 7).

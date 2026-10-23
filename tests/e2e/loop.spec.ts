@@ -466,7 +466,7 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
     expect(r.file).toMatchObject({ schemaVersion: 2, learnerId: r.learnerId, seq: 0, final: true, condition: "A" })
     expect(r.file.stepsTotal as number).toBeGreaterThanOrEqual(50)
     // As the gate reads it: it parses and is accepted as the learner's first PR.
-    const v = validateSessionPr([{ path: `data/runs/${r.learnerId}/0.json`, content: JSON.stringify(r.file, null, 2) }], [])
+    const v = await validateSessionPr([{ path: `data/runs/${r.learnerId}/0.json`, content: JSON.stringify(r.file, null, 2) }], [])
     expect(v.errors).toEqual([])
   }
   expect(rows.filter(r => r.learnerId === others[0]!.learnerId || r.learnerId === others[1]!.learnerId)).toEqual([])
