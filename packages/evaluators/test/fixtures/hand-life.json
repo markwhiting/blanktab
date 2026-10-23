@@ -1,0 +1,377 @@
+{
+  "learnerId": "lrn_00000000000000a1",
+  "files": [
+    {
+      "schemaVersion": 2,
+      "learnerId": "lrn_00000000000000a1",
+      "seq": 0,
+      "codeSha": "dev",
+      "knowledgeSha": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "writtenAt": "2026-10-23T00:00:00.000Z",
+      "stepsTotal": 5120,
+      "settings": {
+        "lr": 0.001
+      },
+      "hostSig": {
+        "cores": 8,
+        "deviceMemoryGb": 8,
+        "webgpu": true,
+        "tabsOnMachine": 1
+      },
+      "sessionsSeenAtBirth": 0,
+      "final": false,
+      "cu": 512,
+      "condition": "A",
+      "widths": {
+        "conv1": 16,
+        "conv2": 32,
+        "enc": 128,
+        "hidden": 256
+      },
+      "curve": [
+        {
+          "cu": 300,
+          "steps": 3000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.97,
+            "baseline": 1
+          }
+        },
+        {
+          "cu": 512,
+          "steps": 5120,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.96,
+            "baseline": 1
+          }
+        }
+      ],
+      "skippedUpdates": 0,
+      "restores": 0,
+      "lostCU": 0,
+      "evalCU": 10,
+      "checkups": [
+        {
+          "level": 512,
+          "steps": 5120,
+          "passed": [],
+          "measures": {
+            "M1": 0.9,
+            "M2": 1.2,
+            "M3": 0,
+            "M4": 0.1,
+            "M5": null,
+            "M6": 0
+          },
+          "evalCU": 1
+        }
+      ],
+      "milestoneSuiteVersion": 1,
+      "meta": {
+        "v": 1,
+        "role": "search",
+        "method": "calibrate",
+        "genomeSchema": 1,
+        "genome": {
+          "lr": 0.001,
+          "gamma": 0.9
+        },
+        "genomeSha": "abababababababababababababababababababababababababababababababab",
+        "drawSeed": 7,
+        "posteriorSha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "evalPanel": 3,
+        "evalSeed": null,
+        "confirmation": null,
+        "inheritance": {
+          "filters": "none"
+        }
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "learnerId": "lrn_00000000000000a1",
+      "seq": 1,
+      "codeSha": "dev",
+      "knowledgeSha": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "writtenAt": "2026-10-23T00:00:00.000Z",
+      "stepsTotal": 10240,
+      "settings": {
+        "lr": 0.001
+      },
+      "hostSig": {
+        "cores": 8,
+        "deviceMemoryGb": 8,
+        "webgpu": true,
+        "tabsOnMachine": 1
+      },
+      "sessionsSeenAtBirth": 0,
+      "final": false,
+      "cu": 1024,
+      "condition": "A",
+      "widths": {
+        "conv1": 16,
+        "conv2": 32,
+        "enc": 128,
+        "hidden": 256
+      },
+      "curve": [
+        {
+          "cu": 800,
+          "steps": 8000,
+          "predLoss": 1,
+          "baselineLoss": 1
+        },
+        {
+          "cu": 1024,
+          "steps": 10240,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.5,
+            "baseline": 1
+          }
+        }
+      ],
+      "skippedUpdates": 0,
+      "restores": 0,
+      "lostCU": 0,
+      "evalCU": 20,
+      "checkups": [
+        {
+          "level": 1024,
+          "steps": 10240,
+          "passed": [
+            "M2",
+            "M4",
+            "M5"
+          ],
+          "measures": {
+            "M1": null,
+            "M2": 2.5,
+            "M3": 0.6,
+            "M4": 0.7,
+            "M5": 1.6,
+            "M6": 1
+          },
+          "evalCU": 1
+        }
+      ],
+      "milestoneSuiteVersion": 1,
+      "meta": {
+        "v": 1,
+        "role": "search",
+        "method": "calibrate",
+        "genomeSchema": 1,
+        "genome": {
+          "lr": 0.001,
+          "gamma": 0.9
+        },
+        "genomeSha": "abababababababababababababababababababababababababababababababab",
+        "drawSeed": 7,
+        "posteriorSha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "evalPanel": 3,
+        "evalSeed": null,
+        "confirmation": null,
+        "inheritance": {
+          "filters": "none"
+        }
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "learnerId": "lrn_00000000000000a1",
+      "seq": 2,
+      "codeSha": "dev",
+      "knowledgeSha": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "writtenAt": "2026-10-23T00:00:00.000Z",
+      "stepsTotal": 20480,
+      "settings": {
+        "lr": 0.001
+      },
+      "hostSig": {
+        "cores": 8,
+        "deviceMemoryGb": 8,
+        "webgpu": true,
+        "tabsOnMachine": 1
+      },
+      "sessionsSeenAtBirth": 0,
+      "final": false,
+      "cu": 2048,
+      "condition": "A",
+      "widths": {
+        "conv1": 16,
+        "conv2": 32,
+        "enc": 128,
+        "hidden": 256
+      },
+      "curve": [
+        {
+          "cu": 1100,
+          "steps": 11000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.93,
+            "baseline": 1
+          }
+        },
+        {
+          "cu": 1300,
+          "steps": 13000,
+          "predLoss": 1,
+          "baselineLoss": 1
+        },
+        {
+          "cu": 1500,
+          "steps": 15000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.91,
+            "baseline": 1
+          }
+        },
+        {
+          "cu": 1900,
+          "steps": 19000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.88,
+            "baseline": 1
+          }
+        },
+        {
+          "cu": 2048,
+          "steps": 20480,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.9,
+            "baseline": 1
+          }
+        }
+      ],
+      "skippedUpdates": 0,
+      "restores": 0,
+      "lostCU": 0,
+      "evalCU": 30,
+      "meta": {
+        "v": 1,
+        "role": "search",
+        "method": "calibrate",
+        "genomeSchema": 1,
+        "genome": {
+          "lr": 0.001,
+          "gamma": 0.9
+        },
+        "genomeSha": "abababababababababababababababababababababababababababababababab",
+        "drawSeed": 7,
+        "posteriorSha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "evalPanel": 3,
+        "evalSeed": null,
+        "confirmation": null,
+        "inheritance": {
+          "filters": "none"
+        }
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "learnerId": "lrn_00000000000000a1",
+      "seq": 3,
+      "codeSha": "dev",
+      "knowledgeSha": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "writtenAt": "2026-10-23T00:00:00.000Z",
+      "stepsTotal": 30720,
+      "settings": {
+        "lr": 0.001
+      },
+      "hostSig": {
+        "cores": 8,
+        "deviceMemoryGb": 8,
+        "webgpu": true,
+        "tabsOnMachine": 1
+      },
+      "sessionsSeenAtBirth": 0,
+      "final": false,
+      "cu": 3072,
+      "condition": "A",
+      "widths": {
+        "conv1": 16,
+        "conv2": 32,
+        "enc": 128,
+        "hidden": 256
+      },
+      "curve": [
+        {
+          "cu": 2100,
+          "steps": 21000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.1,
+            "baseline": 1
+          }
+        },
+        {
+          "cu": 3000,
+          "steps": 30000,
+          "predLoss": 1,
+          "baselineLoss": 1,
+          "heldOut": {
+            "loss": 0.1,
+            "baseline": 1
+          }
+        }
+      ],
+      "skippedUpdates": 0,
+      "restores": 0,
+      "lostCU": 0,
+      "evalCU": 40,
+      "checkups": [
+        {
+          "level": 2048,
+          "steps": 20480,
+          "passed": [
+            "M2",
+            "M6"
+          ],
+          "measures": {
+            "M1": 0.85,
+            "M2": 30,
+            "M3": null,
+            "M4": 0.05,
+            "M5": 0.4,
+            "M6": 4
+          },
+          "evalCU": 1
+        }
+      ],
+      "milestoneSuiteVersion": 1,
+      "meta": {
+        "v": 1,
+        "role": "search",
+        "method": "calibrate",
+        "genomeSchema": 1,
+        "genome": {
+          "lr": 0.001,
+          "gamma": 0.9
+        },
+        "genomeSha": "abababababababababababababababababababababababababababababababab",
+        "drawSeed": 7,
+        "posteriorSha": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "evalPanel": 3,
+        "evalSeed": null,
+        "confirmation": null,
+        "inheritance": {
+          "filters": "none"
+        }
+      }
+    }
+  ]
+}

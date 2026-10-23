@@ -1,0 +1,43 @@
+{
+  "evaluator": "newborn-baseline@1",
+  "suiteVersion": 1,
+  "genomeSchema": 1,
+  "widthsClass": "gpu",
+  "learnerIds": [
+    "lrn_0000000000001000",
+    "lrn_0000000000001001"
+  ],
+  "milestones": {
+    "M1": {
+      "median": 0.95,
+      "passRate": 0,
+      "sustainedPassRate": 0
+    },
+    "M2": {
+      "median": 0.9,
+      "passRate": 0.1,
+      "sustainedPassRate": 0
+    },
+    "M3": {
+      "median": 2,
+      "passRate": 0.5,
+      "sustainedPassRate": 0.5
+    },
+    "M4": {
+      "median": 0.25,
+      "passRate": 0,
+      "sustainedPassRate": 0
+    },
+    "M5": {
+      "median": 0.7,
+      "passRate": 0.1,
+      "sustainedPassRate": 0
+    },
+    "M6": {
+      "median": 0,
+      "passRate": 0,
+      "sustainedPassRate": 0
+    }
+  },
+  "heldOutMedian": 1
+}

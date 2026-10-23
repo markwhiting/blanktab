@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "search": "search-composite@1",
+  "confirm": "confirm-fisher@1",
+  "signal": "signal-check@1",
+  "baseline": "newborn-baseline@1",
+  "budgetCU": 2048,
+  "levels": [512, 1024, 2048],
+  "references": { "newborn": "config/references/newborn-baseline@1-gpu-suite1-genome1.json" },
+  "decision": "docs/decisions/0020-evaluators-v1.md"
+}
