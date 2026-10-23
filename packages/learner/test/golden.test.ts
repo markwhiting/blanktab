@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createCpuBackend } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, createLearner } from "../src/learner"
+import { DEFAULT_SETTINGS, GAMMA, createLearner } from "../src/learner"
 import type { UpdateInfo } from "../src/learner"
 import { createSyntheticStream, heldOutSet } from "./synthetic"
 
@@ -51,7 +51,12 @@ describe("golden CPU trajectory (Plan 04c Task 2)", { timeout: 120_000 }, () => 
       world.act(a)
       if (i % SLEEP_EVERY === 0) await learner.sleep()
     }
-    value(h, await learner.save())
+    // The saved settings are hashed without gamma (Plan 05a Task 2): the fixture predates that key, and gamma must
+    // still be the default the fixture's learning used. Everything else in the state is hashed as before.
+    const state = await learner.save()
+    const { gamma, ...settings } = state.settings as typeof state.settings & { gamma?: number }
+    expect(gamma === undefined || gamma === GAMMA).toBe(true)
+    value(h, { ...state, settings })
     learner.dispose()
     const record = {
       sha256: h.digest("hex"), steps: STEPS, firstLossBefore: updates[0]!.lossBefore, lastLossBefore: updates.at(-1)!.lossBefore,
