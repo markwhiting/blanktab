@@ -39,6 +39,7 @@ describe("newborn-baseline@1 (spec §2.3)", () => {
   it("is registered as a cohort evaluator", () => {
     expect(REGISTRY["newborn-baseline@1"]).toBe(newbornBaseline)
     expect(newbornBaseline).toMatchObject({ id: "newborn-baseline", version: 1, kind: "cohort", needs: [] })
+    expect(newbornBaseline.budget).toEqual({ budgetCU: 2048, levels: [512, 1024, 2048] })
   })
 
   it("64 synthetic newborns → the medians and rates computed by hand; CPU-width and suite-2 newborns are ignored", () => {

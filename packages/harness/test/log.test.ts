@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest"
-import { BUDGET_CU, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import evaluationConfig from "../../../config/evaluation.json" with { type: "json" }
+import { BUDGET_CU, evalBudgetOf, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 import { PANELS } from "@blanktab/meta"
 
@@ -335,5 +336,15 @@ describe("meta (spec §7.3; Plan 05a)", () => {
     expect(FILTER_LEVELS).toEqual([512, 1024, 2048])
     expect(NEWBORN_LEVELS).toEqual([512, 1024, 2048])
     expect(ok({ ...mkFile(ID, 0), meta: searchMeta() })).toBe(false) // v1 has no such field
+  })
+
+  it("BUDGET_CU and the levels come from config/evaluation.json; evalBudgetOf rejects a malformed budget", () => {
+    expect(evalBudgetOf(evaluationConfig)).toEqual({ budgetCU: BUDGET_CU, levels: FILTER_LEVELS })
+    expect(evalBudgetOf({ budgetCU: 3072, levels: [1024, 3072] })).toEqual({ budgetCU: 3072, levels: [1024, 3072] })
+    for (const bad of [null, {}, { budgetCU: 2048 }, { budgetCU: 0, levels: [] }, { budgetCU: 2048, levels: [] },
+      { budgetCU: 2048, levels: [512, 1024] }, { budgetCU: 2048, levels: [1024, 512, 2048] }, { budgetCU: 2048, levels: [500, 2048] },
+      { budgetCU: 2048.5, levels: [2048.5] }, { budgetCU: 2048, levels: ["2048"] }]) {
+      expect(() => evalBudgetOf(bad), JSON.stringify(bad)).toThrow(/config\/evaluation.json/)
+    }
   })
 })

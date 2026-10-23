@@ -76,6 +76,12 @@ export function loadEvalConfig(root: string, reg: EvalRegistry = DEFAULT_REGISTR
       if (!Object.hasOwn(c.references, name)) fail(`${e.id}@${e.version} needs reference ${JSON.stringify(name)}, which references does not pin`)
     }
   }
+  // A pinned evaluator that declares a budget reads exactly the config's (the harness runs lives on the config's).
+  for (const e of pinnedEvaluators(c, reg)) {
+    if (e.budget && !(e.budget.budgetCU === c.budgetCU && e.budget.levels.length === c.levels.length && e.budget.levels.every((x, i) => x === c.levels[i]))) {
+      fail(`${e.id}@${e.version} reads a budget of ${e.budget.budgetCU} CU at ${e.budget.levels.join(", ")}, not the config's ${c.budgetCU} CU at ${c.levels.join(", ")}`)
+    }
+  }
   const needed = neededReferences(c, reg)
   const unused = Object.keys(c.references).find(name => !needed.includes(name))
   if (unused !== undefined) fail(`references.${unused} is needed by no pinned evaluator`)

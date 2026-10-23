@@ -7,7 +7,9 @@ import type { EvalOutput, Evaluator, LifeInput, NewbornReference } from "./types
 
 const ID = "newborn-baseline"
 const VERSION = 1
-const LEVELS: readonly number[] = [512, 1024, 2048]
+/** The levels a newborn is checked at: those of the budget it stands in for (config/evaluation.json must agree). */
+const LEVELS: readonly number[] = Object.freeze([512, 1024, 2048])
+const BUDGET_CU = 2048
 /** A sustained pass: passing at this many of the LEVELS or more (spec §2.3, V2 §6.3). */
 const SUSTAINED = 2
 
@@ -61,5 +63,5 @@ function evaluateCohort(groups: Record<string, LifeInput[]>): EvalOutput {
 }
 
 export const newbornBaseline: Evaluator = Object.freeze({
-  id: ID, version: VERSION, kind: "cohort" as const, needs: [], evaluateCohort,
+  id: ID, version: VERSION, kind: "cohort" as const, needs: [], budget: Object.freeze({ budgetCU: BUDGET_CU, levels: LEVELS }), evaluateCohort,
 })

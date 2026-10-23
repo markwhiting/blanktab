@@ -1,4 +1,6 @@
 // Session log format. Browser-safe: no Node imports. Shared by the tab (writer) and the gate (validator).
+// The evaluation budget comes from the pinned config (decision 0020), a JSON import that Vite, Node and vitest all read.
+import evaluationConfig from "../../../config/evaluation.json" with { type: "json" }
 
 /** Schema v1: the flailer's logs (a lifetime in steps). Still accepted by the parser and the gate. */
 export interface LogFileV1 {
@@ -93,12 +95,6 @@ export interface MetaBlock {
   /** Final files only. */
   end?: MetaEnd
 }
-/** A search life's evaluation budget (spec §4.2): its first 2,048 CU and the checkups at 512, 1,024 and 2,048. */
-export const BUDGET_CU = 2048
-/** The log levels whose file carries `meta.filters` (spec §5.1). */
-export const FILTER_LEVELS: readonly number[] = [512, 1024, 2048]
-/** A newborn reference's checkups (spec §7.3). */
-export const NEWBORN_LEVELS: readonly number[] = [512, 1024, 2048]
 /** Floats in `meta.filters` per unit of widths.conv1: periphery 5·5·3 weights + 1 bias, fovea 3·3·3 + 1 (spec §5.1). */
 export const FILTER_FLOATS_PER_CONV1 = 104
 /** The number of shared checkup panels: @blanktab/meta PANELS (log.ts imports no package; log.test.ts pins it). */
@@ -138,6 +134,29 @@ export function isLogLevel(n: number): boolean {
   if (n <= LAST_DOUBLING_CU) return (n & (n - 1)) === 0 // a power of two from 8 to 512
   return n % LOG_STEP_CU === 0
 }
+
+/**
+ * The evaluation budget of config/evaluation.json (decision 0020), checked at load: `budgetCU` a positive integer, and
+ * `levels` increasing log-schedule levels ending at `budgetCU`. A malformed config fails loudly rather than run lives
+ * on a budget no evaluator reads.
+ */
+export function evalBudgetOf(c: unknown): { budgetCU: number; levels: readonly number[] } {
+  const o = (typeof c === "object" && c !== null ? c : {}) as { budgetCU?: unknown; levels?: unknown }
+  const b = o.budgetCU, lv = o.levels
+  if (!(typeof b === "number" && Number.isInteger(b) && b > 0)) throw new Error("config/evaluation.json: budgetCU must be a positive integer")
+  if (!(Array.isArray(lv) && lv.length > 0 && lv.every((x, i) => typeof x === "number" && isLogLevel(x) && (i === 0 || x > lv[i - 1]))
+    && lv[lv.length - 1] === b)) {
+    throw new Error("config/evaluation.json: levels must be increasing log-schedule levels ending at budgetCU")
+  }
+  return { budgetCU: b, levels: Object.freeze([...(lv as number[])]) }
+}
+const EVAL_BUDGET = evalBudgetOf(evaluationConfig)
+/** A search life's evaluation budget (spec §4.2): its first budgetCU CU (2,048 in v1), from config/evaluation.json. */
+export const BUDGET_CU: number = EVAL_BUDGET.budgetCU
+/** The log levels whose file carries `meta.filters` (spec §5.1): the config's checkup levels (512, 1,024, 2,048 in v1). */
+export const FILTER_LEVELS: readonly number[] = EVAL_BUDGET.levels
+/** A newborn reference's checkups (spec §7.3): the levels a search life is checked at, so the same config's levels. */
+export const NEWBORN_LEVELS: readonly number[] = EVAL_BUDGET.levels
 
 /** The highest log level <= cu, or null below FIRST_LOG_CU. */
 export function levelAtOrBelow(cu: number): number | null {
