@@ -172,48 +172,64 @@ describe("legacyGenome", () => {
       lr: 4.5e-4, entropyWeight: 0.001, curiosityWeight: 1.7, bufferSize: 3000, replayPerSleep: 100, headLrScale: 0.09,
       exploreEpsilon: 0.11, residualDecay: 9e-4, maxStepsPerSec: 30, moveProbability: 0.4, caregiverPeriod: 700, seed: 12,
     }
-    const g = legacyGenome(settings, space)
+    const { genome: g, missing } = legacyGenome(settings, space)
     expect(Object.keys(g).sort()).toEqual(space.genes.map(x => x.name).sort())
     expect(g.entropyWeight).toBe(0.001)
     expect(g.lr).toBe(4.5e-4)
     expect(g.caregiverPeriod).toBe(700)
+    // Absent genes: centres as placeholders, and listed as not recorded.
     expect(g.gamma).toBe(0.9)
     expect(g.sleepInterval).toBe(250)
     expect(g.caregiverTau).toBe(0.05)
     expect(g.creditMode).toBe("off")
+    expect(missing).toEqual([...NEVER_RECORDED, "caregiverEpsilon", "caregiverStuckSteps", "caregiverTau", "caregiverThreshold"].sort())
     expect("moveProbability" in g).toBe(false)
     expect(checkGenome(space, g)).toMatch(/entropyWeight/)
     expect(() => legacyGenome({ lr: "x" }, space)).toThrow(RangeError)
   })
 })
 
+/** Genes no pre-05a log records: gamma (a constant then), sleepInterval, and the 13 reserved slots. */
+const NEVER_RECORDED = [
+  "gamma", "sleepInterval", "latentWeight", "ctrlWeight", "noveltyWeight", "targetTau", "gaeLambda", "replayBeta", "plasticAlpha",
+  "plasticEta", "lrClockSlope", "creditMode", "sleepSeqLen", "modulator", "ctrlGate",
+]
+const CAREGIVER_GENES = ["caregiverPeriod", "caregiverTau", "caregiverEpsilon", "caregiverThreshold", "caregiverStuckSteps"]
+
 describe("legacyGenome on real committed logs", () => {
   // Pre-05a lives store their caregiver settings flat inside `settings`, beside the learner's and maxStepsPerSec
   // (harness session.ts: settings = { ...learner, maxStepsPerSec, seed, ...caregiver.settings }); there is no other
-  // place. Checked over every committed data/runs file on 2026-10-23.
+  // place. Checked over every committed data/runs file on 2026-10-23. A gene absent from them is listed in `missing`,
+  // never given an invented value (decision 0022).
   const settingsOf = (path: string) =>
     (JSON.parse(readFileSync(new URL(`../../../data/runs/${path}`, import.meta.url), "utf8")) as { settings: Record<string, number> }).settings
   it("a life with a caregiver: every learner, caregiver and harness value is read from settings; seed is ignored", () => {
     const settings = settingsOf("lrn_dfd5c5085147992a/0.json")
-    const g = legacyGenome(settings, space)
+    const { genome: g, missing } = legacyGenome(settings, space)
     for (const k of ["lr", "entropyWeight", "curiosityWeight", "bufferSize", "replayPerSleep", "headLrScale", "exploreEpsilon",
-      "residualDecay", "maxStepsPerSec", "caregiverPeriod", "caregiverTau", "caregiverEpsilon", "caregiverThreshold", "caregiverStuckSteps"])
+      "residualDecay", "maxStepsPerSec", ...CAREGIVER_GENES])
       expect(g[k], k).toBe(settings[k])
     expect(g.lr).toBe(0.0005837009815593332)
     expect(g.bufferSize).toBe(3149)
     expect("seed" in g).toBe(false)
-    expect(g.gamma).toBe(0.9) // not logged before 05a; every such life learned at 0.9
-    expect(g.sleepInterval).toBe(250)
+    expect(missing).toEqual([...NEVER_RECORDED].sort())
     expect(decodeGenome(g, space).caregiver).toEqual({
       caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000,
     })
   })
-  it("an older life without caregiver keys gets the caregiver centres", () => {
+  it("a life without caregiver keys: the caregiver genes are missing, not assumed", () => {
     const settings = settingsOf("lrn_1787a3c93600cc87/3.json")
-    expect("caregiverPeriod" in settings).toBe(false)
-    const g = legacyGenome(settings, space)
+    const { genome: g, missing } = legacyGenome(settings, space)
     expect(g.lr).toBe(settings.lr)
-    expect(g.caregiverPeriod).toBe(500)
+    expect(g.exploreEpsilon).toBe(settings.exploreEpsilon)
+    expect(missing).toEqual([...NEVER_RECORDED, ...CAREGIVER_GENES].sort())
+  })
+  it("an older life without exploreEpsilon or residualDecay: both are missing, not mapped to off", () => {
+    const settings = settingsOf("lrn_37d6d3a11ccc3008/0.json")
+    const { genome: g, missing } = legacyGenome(settings, space)
+    expect(g.lr).toBe(0.001635194007625712)
+    expect(missing).toEqual([...NEVER_RECORDED, ...CAREGIVER_GENES, "exploreEpsilon", "residualDecay"].sort())
+    expect(g.exploreEpsilon).toBe(0.1) // the centre, as a placeholder only
   })
 })
 

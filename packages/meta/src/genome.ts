@@ -194,18 +194,24 @@ export function decodeGenome(g: Genome, space: GenomeSpace): Decoded {
   return { learner: out.learner, caregiver: out.caregiver, harness: { maxStepsPerSec: out.harness.maxStepsPerSec!, sleepInterval: out.harness.sleepInterval! } }
 }
 
+/** A pre-05a life's genome, and which genes its settings did not record (filled with centres as placeholders only). */
+export interface LegacyGenome { genome: Genome; missing: string[] }
+
 /**
- * The genome of a life born before 05a, from its flat settings: each gene its setting's value, absent genes at their
- * centre, other settings ignored. NOT bounds-checked (today's picker spans exceed the v1 ranges; plan gap 4).
- * RangeError when a present value has the wrong type.
+ * The genome of a life born before 05a, from its flat settings: each gene its setting's value, other settings ignored.
+ * A gene absent from the settings was not recorded: we do not know what that life ran with (an older learner may have
+ * lacked the mechanism, or had no caregiver), so it is listed in `missing` (sorted) and its centre stands in only as a
+ * placeholder, never as a claim (controller ruling, decision 0022). NOT bounds-checked (today's picker spans exceed the
+ * v1 ranges; plan gap 4). RangeError when a present value has the wrong type.
  */
-export function legacyGenome(settings: Record<string, GeneValue>, space: GenomeSpace): Genome {
-  const out: Genome = {}
+export function legacyGenome(settings: Record<string, GeneValue>, space: GenomeSpace): LegacyGenome {
+  const genome: Genome = {}
+  const missing: string[] = []
   for (const gene of space.genes) {
-    if (!Object.hasOwn(settings, gene.name)) { out[gene.name] = gene.centre; continue }
+    if (!Object.hasOwn(settings, gene.name)) { genome[gene.name] = gene.centre; missing.push(gene.name); continue }
     const v = settings[gene.name]
     if (gene.type === "categorical" ? typeof v !== "string" : !isNum(v)) return fail(`setting ${gene.name}: ${JSON.stringify(v)} has the wrong type`)
-    out[gene.name] = v!
+    genome[gene.name] = v!
   }
-  return out
+  return { genome, missing: missing.sort() }
 }

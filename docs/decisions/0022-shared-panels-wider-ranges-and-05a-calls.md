@@ -42,6 +42,10 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **Call:** the page asks for confirmation. Once confirmed, the life ends at its next clean sleep, as a short life ends at its budget checkup. Switching short lives off never ends a life: without the switch no forever life ends (0014, 0019).
 - **Cost if wrong:** one prompt.
 
+### Settings an older life did not record (controller ruling) [agent]
+
+- **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings. Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.
+
 ## Alternatives considered
 
 - **Keep today's spans.** The search would have almost nothing to explore.
