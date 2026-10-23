@@ -133,7 +133,7 @@ Chrisantha Fernando, Jakub Sygnowski, Simon Osindero, Jane Wang, Tom Schaul, Den
 - **Outer loop.** Two variants:
   - A generational GA with population 100, or NES with population 25, on sinusoid regression.
   - An asynchronous steady-state GA with population 500 on MuJoCo Cheetah.
-  
+
   One fitness evaluation is 10 episodes of 3,000 steps each (§3). No gradients flow to the genome, which is why it is "more general in that it does not require gradients to be backpropagated to the reference parameters or hyperparameters, and permits effectively any number of gradient updates in the inner loop." (abstract) It can also evolve discrete genes such as macro-actions (§1).
 - **Results.**
   - MAML is more data-efficient in simple cases (abstract).
