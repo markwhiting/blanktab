@@ -85,6 +85,9 @@ function evaluateCohort(groups: Record<string, LifeInput[]>, refs: References, c
   if (!search.budget || !sameBudget(search.budget, BUDGET)) {
     throw new Error(`${ID}@${VERSION} reads a budget of ${BUDGET.budgetCU} CU; the search evaluator ${searchId} reads another`)
   }
+  if (!(search.scoresRoles ?? ["search"]).includes("confirm")) {
+    throw new Error(`${ID}@${VERSION} scores confirmation lives; the search evaluator ${searchId} does not declare scoresRoles "confirm"`)
+  }
   const seen = new Set<string>()
   const arms = {} as Record<Arm, { lives: { life: LifeInput; c: Classified }[]; duplicates: number }>
   for (const arm of ARMS) {
@@ -146,16 +149,23 @@ function evaluateCohort(groups: Record<string, LifeInput[]>, refs: References, c
   const x = rows.flatMap((r, i) => (r.arm === "candidate" ? [a[i]!] : []))
   const y = rows.flatMap((r, i) => (r.arm === "centre" ? [a[i]!] : []))
   const unscored = Object.fromEntries(scored.filter(r => !r.out.eligible).map(r => [r.learnerId, r.out.reason ?? null]))
-  const mannWhitneyP = x.length > 0 && y.length > 0 ? mannWhitneyOneSided(x, y) : null
-  const better = mannWhitneyP !== null && mannWhitneyP <= ALPHA
+  const unscoredCount = Object.keys(unscored).length
+  const rankRows = { candidate: x.length, centre: y.length }
+  // Test 2 cannot run without rows on both sides: that is no result, never a failed confirmation.
+  const noRows = (["candidate", "centre"] as const).filter(arm => rankRows[arm] === 0)
+  if (noRows.length) return no(`no scored lives in ${noRows.join(", ")}`, { genomes, fisher, rankRows, unscored, unscoredCount })
+  const mannWhitneyP = mannWhitneyOneSided(x, y)
+  const better = mannWhitneyP <= ALPHA
 
   return {
     evaluator: ID, version: VERSION, eligible: true, score: behaviour && better ? 1 : 0,
     components: { behaviour: behaviour ? 1 : 0, better: better ? 1 : 0, mannWhitneyP },
-    diagnostics: { ...base, genomes, alpha: ALPHA, fisher, rankRows: { candidate: x.length, centre: y.length }, unscored, mannWhitneyP },
+    diagnostics: { ...base, genomes, alpha: ALPHA, fisher, rankRows, unscored, unscoredCount, mannWhitneyP },
   }
 }
 
 export const confirmFisher: Evaluator = Object.freeze({
+  // needs is empty: confirm-fisher reads no reference itself. It passes refs through to the pinned search evaluator,
+  // whose own needs (pinned too) make config load them; if they are absent, its lives are unscored and test 2 has no rows.
   id: ID, version: VERSION, kind: "cohort" as const, needs: [], budget: BUDGET, evaluateCohort,
 })

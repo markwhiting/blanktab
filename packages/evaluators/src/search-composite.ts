@@ -154,5 +154,5 @@ function targets(outs: EvalOutput[]): number[] {
 
 export const searchComposite: Evaluator = Object.freeze({
   id: ID, version: VERSION, kind: "life" as const, needs: Object.freeze(["newborn"]) as string[],
-  budget: BUDGET, evaluateLife, targets, rankAverage,
+  budget: BUDGET, evaluateLife, targets, rankAverage, scoresRoles: Object.freeze(["search", "confirm"] as const),
 })

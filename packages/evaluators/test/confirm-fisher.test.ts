@@ -78,6 +78,11 @@ describe("confirm-fisher@1 (spec §2.5)", () => {
     expect(() => confirmFisher.evaluateCohort!(design(), refs)).toThrow(/pinned search evaluator/)
     const otherBudget: Evaluator = { ...searchComposite, budget: { budgetCU: 4096, levels: [1024, 2048, 4096] } }
     expect(() => run(design(), { search: otherBudget })).toThrow(/budget/)
+    // A search evaluator that does not declare it can score confirmation lives is refused (absent reads as ["search"]).
+    expect(searchComposite.scoresRoles).toEqual(["search", "confirm"])
+    const noRoles: Evaluator = { ...searchComposite, scoresRoles: undefined }
+    expect(() => run(design(), { search: noRoles })).toThrow(/scoresRoles "confirm"/)
+    expect(() => run(design(), { search: { ...searchComposite, scoresRoles: ["search"] } })).toThrow(/scoresRoles "confirm"/)
   })
 
   it("a candidate that sustains M3 in 20/24 against 6/60 newborns and beats centre on a → 1; failed lives count as non-passes; abandoned excluded and counted; an abandonment ratio > 2× is flagged", () => {
@@ -102,6 +107,7 @@ describe("confirm-fisher@1 (spec §2.5)", () => {
     // Test 2 ranks the counted candidate and centre lives (failed ones as rows, ranked worst) through the search evaluator.
     expect(d.rankRows).toEqual({ candidate: 24, centre: 24 })
     expect(d.unscored).toEqual({})
+    expect((d as unknown as { unscoredCount: number }).unscoredCount).toBe(0)
     expect(d.mannWhitneyP).toBeLessThan(0.001)
     // Abandonment: candidate 4/28, centre 1/25, newborn 0/60: more than 2× apart, so flagged (the score stands).
     expect(d.abandonmentRates).toEqual({ candidate: 4 / 28, centre: 1 / 25, newborn: 0 })
@@ -146,6 +152,25 @@ describe("confirm-fisher@1 (spec §2.5)", () => {
     expect(searchComposite.evaluateLife!({ learnerId: life.learnerId, files: searchFiles }, refs)).toEqual(asConfirm)
     const searchLife = { learnerId: life.learnerId, files: searchFiles }
     expect(searchComposite.evaluateLife!(searchLife, refs, { role: "confirm" })).toMatchObject({ eligible: false, reason: "not a confirm life" })
+  })
+
+  it("test 2 without scored rows is no result, never a failed confirmation; unscored lives are reported", () => {
+    // No newborn reference: the search evaluator scores no life, so test 2 cannot run.
+    const out = confirmFisher.evaluateCohort!(design(), {}, ctx)
+    expect(out).toMatchObject({ eligible: false, reason: "no scored lives in candidate, centre", score: null })
+    const d = out.diagnostics as { unscored: Record<string, string>; unscoredCount: number; rankRows: object }
+    expect(d.unscoredCount).toBe(48)
+    expect(new Set(Object.values(d.unscored))).toEqual(new Set(["no newborn reference"]))
+    expect(d.rankRows).toEqual({ candidate: 0, centre: 0 })
+    // A counted candidate life the search evaluator cannot score (too few held-out points) is reported, and the rest rank.
+    const g = design()
+    const thin = complete("candidate", CANDIDATE, 3, 1)
+    thin.files = thin.files.map(f => (f.seq === 2 ? { ...f, curve: [] } : f))
+    g.candidate.push(thin)
+    const partial = run(g).diagnostics as { unscored: Record<string, string>; unscoredCount: number; rankRows: object }
+    expect(partial.unscored).toEqual({ [thin.learnerId]: "fewer than 3 held-out points in (1024, 2048]" })
+    expect(partial.unscoredCount).toBe(1)
+    expect(partial.rankRows).toEqual({ candidate: 24, centre: 24 })
   })
 
   it("obtains a_i through the pinned search evaluator it is given", () => {

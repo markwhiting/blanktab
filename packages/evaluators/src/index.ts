@@ -8,7 +8,7 @@ import { signalCheck } from "./signal-check"
 import type { CohortContext, Evaluator } from "./types"
 
 export type {
-  CohortContext, EvalBudget, EvalOutput, Evaluator, LifeInput, LifeOptions, MilestoneKey, NewbornReference, ReferenceParser, References,
+  CohortContext, EvalBudget, EvalOutput, Evaluator, LifeInput, LifeOptions, LifeRole, MilestoneKey, NewbornReference, ReferenceParser, References,
 } from "./types"
 export { GPU_WIDTHS_CLASS } from "./types"
 export { parseNewbornReference, REFERENCE_PARSERS } from "./reference"

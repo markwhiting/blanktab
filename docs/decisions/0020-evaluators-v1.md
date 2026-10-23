@@ -52,6 +52,12 @@ The meta-learner (0018) ranks genomes by a score, decides when to promote by a t
   - **Held-out points** with a zero baseline are skipped.
   - **Measures.** A measure that would make (x + κ) ≤ 0 gives q = −2. M1's diagnostic q uses κ = 0.08 (0.1 × its 0.8 threshold), and a null M1 stays null. M1 is not part of C.
   - **The GP targets** rank a_i through the exact rank sums rank(C) + rank(H). These are half-integers, so floating-point rounding cannot split a tie. `rankAverage` returns (rank(C) + rank(H) − 1)/(2n), which is (u_C + u_H)/2.
+- **Cohort tests score lives only through the pinned search evaluator** (controller ruling, Task 8 review). `evaluateCohort` takes a third argument, `CohortContext { search }`, filled by `cohortContext(config)` = `REGISTRY[config.search]`, and the search evaluator publishes `rankAverage`. Swapping the search evaluator is then a pin edit, with no change to `signal-check@1` or `confirm-fisher@1`. Each reports the search evaluator it used. `loadEvalConfig` checks each pin's kind: `search` is a life evaluator with `rankAverage` and `targets`, the other pins are cohort evaluators.
+- **Declared capability: `scoresRoles`** (controller ruling, Task 8 review).
+  - **The problem.** Confirmation lives have `meta.role = "confirm"`, which a search evaluator rejects by default ("not a search life").
+  - **The capability.** `Evaluator.scoresRoles` lists the roles `evaluateLife(life, refs, { role })` can score. When it is absent, it reads as `["search"]`.
+  - **What `search-composite@1` declares.** It declares `["search", "confirm"]`. With `{ role: "confirm" }` it scores a confirmation life by exactly the same rule ("not a confirm life" otherwise). Its default path is unchanged, so every existing output is byte-identical and it stays version 1.
+  - **The guard.** `confirm-fisher@1` throws when the pinned search evaluator does not declare `"confirm"`. A search evaluator that cannot score confirmation lives therefore fails loudly, and never yields a silently empty test 2.
 - **`newborn-baseline@1`** is spec §2.3, over the group `newborn`.
   - **Which lives count.** A life counts if its newborn file has genome schema 1, suite 1, GPU widths and checkups at exactly 512, 1,024 and 2,048. Duplicates and other lives are ignored, and the number ignored is reported.
   - **Medians and pass rates** are taken over all of the counted checkups, pooled across levels, with a null measure read as 0. The sustained pass rate is over lives (≥ 2 of 3 levels).

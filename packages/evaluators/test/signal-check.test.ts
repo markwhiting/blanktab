@@ -92,6 +92,10 @@ describe("signal-check@1 (spec §2.6, §4.6)", () => {
       ...Array.from({ length: 8 }, (_, i) => ({ life: life(6 + i, 0), label: 6 + i })),
     ]
     expect(run(grouped(mixed)).eligible).toBe(true)
+    // Every life rejected for one reason gives that reason, not a count shortfall.
+    const thirty = Array.from({ length: 30 }, (_, i) => ({ life: life(Math.floor(i / 3), i % 3), label: Math.floor(i / 3) }))
+    const noRef = signalCheck.evaluateCohort!(grouped(thirty), {}, ctx)
+    expect(noRef).toMatchObject({ eligible: false, reason: "no newborn reference", diagnostics: { n: 0, ineligible: 30, ineligibleReasons: { "no newborn reference": 30 } } })
   })
 
   it("only eligible, correctly filed, once-listed lives count; each is reported", () => {

@@ -40,7 +40,9 @@ export interface EvalBudget { budgetCU: number; levels: readonly number[] }
  * What a life evaluator scores a life as. By default a search evaluator scores search lives (its rows). A confirmation
  * test asks it to score its arms' confirmation lives by the same rule: `role: "confirm"` (agent's call, Task 8).
  */
-export interface LifeOptions { role?: "search" | "confirm" }
+export interface LifeOptions { role?: LifeRole }
+/** The roles of life a life evaluator can score (`Evaluator.scoresRoles`). */
+export type LifeRole = "search" | "confirm"
 
 /**
  * What a cohort evaluator is run with besides its groups: the pinned search evaluator (REGISTRY[config.search];
@@ -54,6 +56,11 @@ export interface Evaluator {
   needs: string[] // reference names it reads, e.g. ["newborn"]: the source of truth for what config loads
   budget?: EvalBudget // the CU budget and checkup levels it reads
   evaluateLife?(life: LifeInput, refs: References, opts?: LifeOptions): EvalOutput // kind "life"
+  /**
+   * The roles `evaluateLife` can score (opts.role); absent reads as ["search"]. A confirmation test refuses a search
+   * evaluator that does not declare "confirm" (decision 0020).
+   */
+  scoresRoles?: readonly LifeRole[]
   /** kind "cohort": a test over arms. The ones that score lives need `ctx` (they throw without it). */
   evaluateCohort?(groups: Record<string, LifeInput[]>, refs: References, ctx?: CohortContext): EvalOutput
   targets?(outs: EvalOutput[]): number[] // search only: the GP target transform (spec §2.4)

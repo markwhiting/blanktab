@@ -29,6 +29,7 @@ function evaluateCohort(groups: Record<string, LifeInput[]>, refs: References, c
   const searchId = `${search.id}@${search.version}`
   const seen = new Set<string>()
   let duplicates = 0, mislabelled = 0, ineligible = 0
+  const reasons: Record<string, number> = {} // why the search evaluator rejected lives, with counts
   const rows: { genome: string; learnerId: string; out: EvalOutput }[] = []
   for (const genome of Object.keys(groups).sort()) {
     const lives = [...groups[genome]!].sort((a, b) => (a.learnerId < b.learnerId ? -1 : a.learnerId > b.learnerId ? 1 : 0))
@@ -37,7 +38,12 @@ function evaluateCohort(groups: Record<string, LifeInput[]>, refs: References, c
       seen.add(life.learnerId)
       if (genomeOf(life) !== genome) { mislabelled++; continue }
       const out = search.evaluateLife(life, refs)
-      if (!out.eligible || typeof out.score !== "number") { ineligible++; continue }
+      if (!out.eligible || typeof out.score !== "number") {
+        ineligible++
+        const why = out.reason ?? "ineligible"
+        reasons[why] = (reasons[why] ?? 0) + 1
+        continue
+      }
       rows.push({ genome, learnerId: life.learnerId, out })
     }
   }
@@ -54,9 +60,12 @@ function evaluateCohort(groups: Record<string, LifeInput[]>, refs: References, c
   const n = rows.length, k = genomes.length
   const repeated = genomes.filter(g => byGenome.get(g)!.a.length >= MIN_REPEATS).length
   const learnerIds = Object.fromEntries(genomes.map(g => [g, byGenome.get(g)!.learnerIds]))
-  const base = { search: searchId, n, k, repeatedGenomes: repeated, duplicates, mislabelled, ineligible, learnerIds }
+  const base = { search: searchId, n, k, repeatedGenomes: repeated, duplicates, mislabelled, ineligible, ineligibleReasons: reasons, learnerIds }
   const no = (reason: string): EvalOutput =>
     ({ evaluator: ID, version: VERSION, eligible: false, reason, score: null, components: { H: null, p: null, icc: null }, diagnostics: base })
+  // Every life rejected for one reason (e.g. "no newborn reference"): say that, not a count shortfall.
+  const only = Object.keys(reasons)
+  if (n === 0 && only.length === 1) return no(only[0]!)
   if (repeated < MIN_GENOMES) return no(`fewer than ${MIN_GENOMES} genomes with ${MIN_REPEATS} or more lives`)
   if (n < MIN_LIVES) return no(`fewer than ${MIN_LIVES} lives`)
 

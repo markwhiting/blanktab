@@ -16,16 +16,16 @@ describe("stats (spec §2.5, §2.6)", () => {
     expect(() => midRanks([1, Number.NaN])).toThrow(/finite/)
   })
 
-  it("kruskalWallis on the textbook example (Hollander & Wolfe 6.1: H ≈ 6.4, p ≈ 0.04) to 1e-3", () => {
-    // Hollander & Wolfe Example 6.1 itself (mucociliary clearance half-times; normal, obstructive airway disease,
-    // asbestosis) has no ties and gives H = 0.771, p = 0.680, not the plan's "H ≈ 6.4, p ≈ 0.04". Both are checked here.
+  it("kruskalWallis on the textbook example (Hollander & Wolfe 6.1: H ≈ 0.771, p ≈ 0.68) and a tied example (H ≈ 6.403, p ≈ 0.0407) to 1e-3", () => {
+    // Hollander & Wolfe Example 6.1 (mucociliary clearance half-times; normal, obstructive airway disease, asbestosis)
+    // has no ties.
     // Hand calculation: pooled ranks 2.0→1 … 4.0→14; R = 36, 36, 33; H = 12/(14·15)·(36²/5 + 36²/4 + 33²/5) − 45
     // = (12/210)·801 − 45 = 27/35 = 0.771429; with df 2, p = e^(−H/2) = 0.679965.
     const hw = kruskalWallis([[2.9, 3.0, 2.5, 2.6, 3.2], [3.8, 2.7, 4.0, 2.4], [2.8, 3.4, 3.7, 2.2, 2.0]])
     expect(hw.df).toBe(2)
     expect(hw.H).toBeCloseTo(27 / 35, 12)
     expect(hw.p).toBeCloseTo(0.679965, 6)
-    // A tied example with H ≈ 6.4, p ≈ 0.04 (agent's data, hand calculation). Pooled sorted: 1 | 2 2 2 2 | 3 3 | 4 4 |
+    // A tied example (agent's data, hand calculation): H ≈ 6.403, p ≈ 0.0407. Pooled sorted: 1 | 2 2 2 2 | 3 3 | 4 4 |
     // 6 6 6 | 8 | 9 with mid-ranks 1, 3.5, 6.5, 8.5, 11, 13, 14. R = (3.5+3.5+8.5+11+11) = 37.5,
     // (1+3.5+3.5+6.5) = 14.5, (6.5+8.5+11+13+14) = 53. Uncorrected H = (12/210)·(37.5²/5 + 14.5²/4 + 53²/5) − 45 = 8649/1400.
     // Ties Σ(t³ − t) = 60 + 6 + 6 + 24 = 96, correction 1 − 96/2730 = 439/455, so H = 8649·455/(1400·439) = 6.403018;

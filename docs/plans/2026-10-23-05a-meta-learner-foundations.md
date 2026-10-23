@@ -580,7 +580,7 @@ The meta-learner (decision 0018) will treat every new tab as one experiment. Eac
 
 - [ ] **Step 1: Write the failing tests**
   - stats:
-    - `"kruskalWallis on the textbook example (Hollander & Wolfe 6.1: H ≈ 6.4, p ≈ 0.04) to 1e-3"`, checked against an independent hand calculation recorded in the test;
+    - `"kruskalWallis on the textbook example (Hollander & Wolfe 6.1: H ≈ 0.771, p ≈ 0.68) and a tied example (H ≈ 6.403, p ≈ 0.0407) to 1e-3"`, each checked against an independent hand calculation recorded in the test (corrected in Task 8: the earlier "H ≈ 6.4, p ≈ 0.04" was not H&W 6.1's figure);
     - `"icc1 = 0 for identical groups' means; → 1 for zero within-group variance"`;
     - `"fisherOneSided(3,0,0,3) = 0.05"`;
     - `"holm rejects in order"`;
