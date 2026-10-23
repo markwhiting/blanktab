@@ -100,6 +100,18 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
   - **The abandonment flag** is set when the highest abandonment rate across the three arms exceeds twice the lowest, so 0 against any positive rate is flagged. It does not change the score.
 - **Mann–Whitney** uses the normal approximation with the tie-corrected variance and a continuity correction of 0.5. When every value is tied, p = 1.
 
+### Summary scores, rescoring and the newborn reference (Task 9) [agent]
+
+- **Summary rows.** With the pinned config, each `summary.json` row carries `evals["<id@version>"] = { eligible, score, C, H }`, scored by the pinned search evaluator over all of the life's merged files. Without a reference every row is `eligible: false` with nulls. The page's parser keeps each well-formed entry and drops a malformed one, never the row. A well-formed entry has an id@version key, finite numbers or null, and a score exactly when eligible; at most 16 entries are kept.
+- **How a newborn runs** (`runNewborn`). Its learner is untrained, with seed 1,000 + k and panel 1 + (k mod 16). One `sleep()` on its empty buffer makes no update and scores the held-out set. It then has frozen checkups at the config's levels on that panel. It writes one final file at cu 0, born under the config's budget. A held-out score that is not finite is left out of the file, with a warning, rather than dropping the file.
+- **`NewbornConfig` gains `space`** (the genome space). The gate checks that a file's logged settings decode from its genome, and the caregiver genes and speed cap can only be found through the space. The genome is checked (bounds, sha, decodes to `settings`) before any learner is made (`BadMetaBlockError`).
+- **Newborns are run locally and collected, not merged through PRs** (controller ruling B). So `newborn-reference.ts` reads a collected directory (default `.local/newborns`, laid out like `data/runs`), not `data/runs`. The gate never sees these files, so the tool stands in for it:
+  - every file must pass `validateSessionPr` with main's genome space;
+  - every life must be one newborn file of the centre genome (`knowledge/genome.json`), with a seed 1,000 + k for a k in 0–63 that no other life has, and panel 1 + (k mod 16).
+  Any failure refuses the whole build. Missing k's and lives `newborn-baseline@1` ignores (e.g. CPU widths) are reported but do not stop it.
+- **The reference file gains an optional, strict `provenance`**: `{ codeSha, browser, machine, date }`. No evaluator reads it, so no evaluator version changes. The codeSha must be one for all counted lives ("dev" is allowed with a warning). The date is the UTC date of the latest file. The browser and machine class are given on the command line, because a log cannot say them. `--check` takes them from the committed file.
+- **`rescore.ts`** scores only life evaluators. Its references are the pinned ones; a candidate that needs another reference finds it absent.
+
 ## Alternatives considered
 
 - **Keep today's spans.** The search would have almost nothing to explore.

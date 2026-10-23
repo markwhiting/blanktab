@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import evaluationConfig from "../../../config/evaluation.json" with { type: "json" }
-import { BUDGET_CU, evalBudgetOf, lifeBudget, V1_BUDGET, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { BUDGET_CU, evalBudgetOf, lifeBudget, V1_BUDGET, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, MAX_SESSION_EVALS, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 import { PANELS } from "@blanktab/meta"
 
@@ -146,6 +146,34 @@ describe("parseSessionRow checkupScore", () => {
     }
     expect(parseSessionRow({ ...row, checkupScore: { level: 512, score: 6 } })!.checkupScore).toEqual({ level: 512, score: 6 })
     expect(parseSessionRow({ ...row, checkupScore: { level: 2048, score: 0 } })!.checkupScore).toEqual({ level: 2048, score: 0 })
+  })
+})
+
+describe("parseSessionRow evals (Plan 05a Task 9)", () => {
+  const row = { learnerId: ID, settings: {}, hostSig: { cores: 1, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 }, stepsTotal: 1, sessionsSeenAtBirth: 0, final: false }
+  it("parseSessionRow drops a malformed evals entry, not the row", () => {
+    const good = { eligible: true, score: 0.5, C: 0.2, H: 0.3 }
+    const ineligible = { eligible: false, score: null, C: null, H: null }
+    const r = parseSessionRow({
+      ...row,
+      evals: {
+        "search-composite@1": good, "search-composite@2": ineligible,
+        "no-version": good, "Bad@1": good, "x@0": good, // keys that are not id@version
+        "a@1": { ...good, score: "0.5" }, "b@1": { ...good, eligible: "yes" }, "c@1": { ...good, C: Number.NaN }, "d@1": 3,
+        "e@1": { ...good, score: null }, "f@1": { ...ineligible, score: 1 }, // score present exactly when eligible
+        "g@1": { eligible: true, score: 1, C: 1 }, // H missing
+      },
+    })
+    expect(r).not.toBeNull()
+    expect(r!.evals).toEqual({ "search-composite@1": good, "search-composite@2": ineligible })
+    // Extra keys inside an entry are not kept.
+    expect(parseSessionRow({ ...row, evals: { "s@1": { ...good, extra: 1 } } })!.evals).toEqual({ "s@1": good })
+    // Not an object, or nothing left: no evals at all (an old summary's row reads the same).
+    for (const bad of [null, 3, "x", [], {}, { "a@1": 1 }]) expect(parseSessionRow({ ...row, evals: bad })!.evals, JSON.stringify(bad)).toBeUndefined()
+    expect(parseSessionRow(row)!.evals).toBeUndefined()
+    // At most MAX_SESSION_EVALS entries, in key order.
+    const many = Object.fromEntries(Array.from({ length: MAX_SESSION_EVALS + 4 }, (_, i) => [`e${String(i).padStart(2, "0")}@1`, good]))
+    expect(Object.keys(parseSessionRow({ ...row, evals: many })!.evals!)).toEqual(Object.keys(many).sort().slice(0, MAX_SESSION_EVALS))
   })
 })
 

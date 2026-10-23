@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { buildSummary } from "../summary.ts"
+import { buildSummary, readLearnerLogs } from "../summary.ts"
+import { parseNewbornReference, searchComposite } from "@blanktab/evaluators"
+import { scoredLife } from "../../../packages/evaluators/test/fixtures/build.ts"
 import { parseSessionRow, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
 
 const A = "lrn_aaaaaaaaaaaaaaaa"
@@ -118,5 +120,26 @@ describe("buildSummary", () => {
     const row = buildSummary(dir).sessions[0]!
     expect(row.checkupScore).toEqual({ level: 3072, score: 6 })
     expect(parseSessionRow(JSON.parse(JSON.stringify(row)))!.checkupScore).toEqual({ level: 3072, score: 6 })
+  })
+})
+
+describe("buildSummary scores (Plan 05a Task 9)", () => {
+  const REF = parseNewbornReference(JSON.parse(readFileSync(new URL("../../../packages/evaluators/test/fixtures/reference.json", import.meta.url), "utf8")))!
+  it("rows carry evals['search-composite@1'] when scoring is given; absent otherwise (old summaries)", () => {
+    const S = "lrn_5555555555555555"
+    for (const f of scoredLife(S, { ms: { M2: 1, M3: 2, M4: 0.25, M5: 0.7, M6: 0 }, ratio: 0.9 })) put(f)
+    put(log(A, 0)) // a v1 life: not a search life
+    const scored = buildSummary(dir, { evaluator: searchComposite, refs: { newborn: REF } })
+    const rows = Object.fromEntries(scored.sessions.map(r => [r.learnerId, r]))
+    const want = searchComposite.evaluateLife!({ learnerId: S, files: readLearnerLogs(join(dir, S)) }, { newborn: REF })
+    expect(want.eligible).toBe(true)
+    expect(rows[S]!.evals).toEqual({ "search-composite@1": { eligible: true, score: want.score, C: want.components.C, H: want.components.H } })
+    expect(rows[A]!.evals).toEqual({ "search-composite@1": { eligible: false, score: null, C: null, H: null } })
+    // Without a reference every row says ineligible; the page keeps what the gate writes.
+    const noRef = buildSummary(dir, { evaluator: searchComposite, refs: {} })
+    for (const r of noRef.sessions) expect(r.evals).toEqual({ "search-composite@1": { eligible: false, score: null, C: null, H: null } })
+    for (const r of scored.sessions) expect(parseSessionRow(JSON.parse(JSON.stringify(r)))!.evals).toEqual(r.evals)
+    // Without scoring (as before 05a): no evals key at all.
+    for (const r of buildSummary(dir).sessions) expect("evals" in r).toBe(false)
   })
 })

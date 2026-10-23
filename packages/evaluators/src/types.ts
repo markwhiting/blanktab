@@ -21,7 +21,15 @@ export interface NewbornReference {
   learnerIds: string[]
   milestones: Record<MilestoneKey, { median: number; passRate: number; sustainedPassRate: number }>
   heldOutMedian: number
+  /**
+   * Where its lives were run (controller ruling B: newborns are run locally and collected, not merged through PRs):
+   * written by tools/eval/newborn-reference.ts, read by no evaluator. Optional: references without it still parse.
+   */
+  provenance?: NewbornProvenance
 }
+
+/** A newborn reference's provenance: the code its lives ran, the browser and machine class, and the date of the last. */
+export interface NewbornProvenance { codeSha: string; browser: string; machine: string; date: string }
 
 /**
  * The pinned reference files, by name. An evaluator declares the names it reads in `needs`; tools/eval/config.ts loads

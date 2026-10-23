@@ -8,10 +8,10 @@ import { signalCheck } from "./signal-check"
 import type { CohortContext, Evaluator } from "./types"
 
 export type {
-  CohortContext, EvalBudget, EvalOutput, Evaluator, LifeInput, LifeOptions, LifeRole, MilestoneKey, NewbornReference, ReferenceParser, References,
+  CohortContext, EvalBudget, EvalOutput, Evaluator, LifeInput, LifeOptions, LifeRole, MilestoneKey, NewbornProvenance, NewbornReference, ReferenceParser, References,
 } from "./types"
 export { GPU_WIDTHS_CLASS } from "./types"
-export { parseNewbornReference, REFERENCE_PARSERS } from "./reference"
+export { parseNewbornReference, PROVENANCE_TEXT_RE, REFERENCE_PARSERS } from "./reference"
 export { rankAverage, searchComposite } from "./search-composite"
 export { newbornBaseline } from "./newborn-baseline"
 export { signalCheck } from "./signal-check"

@@ -105,4 +105,16 @@ describe("newborn-baseline@1 (spec §2.3)", () => {
     ]
     for (const b of bad) expect(parseNewbornReference(b), JSON.stringify(b)).toBeNull()
   })
+
+  it("Task 9: an optional provenance (codeSha, browser, machine, date) is kept when well formed; a malformed one rejects the file", () => {
+    const good = (newbornBaseline.evaluateCohort!({ newborn: cohort() }, {}).diagnostics as { reference: Record<string, unknown> }).reference
+    const provenance = { codeSha: "a".repeat(40), browser: "Chrome 141", machine: "Apple M2 laptop", date: "2026-10-23" }
+    expect(parseNewbornReference({ ...good, provenance })).toEqual({ ...good, provenance })
+    expect(parseNewbornReference({ ...good, provenance: { ...provenance, codeSha: "dev" } })).not.toBeNull()
+    for (const p of [
+      null, "x", {}, { ...provenance, extra: 1 }, { ...provenance, codeSha: "A".repeat(40) }, { ...provenance, browser: "" },
+      { ...provenance, machine: "x".repeat(121) }, { ...provenance, browser: "tab\there" }, { ...provenance, date: "2026-13-01" },
+      { ...provenance, date: "2026-10-23T00:00:00.000Z" }, { codeSha: provenance.codeSha, browser: "b", machine: "m" },
+    ]) expect(parseNewbornReference({ ...good, provenance: p }), JSON.stringify(p)).toBeNull()
+  })
 })

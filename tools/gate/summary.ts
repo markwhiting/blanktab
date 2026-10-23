@@ -1,7 +1,8 @@
 // Builds the shared summary the next tab reads: one row per learner, from its highest-seq log file.
 import { readdirSync, readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
-import { parseLogFile, LEARNER_ID_RE, type LogFile, type SessionRow, type Summary } from "@blanktab/harness/log"
+import { parseLogFile, LEARNER_ID_RE, type LogFile, type SessionEval, type SessionRow, type Summary } from "@blanktab/harness/log"
+import type { Evaluator, References } from "@blanktab/evaluators"
 
 export type { SessionRow, Summary }
 
@@ -66,7 +67,25 @@ export function latestCheckup(logs: LogFile[]): { level: number; score: number }
   return null
 }
 
-export function buildSummary(runsDir: string): Summary {
+/** What the summary scores each life with: the pinned search evaluator and the pinned references (summary-cli.ts). */
+export interface SummaryScoring { evaluator: Evaluator; refs: References }
+
+/** `life` scored by `s.evaluator`, keyed by its id@version (spec §2.2: every score carries its evaluator). */
+function evalsOf(learnerId: string, files: LogFile[], s: SummaryScoring): Record<string, SessionEval> {
+  const e = s.evaluator
+  if (e.kind !== "life" || !e.evaluateLife) throw new Error(`${e.id}@${e.version} is not a life evaluator: it scores no single life`)
+  const out = e.evaluateLife({ learnerId, files }, s.refs)
+  const num = (v: number | null | undefined) => (typeof v === "number" && Number.isFinite(v) ? v : null)
+  const score = out.eligible ? num(out.score) : null
+  return { [`${out.evaluator}@${out.version}`]: { eligible: out.eligible && score !== null, score, C: num(out.components.C), H: num(out.components.H) } }
+}
+
+/**
+ * One row per learner, from its highest-seq file. With `scoring`, each row also carries `evals`: the life (all its
+ * files) scored by the pinned search evaluator, keyed by id@version; without a reference its rows say not eligible.
+ * Without `scoring` there is no `evals` key (summaries as before 05a).
+ */
+export function buildSummary(runsDir: string, scoring?: SummaryScoring): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
     for (const id of readdirSync(runsDir).sort()) {
@@ -82,6 +101,7 @@ export function buildSummary(runsDir: string): Summary {
         lossRatio: lossRatio(logs),
         heldOutRatio: heldOutRatio(logs),
         checkupScore: latestCheckup(logs),
+        ...(scoring ? { evals: evalsOf(id, logs, scoring) } : {}),
       })
     }
   }

@@ -257,7 +257,19 @@ export interface SessionRow {
   heldOutRatio?: number | null
   /** The latest checkup: its level and how many milestones it passed, or null without one. Absent in older summaries. */
   checkupScore?: { level: number; score: number } | null
+  /**
+   * The life's scores, keyed by the evaluator's id@version (spec §2.2: every score carries its evaluator), e.g.
+   * evals["search-composite@1"]. score, C and H are null when not eligible. Absent in summaries built before it existed.
+   */
+  evals?: Record<string, SessionEval>
 }
+
+/** One evaluator's score of a life in the summary (spec §2.2). */
+export interface SessionEval { eligible: boolean; score: number | null; C: number | null; H: number | null }
+/** An evaluator's registry key: id@version (as in @blanktab/evaluators REGISTRY and config/evaluation.json). */
+export const EVALUATOR_KEY_RE = /^[a-z][a-z0-9-]*@[1-9][0-9]*$/
+/** At most this many evals entries per summary row (the page keeps the first ones, in key order). */
+export const MAX_SESSION_EVALS = 16
 
 /** knowledge/summary.json, what the next tab reads. */
 export interface Summary { schemaVersion: 1; sessions: SessionRow[] }
@@ -282,7 +294,8 @@ export function parseSessionRow(v: unknown): SessionRow | null {
   if (!isObj(v) || typeof v.learnerId !== "string" || !LEARNER_ID_RE.test(v.learnerId)) return null
   if (!isObj(v.settings) || !isObj(v.hostSig) || !isNum(v.hostSig.cores) || typeof v.hostSig.webgpu !== "boolean") return null
   if (!isNum(v.stepsTotal) || !isNum(v.sessionsSeenAtBirth) || typeof v.final !== "boolean") return null
-  const { lastWrittenAt, cu, lossRatio, heldOutRatio, checkupScore, ...rest } = v
+  const { lastWrittenAt, cu, lossRatio, heldOutRatio, checkupScore, evals, ...rest } = v
+  const kept = parseEvals(evals)
   return {
     ...(rest as unknown as SessionRow),
     ...(isIso(lastWrittenAt) ? { lastWrittenAt } : {}),
@@ -294,7 +307,29 @@ export function parseSessionRow(v: unknown): SessionRow | null {
     checkupScore: isObj(checkupScore) && isNonNegInt(checkupScore.level) && isLogLevel(checkupScore.level)
       && isNonNegInt(checkupScore.score) && checkupScore.score <= MAX_SUITE_SIZE
       ? { level: checkupScore.level, score: checkupScore.score } : null,
+    ...(kept ? { evals: kept } : {}),
   }
+}
+
+const isNumOrNull = (v: unknown): v is number | null => v === null || isNum(v)
+/**
+ * A row's evals as the page keeps them: each well-formed entry (an id@version key; eligible a boolean; score, C and H
+ * finite numbers or null, score a number exactly when eligible), at most MAX_SESSION_EVALS in key order. A malformed
+ * entry is dropped, never the row; undefined when no entry is left or `v` is not an object.
+ */
+function parseEvals(v: unknown): Record<string, SessionEval> | undefined {
+  if (!isObj(v)) return undefined
+  const out: Record<string, SessionEval> = {}
+  let n = 0
+  for (const k of Object.keys(v).sort()) {
+    if (n >= MAX_SESSION_EVALS) break
+    const e = v[k]
+    if (!EVALUATOR_KEY_RE.test(k) || !isObj(e) || typeof e.eligible !== "boolean") continue
+    if (!(isNumOrNull(e.score) && isNumOrNull(e.C) && isNumOrNull(e.H)) || e.eligible !== (e.score !== null)) continue
+    out[k] = { eligible: e.eligible, score: e.score, C: e.C, H: e.H }
+    n++
+  }
+  return n > 0 ? out : undefined
 }
 
 const MAX_SETTING_STRING = 200
