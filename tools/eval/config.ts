@@ -15,11 +15,6 @@ export interface EvalConfig {
 export interface EvalRegistry { evaluators: Readonly<Record<string, Evaluator>>; parsers: Readonly<Record<string, ReferenceParser>> }
 const DEFAULT_REGISTRY: EvalRegistry = { evaluators: REGISTRY, parsers: REFERENCE_PARSERS }
 
-/**
- * Pins whose evaluators are not registered yet: Plan 05a Task 8 registers them and must then empty this list
- * (tools/eval/config.test.ts fails while a listed pin is registered). Any other unregistered pin fails config load.
- */
-export const PENDING_PINS: readonly string[] = ["signal-check@1", "confirm-fisher@1"]
 
 export const EVAL_CONFIG_PATH = "config/evaluation.json"
 const ID_AT_VERSION_RE = /^[a-z][a-z0-9-]*@[1-9][0-9]*$/
@@ -30,7 +25,7 @@ const KEYS = ["schemaVersion", ...PIN_KEYS, "budgetCU", "levels", "references", 
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 
-/** The registered evaluators among the config's pins (pending ones are skipped). */
+/** The evaluators the config pins. */
 function pinnedEvaluators(c: Pick<EvalConfig, typeof PIN_KEYS[number]>, reg: EvalRegistry): Evaluator[] {
   return PIN_KEYS.flatMap(k => (Object.hasOwn(reg.evaluators, c[k]) ? [reg.evaluators[c[k]]!] : []))
 }
@@ -51,7 +46,11 @@ export function loadEvalConfig(root: string, reg: EvalRegistry = DEFAULT_REGISTR
   for (const k of PIN_KEYS) {
     const pin = v[k]
     if (typeof pin !== "string" || !ID_AT_VERSION_RE.test(pin)) fail(`${k} must be an id@version`)
-    if (!Object.hasOwn(reg.evaluators, pin as string) && !PENDING_PINS.includes(pin as string)) fail(`${k}: unknown evaluator ${JSON.stringify(pin)}`)
+    if (!Object.hasOwn(reg.evaluators, pin as string)) fail(`${k}: unknown evaluator ${JSON.stringify(pin)}`)
+    // Each pin's evaluator fits its role: the search one scores and ranks lives; the others are cohort tests.
+    const e = reg.evaluators[pin as string]!
+    const fits = k === "search" ? e.kind === "life" && !!e.evaluateLife && !!e.rankAverage && !!e.targets : e.kind === "cohort" && !!e.evaluateCohort
+    if (!fits) fail(`${k}: ${pin as string} is not a ${k === "search" ? "life evaluator with rankAverage and targets" : "cohort evaluator"}`)
   }
   if (!(Number.isInteger(v.budgetCU) && (v.budgetCU as number) > 0)) fail("budgetCU must be a positive integer")
   const lv = v.levels

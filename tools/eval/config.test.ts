@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url"
 import { BUDGET_CU, FILTER_LEVELS, NEWBORN_LEVELS } from "@blanktab/harness/log"
 import { GPU_WIDTHS } from "@blanktab/learner"
 import { GPU_WIDTHS_CLASS, REFERENCE_PARSERS, REGISTRY, parseNewbornReference, searchComposite, type Evaluator } from "@blanktab/evaluators"
-import { PENDING_PINS, loadEvalConfig, loadReferences, neededReferences } from "./config"
+import { loadEvalConfig, loadReferences, neededReferences } from "./config"
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url))
 const config = loadEvalConfig(ROOT)
-/** The registered evaluators the config pins (Task 8's pending pins are not registered yet). */
-const pinned = [config.search, config.confirm, config.signal, config.baseline].flatMap(p => (REGISTRY[p] ? [REGISTRY[p]] : []))
+/** The evaluators the config pins (every one is registered: loadEvalConfig checks). */
+const pinned = [config.search, config.confirm, config.signal, config.baseline].map(p => REGISTRY[p]!)
 
 describe("config/evaluation.json (spec §2.2)", () => {
   it("is spec §2.2 verbatim, with this plan's decision", () => {
@@ -26,15 +26,14 @@ describe("config/evaluation.json (spec §2.2)", () => {
   })
 
   it("every pinned id@version is in REGISTRY", () => {
-    for (const pin of [config.search, config.confirm, config.signal, config.baseline]) {
-      // A pending pin must not be registered yet: registering one fails here until it leaves PENDING_PINS.
-      if (PENDING_PINS.includes(pin)) expect(REGISTRY[pin], `${pin} is registered: remove it from PENDING_PINS`).toBeUndefined()
-      else expect(REGISTRY[pin], pin).toBeDefined()
-    }
+    for (const pin of [config.search, config.confirm, config.signal, config.baseline]) expect(REGISTRY[pin], pin).toBeDefined()
     // Each registry entry's key is its own id@version, and its kind fits its role.
     for (const [key, e] of Object.entries(REGISTRY)) expect(`${e.id}@${e.version}`).toBe(key)
     expect(REGISTRY[config.search]!.kind).toBe("life")
     expect(REGISTRY[config.baseline]!.kind).toBe("cohort")
+    expect(REGISTRY[config.confirm]!.kind).toBe("cohort")
+    expect(REGISTRY[config.signal]!.kind).toBe("cohort")
+    expect(REGISTRY[config.search]!.rankAverage).toBeDefined()
   })
 
   it("budgetCU equals BUDGET_CU and levels equal FILTER_LEVELS", () => {
@@ -97,6 +96,7 @@ describe("config/evaluation.json (spec §2.2)", () => {
       { ...good, references: { newborn: "config/references/../../x.json" } }, { ...good, budgetCU: -1 },
       { ...good, references: {} }, { ...good, references: { ...good.references, spare: "config/references/spare.json" } },
       { ...good, search: "search-composite@7" },
+      { ...good, search: "newborn-baseline@1" }, { ...good, confirm: "search-composite@1" }, { ...good, signal: "signal-check@2" },
       { ...good, budgetCU: 3072, levels: [1024, 3072] }, // the pinned evaluators read 2,048 at 512, 1,024, 2,048
     ]) {
       write(bad)

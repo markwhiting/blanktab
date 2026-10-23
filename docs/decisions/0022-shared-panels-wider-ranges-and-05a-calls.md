@@ -84,6 +84,20 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings whose value is genuinely unknown (for example sleepInterval, the caregiver genes, and exploreEpsilon or residualDecay on older lives). Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.
 - **Known by construction, filled and not listed:** gamma, at 0.9 (the constant before 05a, not the gene's centre), and the reserved `implemented: false` slots, at their centre (by 0021, the code without the mechanism).
 
+### signal-check@1 and confirm-fisher@1 (Task 8) [agent]
+
+- **Both score lives only through the pinned search evaluator.** `evaluateCohort` takes a third argument, `CohortContext { search }`, which the caller fills with `cohortContext(config)`, that is `REGISTRY[config.search]`. The search evaluator publishes `rankAverage` on the interface. So swapping the search evaluator is a pin edit, with no change to either cohort test. Both report the search evaluator they used (`diagnostics.search`). `loadEvalConfig` now also checks each pin's kind: `search` must be a life evaluator with `rankAverage` and `targets`, and the other three must be cohort evaluators.
+- **The search evaluator scores confirmation lives when asked.** Confirmation lives have `meta.role = "confirm"`, which `search-composite@1` reads as "not a search life". `evaluateLife` takes `{ role: "confirm" }` to score such a life by the same rule (and "not a confirm life" otherwise). The default is unchanged, so every existing output is byte-identical and the version stays 1. This is an additive option, not a change to what version 1 computes for its rows; a reviewer may prefer `search-composite@2` instead.
+- **signal-check@1.** Lives are counted once (the first by sorted genome, then learnerId), and only under the genome their meta carries. The duplicates, the mislabelled lives and the ones the search evaluator rejects are reported. Kruskal–Wallis and the ICC run over every genome with at least one eligible life. Signal requires p < 0.05/3 (strictly) and ICC ≥ 0.1.
+- **ICC(1).** A negative estimate reads as 0, so groups with identical means give 0.
+- **confirm-fisher@1.**
+  - **Which lives count.** A life counts in its arm only if every file up to its budget checkup has a meta block of role `confirm`, that arm, one confirmation id, one genome, genome schema 1, inheritance `none`, this version's budget, GPU widths and suite-1 checkups. Other lives are ignored and counted.
+  - **The life's end.** A life with its budget checkup is complete. One whose last file is final with `end: "failed"` is failed, which counts as a non-pass. Any other final life is abandoned, excluded and counted. A life still running is pending, excluded and counted.
+  - **Ineligible results.** The result is ineligible when an arm has no counted lives, when lives of more than one confirmation are mixed, when an arm mixes genomes, when the newborns are not of the candidate genome, or when the candidate is the centre.
+  - **The two tests.** Holm and Mann–Whitney reject at p ≤ 0.05. Test 2 compares the candidate and centre lives that the search evaluator scores as eligible; failed lives are rows, ranked worst.
+  - **The abandonment flag** is set when the highest abandonment rate across the three arms exceeds twice the lowest, so 0 against any positive rate is flagged. It does not change the score.
+- **Mann–Whitney** uses the normal approximation with the tie-corrected variance and a continuity correction of 0.5. When every value is tied, p = 1.
+
 ## Alternatives considered
 
 - **Keep today's spans.** The search would have almost nothing to explore.

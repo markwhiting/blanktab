@@ -63,3 +63,37 @@ export function typicalLife(learnerId: string, over: { meta?: MetaBlock; widths?
     f({ seq: 3, cu: 3072, curve: [point(3000, 0.9)], checkups: [checkup(2048, ms)] }),
   ]
 }
+
+/** A confirmation life's meta block (spec §4.5): role confirm, its confirmation and arm, a seed from its block, no panel. */
+export const confirmMeta = (arm: "candidate" | "centre" | "newborn", seed: number, over: Partial<MetaBlock> = {}): MetaBlock =>
+  meta({ role: "confirm", method: "confirm", evalPanel: null, evalSeed: 10_000 + seed, confirmation: { id: 0, arm }, ...over })
+
+export interface ScoredLifeSpec {
+  /** Measures at every level. */
+  ms: Partial<Record<Mid, number | null>>
+  /** Held-out ratio at the three points in (1024, 2048]. */
+  ratio: number
+  /** Milestones passed, per level 512, 1024, 2048. */
+  passed?: [Mid[], Mid[], Mid[]]
+  meta?: MetaBlock
+}
+
+/** An eligible life with the same measures at 512, 1024 and 2048 (the 2048 checkup in the next file) and a held-out ratio. */
+export function scoredLife(learnerId: string, s: ScoredLifeSpec): LogFileV2[] {
+  const p = s.passed ?? [[], [], []]
+  const f = (x: Omit<FileSpec, "learnerId">) => file({ learnerId, ...(s.meta ? { meta: s.meta } : {}), ...x })
+  return [
+    f({ seq: 0, cu: 512, curve: [point(512, 1)], checkups: [checkup(512, s.ms, p[0])] }),
+    f({ seq: 1, cu: 1024, curve: [point(1024, 1)], checkups: [checkup(1024, s.ms, p[1])] }),
+    f({ seq: 2, cu: 2048, curve: [point(1200, s.ratio), point(1600, s.ratio), point(2048, s.ratio)] }),
+    f({ seq: 3, cu: 2100, curve: [point(2100, s.ratio)], checkups: [checkup(2048, s.ms, p[2])] }),
+  ]
+}
+
+/** A life that ended before its budget checkup: `end` "failed" or "orphan" (abandoned), at cu 1300. */
+export function endedLife(learnerId: string, end: "failed" | "orphan", m: MetaBlock): LogFileV2[] {
+  return [
+    file({ learnerId, seq: 0, cu: 512, meta: m, curve: [point(512, 1)], checkups: [checkup(512, {})] }),
+    file({ learnerId, seq: 1, cu: 1300, final: true, meta: { ...m, end }, curve: [point(1300, 1)] }),
+  ]
+}

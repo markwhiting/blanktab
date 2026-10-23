@@ -1,6 +1,6 @@
 // Shared reading of a life's merged files: which files an evaluation budget covers, and small order-free statistics.
 import type { LogFile, LogFileV2 } from "@blanktab/harness/log"
-import { GPU_WIDTHS_CLASS } from "./types"
+import { GPU_WIDTHS_CLASS, type CohortContext, type Evaluator } from "./types"
 
 export const isV2 = (f: LogFile): f is LogFileV2 => f.schemaVersion === 2
 
@@ -36,3 +36,15 @@ export function median(xs: readonly number[]): number | null {
 
 /** `v` clipped to [−bound, bound] (±Infinity clip to the bound). */
 export const clip = (v: number, bound: number): number => (v > bound ? bound : v < -bound ? -bound : v)
+
+/** A search evaluator as a cohort test uses it: a life evaluator that scores lives and ranks them. */
+export type SearchEvaluator = Evaluator & Required<Pick<Evaluator, "evaluateLife" | "rankAverage">>
+
+/** The pinned search evaluator from `ctx`, checked to have what a cohort test needs. */
+export function searchOf(ctx: CohortContext | undefined, who: string): SearchEvaluator {
+  const s = ctx?.search
+  if (!s || s.kind !== "life" || !s.evaluateLife || !s.rankAverage) {
+    throw new Error(`${who} needs the pinned search evaluator (a life evaluator with rankAverage) in its context: cohortContext(config)`)
+  }
+  return s as SearchEvaluator
+}

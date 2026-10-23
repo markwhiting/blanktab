@@ -3,7 +3,8 @@
 import { dlog, normInv } from "@blanktab/detmath"
 import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
 import { budgetWindow, clip, isGpuWidths, isV2, median } from "./life"
-import type { EvalOutput, Evaluator, LifeInput, MilestoneKey, References } from "./types"
+import { midRanks } from "./stats"
+import type { EvalOutput, Evaluator, LifeInput, LifeOptions, MilestoneKey, References } from "./types"
 
 /** This version's own budget and levels, published as `searchComposite.budget` (config/evaluation.json must agree). */
 const SEARCH_BUDGET_CU = 2048
@@ -41,11 +42,16 @@ function q(x: number, newbornMedian: number, kappa: number): number {
   return r > 0 ? clip(dlog(r), Q_BOUND) : -Q_BOUND
 }
 
-function evaluateLife(life: LifeInput, refs: References): EvalOutput {
+/**
+ * The life's score. By default only a search life is scored ("not a search life" otherwise); with `opts.role`
+ * "confirm", only a confirmation life is, by the same rule ("not a confirm life" otherwise), for the confirmation test.
+ */
+function evaluateLife(life: LifeInput, refs: References, opts: LifeOptions = {}): EvalOutput {
+  const role = opts.role ?? "search"
   const window = budgetWindow(life.files, SEARCH_BUDGET_CU)
   const metas = window.flatMap(f => (isV2(f) && f.meta ? [f.meta] : []))
-  if (metas.length === 0 || !metas.every(m => m.role === "search" && m.genomeSchema === 1 && m.inheritance.filters === "none")) {
-    return ineligible("not a search life")
+  if (metas.length === 0 || !metas.every(m => m.role === role && m.genomeSchema === 1 && m.inheritance.filters === "none")) {
+    return ineligible(`not a ${role} life`)
   }
   if (metas.length !== window.length) return ineligible("no meta block before the checkup")
   const files = window as LogFileV2[] // every file has a meta block, so every file is v2
@@ -114,21 +120,6 @@ function evaluateLife(life: LifeInput, refs: References): EvalOutput {
   })
 }
 
-/** 1-based mid-ranks: tied values share the mean of their positions. Values must be finite. */
-function midRanks(xs: readonly number[]): number[] {
-  if (!xs.every(Number.isFinite)) throw new Error("midRanks needs finite values")
-  const order = xs.map((_, i) => i).sort((a, b) => xs[a]! - xs[b]! || a - b)
-  const ranks = new Array<number>(xs.length)
-  for (let i = 0; i < order.length;) {
-    let j = i
-    while (j + 1 < order.length && xs[order[j + 1]!] === xs[order[i]!]) j++
-    const r = (i + j + 2) / 2
-    for (let k = i; k <= j; k++) ranks[order[k]!] = r
-    i = j + 1
-  }
-  return ranks
-}
-
 /**
  * The rank sums rank(C) + rank(H) over the eligible outputs, in order. Mid-ranks are halves, so the sums are exact.
  * Every output must be this evaluator's at this version: rows never mix evaluator versions (decision 0020).
@@ -163,5 +154,5 @@ function targets(outs: EvalOutput[]): number[] {
 
 export const searchComposite: Evaluator = Object.freeze({
   id: ID, version: VERSION, kind: "life" as const, needs: Object.freeze(["newborn"]) as string[],
-  budget: BUDGET, evaluateLife, targets,
+  budget: BUDGET, evaluateLife, targets, rankAverage,
 })
