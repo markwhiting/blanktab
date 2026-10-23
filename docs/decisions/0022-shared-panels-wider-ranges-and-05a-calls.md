@@ -44,7 +44,8 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 
 ### Settings an older life did not record (controller ruling) [agent]
 
-- **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings. Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.
+- **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings whose value is genuinely unknown (for example sleepInterval, the caregiver genes, and exploreEpsilon or residualDecay on older lives). Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.
+- **Known by construction, filled and not listed:** gamma, at 0.9 (the constant before 05a, not the gene's centre), and the reserved `implemented: false` slots, at their centre (by 0021, the code without the mechanism).
 
 ## Alternatives considered
 

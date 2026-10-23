@@ -182,18 +182,19 @@ describe("legacyGenome", () => {
     expect(g.sleepInterval).toBe(250)
     expect(g.caregiverTau).toBe(0.05)
     expect(g.creditMode).toBe("off")
-    expect(missing).toEqual([...NEVER_RECORDED, "caregiverEpsilon", "caregiverStuckSteps", "caregiverTau", "caregiverThreshold"].sort())
+    expect(missing).toEqual(["caregiverEpsilon", "caregiverStuckSteps", "caregiverTau", "caregiverThreshold", "sleepInterval"])
+    for (const known of ["gamma", "creditMode", "latentWeight"]) expect(missing).not.toContain(known)
     expect("moveProbability" in g).toBe(false)
     expect(checkGenome(space, g)).toMatch(/entropyWeight/)
     expect(() => legacyGenome({ lr: "x" }, space)).toThrow(RangeError)
   })
 })
 
-/** Genes no pre-05a log records: gamma (a constant then), sleepInterval, and the 13 reserved slots. */
-const NEVER_RECORDED = [
-  "gamma", "sleepInterval", "latentWeight", "ctrlWeight", "noveltyWeight", "targetTau", "gaeLambda", "replayBeta", "plasticAlpha",
-  "plasticEta", "lrClockSlope", "creditMode", "sleepSeqLen", "modulator", "ctrlGate",
-]
+/**
+ * The genes no pre-05a log records whose value is genuinely unknown: sleepInterval (params.ts could override it).
+ * gamma (the constant 0.9 then) and the 13 reserved slots (centre = mechanism absent) are known by construction.
+ */
+const NEVER_RECORDED = ["sleepInterval"]
 const CAREGIVER_GENES = ["caregiverPeriod", "caregiverTau", "caregiverEpsilon", "caregiverThreshold", "caregiverStuckSteps"]
 
 describe("legacyGenome on real committed logs", () => {
@@ -212,7 +213,8 @@ describe("legacyGenome on real committed logs", () => {
     expect(g.lr).toBe(0.0005837009815593332)
     expect(g.bufferSize).toBe(3149)
     expect("seed" in g).toBe(false)
-    expect(missing).toEqual([...NEVER_RECORDED].sort())
+    expect(missing).toEqual(["sleepInterval"])
+    expect(g.gamma).toBe(0.9) // known by construction: the constant every pre-05a life learned with
     expect(decodeGenome(g, space).caregiver).toEqual({
       caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000,
     })
@@ -222,14 +224,26 @@ describe("legacyGenome on real committed logs", () => {
     const { genome: g, missing } = legacyGenome(settings, space)
     expect(g.lr).toBe(settings.lr)
     expect(g.exploreEpsilon).toBe(settings.exploreEpsilon)
-    expect(missing).toEqual([...NEVER_RECORDED, ...CAREGIVER_GENES].sort())
+    expect(missing).toEqual(["caregiverEpsilon", "caregiverPeriod", "caregiverStuckSteps", "caregiverTau", "caregiverThreshold", "sleepInterval"])
+    expect([...NEVER_RECORDED, ...CAREGIVER_GENES].sort()).toEqual(missing)
   })
   it("an older life without exploreEpsilon or residualDecay: both are missing, not mapped to off", () => {
     const settings = settingsOf("lrn_37d6d3a11ccc3008/0.json")
     const { genome: g, missing } = legacyGenome(settings, space)
     expect(g.lr).toBe(0.001635194007625712)
-    expect(missing).toEqual([...NEVER_RECORDED, ...CAREGIVER_GENES, "exploreEpsilon", "residualDecay"].sort())
+    expect(missing).toEqual([
+      "caregiverEpsilon", "caregiverPeriod", "caregiverStuckSteps", "caregiverTau", "caregiverThreshold", "exploreEpsilon",
+      "residualDecay", "sleepInterval",
+    ])
     expect(g.exploreEpsilon).toBe(0.1) // the centre, as a placeholder only
+  })
+  it("gamma is filled with the pre-05a constant 0.9, not the space's centre (a promotion may move the centre)", () => {
+    const moved = parseGenomeSpace(withGene("gamma", { centre: 0.95 }))
+    const { genome, missing } = legacyGenome({}, moved)
+    expect(genome.gamma).toBe(0.9)
+    expect(missing).not.toContain("gamma")
+    expect(missing).not.toContain("latentWeight")
+    expect(missing).toContain("lr")
   })
 })
 

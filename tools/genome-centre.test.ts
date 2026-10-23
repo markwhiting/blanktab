@@ -4,12 +4,12 @@
 import { describe, it, expect } from "vitest"
 import { readFileSync } from "node:fs"
 import {
-  DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, GAMMA_RANGE, HEAD_LR_SCALE_RANGE, LR_RANGE, RESIDUAL_DECAY_RANGE, clampSettings,
+  DEFAULT_SETTINGS, EXPLORE_EPSILON_RANGE, GAMMA, GAMMA_RANGE, HEAD_LR_SCALE_RANGE, LR_RANGE, RESIDUAL_DECAY_RANGE, clampSettings,
 } from "@blanktab/learner"
 import { CAREGIVER_DEFAULTS, CAREGIVER_RANGES, clampCaregiverSettings } from "@blanktab/harness/caregiver"
 import { SETTING_KEY_RE } from "@blanktab/harness/log"
 import { DEFAULT_MAX_STEPS_PER_SEC, DEFAULT_SLEEP_INTERVAL } from "@blanktab/harness/session"
-import { SETTING_KEY_RE as META_SETTING_KEY_RE, decodeGenome, parseCentre, parseGenomeSpace } from "@blanktab/meta"
+import { PRE_05A_CONSTANTS, SETTING_KEY_RE as META_SETTING_KEY_RE, decodeGenome, parseCentre, parseGenomeSpace } from "@blanktab/meta"
 
 const readJson = (name: string): unknown => JSON.parse(readFileSync(new URL(`../knowledge/${name}`, import.meta.url), "utf8"))
 const space = parseGenomeSpace(readJson("genome-space.json"))
@@ -43,6 +43,9 @@ describe("the genome centre is today's learner", () => {
     }
     expect(live.filter(g => g.target === "learner").map(g => g.name).sort()).toEqual(Object.keys(DEFAULT_SETTINGS).sort())
     expect(live.filter(g => g.target === "caregiver").map(g => g.name).sort()).toEqual(Object.keys(CAREGIVER_DEFAULTS).sort())
+  })
+  it("legacyGenome's pre-05a gamma is the learner's GAMMA, the value a state saved without gamma resumes with", () => {
+    expect(PRE_05A_CONSTANTS).toEqual({ gamma: GAMMA })
   })
   it("meta's copy of SETTING_KEY_RE equals the log's", () => {
     expect(META_SETTING_KEY_RE.source).toBe(SETTING_KEY_RE.source)
