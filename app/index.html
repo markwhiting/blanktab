@@ -179,7 +179,10 @@
 
     /* A laptop or desktop window: the page is the window, nothing scrolls but (if it must) the inside of a column or the
        HISTORY table. Left: the periphery as large as the height allows, and under it the fovea beside "Has it grown up?".
-       Right: the numbers, the token line and "Is it learning?", whose chart takes the height left. */
+       Right: the numbers, the token line and "Is it learning?", whose chart takes the height left.
+       No height here depends on how tall a line of text sets (fonts differ by platform): in each column one thing takes
+       what the text leaves (the periphery's box on the left, the chart on the right), so taller text shrinks it instead
+       of overflowing the column. */
     @media (min-width: 1100px) {
       #app { height: 100vh; height: 100dvh; min-height: 0; }
       main { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding-bottom: 4px; }
@@ -191,14 +194,21 @@
         /* The left column is as wide as a periphery whose height is what the lower row leaves (8:5), within limits. */
         grid-template-columns: minmax(560px, min(calc((100dvh - var(--chrome) - var(--lower) - 40px) * 1.6), 64%)) minmax(380px, 1fr);
       }
-      .stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; container-type: size; overflow-y: auto; }
+      .stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
       .side { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; }
-      #periphery { width: min(100cqw, (100cqh - var(--lower) - 40px) * 1.6); }
-      .lower { display: flex; gap: 16px; flex: 1 0 auto; min-height: var(--lower); }
+      /* The periphery's figure takes the height the lower row leaves; the canvas is as large as its box allows at 8:5. */
+      .periphery-fig { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+      .periphery-box { flex: 1 1 0; min-height: 0; container-type: size; }
+      #periphery { width: min(100cqw, 100cqh * 1.6); }
+      /* The lower row is at least --lower tall and grows with its text (the periphery's box gives way). */
+      .lower { display: flex; gap: 16px; flex: none; min-height: var(--lower); }
       .fovea-fig { flex: none; }
       #fovea { width: calc(var(--lower) - 26px); }
       .panel.grown, .panel.learning { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; }
-      #curve, #milestones { flex: 1 1 0; height: auto; min-height: 48px; }
+      /* The charts take the height their panel's text leaves. The milestones chart keeps a floor (the lower row grows
+         for it, and the periphery gives way); the curve has nothing else in its column to give way, so it has none. */
+      #curve, #milestones { flex: 1 1 0; height: auto; min-height: 0; }
+      #milestones { min-height: 48px; }
       .table-wrap { max-height: 100%; }
       th { position: sticky; top: 0; background: var(--surface-strong); }
       /* ABOUT: the prose at a reading width, its links beside it. */
@@ -237,7 +247,7 @@
       <div class="learner-grid">
         <div class="stage">
           <figure class="periphery-fig">
-            <canvas id="periphery" width="80" height="50"></canvas>
+            <div class="periphery-box"><canvas id="periphery" width="80" height="50"></canvas></div>
             <figcaption>Periphery · the whole screen, 80×50 pixels</figcaption>
           </figure>
           <div class="lower">

@@ -635,10 +635,22 @@ test("charts redraw on resize: the curve and milestones canvases' width attribut
 /** Standard laptop and desktop windows: the page is the window. */
 const DESKTOPS = [{ width: 1280, height: 800 }, { width: 1440, height: 900 }, { width: 1536, height: 864 }, { width: 1920, height: 1080 }]
 
-test("on a laptop or desktop window each tab fits it: no page scroll either way, and the panels fill it", async ({ page }) => {
+/**
+ * Every tab fits the window: no page scroll either way, the panels fill it, and on LEARNER neither column scrolls inside.
+ * `fontScale` makes every element's text that much larger (its computed font-size times the scale, set inline), standing
+ * in for a platform whose fonts set taller than this one's (e.g. Linux CI): the layout must absorb it, not overflow.
+ */
+async function expectFits(page: Page, sizes: { width: number; height: number }[], fontScale = 1) {
   await setup(page, { knowledge: "ok" })
   await page.goto(LONG)
   await expect.poll(() => curvePoints(page)).toBeGreaterThan(0)
+  if (fontScale !== 1) {
+    await page.evaluate(scale => {
+      const els = [...document.querySelectorAll<HTMLElement>("body, body *")]
+      const px = els.map(e => parseFloat(getComputedStyle(e).fontSize)) // read all first: children inherit computed px
+      els.forEach((e, i) => { e.style.fontSize = `${px[i]! * scale}px` })
+    }, fontScale)
+  }
   const fit = () => page.evaluate(() => {
     const se = document.scrollingElement!
     const panel = document.querySelector<HTMLElement>('[role="tabpanel"]:not([hidden])')!
@@ -650,12 +662,12 @@ test("on a laptop or desktop window each tab fits it: no page scroll either way,
       bottomGap: innerHeight - Math.max(...boxes.map(b => b.bottom)), innerOverflow: Math.max(0, ...inner),
     }
   })
-  for (const size of DESKTOPS) {
+  for (const size of sizes) {
     await page.setViewportSize(size)
     for (const name of ["Learner", "History", "About"]) {
       await page.getByRole("tab", { name }).click()
       const f = await fit()
-      const at = `${name} at ${size.width}x${size.height}`
+      const at = `${name} at ${size.width}x${size.height}${fontScale !== 1 ? ` with text x${fontScale}` : ""}`
       expect(f.vScroll, at).toBeLessThanOrEqual(0)
       expect(f.hScroll, at).toBeLessThanOrEqual(0)
       expect(f.widthShare, at).toBeGreaterThanOrEqual(name === "About" ? 0.5 : 0.85)
@@ -676,6 +688,14 @@ test("on a laptop or desktop window each tab fits it: no page scroll either way,
       expect(v.rendering).toBe("pixelated")
     }
   }
+}
+
+test("on a laptop or desktop window each tab fits it: no page scroll either way, and the panels fill it", async ({ page }) => {
+  await expectFits(page, DESKTOPS)
+})
+
+test("the fit absorbs taller text (fonts that set 8% larger, as on another platform): still no scroll, nothing overflows", async ({ page }) => {
+  await expectFits(page, [{ width: 1280, height: 800 }, { width: 1440, height: 900 }], 1.08)
 })
 
 test("on a phone the LEARNER tab is one scrolling column", async ({ page }) => {
