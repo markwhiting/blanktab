@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { BUDGET_CU, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, NEWBORN_LEVELS, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
+import { BUDGET_CU, ERROR_REASON_RE, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_EVAL_PANEL, MAX_GENOME_SCHEMA, NEWBORN_LEVELS, parseMeta, MAX_SUITE_SIZE, MILESTONE_IDS, MILESTONE_SUITE_VERSION, isLogLevel, levelAtOrBelow, logThresholds, nextCrossing, parseLogFile, parseSessionRow, type CheckupResult } from "../src/log"
 import { mkFile } from "./helpers"
 import { PANELS } from "@blanktab/meta"
 
@@ -174,6 +174,9 @@ describe("meta (spec §7.3; Plan 05a)", () => {
   const err = (r: ReturnType<typeof parseLogFile>) => (r.ok ? "" : r.error)
   /** base64 of n float32 (little-endian), as the tab writes it. */
   const floats = (n: number) => btoa(String.fromCharCode(...new Uint8Array(Float32Array.from({ length: n }, (_, i) => i / n).buffer)))
+  /** A confirmation life (spec §4.5): confirmation 3's seed block is [13,000, 13,999]. */
+  const confirmMeta = (over: Record<string, unknown> = {}) =>
+    searchMeta({ role: "confirm", method: "confirm", evalPanel: null, evalSeed: 13_004, confirmation: { id: 3, arm: "candidate" }, ...over })
   const legacyMeta = (over: Record<string, unknown> = {}) =>
     searchMeta({ role: "legacy", method: "legacy", drawSeed: null, posteriorSha: null, evalPanel: null, ...over })
   const newbornMeta = (over: Record<string, unknown> = {}) =>
@@ -203,6 +206,7 @@ describe("meta (spec §7.3; Plan 05a)", () => {
       ["method of another role", searchMeta({ method: "newborn" }), "meta.method"],
       ["genomeSchema 0", searchMeta({ genomeSchema: 0 }), "meta.genomeSchema"],
       ["genomeSchema fractional", searchMeta({ genomeSchema: 1.5 }), "meta.genomeSchema"],
+      ["genomeSchema above the cap", searchMeta({ genomeSchema: MAX_GENOME_SCHEMA + 1 }), "meta.genomeSchema"],
       ["genome not an object", searchMeta({ genome: [] }), "meta.genome must be an object"],
       ["genome 41 keys", searchMeta({ genome: Object.fromEntries(Array.from({ length: 41 }, (_, i) => [`g${i}`, i])) }), "meta.genome may have at most 40"],
       ["genome key", searchMeta({ genome: { "bad-key": 1 } }), "meta.genome key"],
@@ -216,11 +220,12 @@ describe("meta (spec §7.3; Plan 05a)", () => {
       ["drawSeed without posteriorSha", searchMeta({ posteriorSha: null }), "meta.drawSeed and meta.posteriorSha must be null together"],
       ["evalPanel 0", searchMeta({ evalPanel: 0 }), "meta.evalPanel"],
       ["evalPanel 17", searchMeta({ evalPanel: 17 }), "meta.evalPanel"],
-      ["evalSeed 9999", searchMeta({ evalSeed: 9999 }), "meta.evalSeed"],
-      ["evalSeed fractional", searchMeta({ evalSeed: 10_000.5 }), "meta.evalSeed"],
-      ["confirmation shape", searchMeta({ confirmation: { id: 1 } }), "meta.confirmation.arm"],
-      ["confirmation key", searchMeta({ confirmation: { id: 1, arm: "centre", x: 1 } }), 'unknown key "x" in meta.confirmation'],
-      ["confirmation id", searchMeta({ confirmation: { id: -1, arm: "centre" } }), "meta.confirmation.id"],
+      ["evalSeed 9999", confirmMeta({ evalSeed: 9999 }), "meta.evalSeed"],
+      ["evalSeed fractional", confirmMeta({ evalSeed: 13_000.5 }), "meta.evalSeed"],
+      ["confirmation shape", confirmMeta({ confirmation: { id: 1 } }), "meta.confirmation.arm"],
+      ["confirmation key", confirmMeta({ confirmation: { id: 3, arm: "centre", x: 1 } }), 'unknown key "x" in meta.confirmation'],
+      ["confirmation id", confirmMeta({ confirmation: { id: -1, arm: "centre" } }), "meta.confirmation.id"],
+      ["confirmation arm", confirmMeta({ confirmation: { id: 3, arm: "other" } }), "meta.confirmation.arm"],
       ["inheritance", searchMeta({ inheritance: { filters: "abc" } }), "meta.inheritance.filters"],
       ["inheritance key", searchMeta({ inheritance: { filters: "none", x: 1 } }), 'unknown key "x" in meta.inheritance'],
       ["missing on search", searchMeta({ missing: [] }), "meta.missing is only for role legacy"],
@@ -230,8 +235,36 @@ describe("meta (spec §7.3; Plan 05a)", () => {
     ]
     for (const [name, meta, want] of cases) expect(err(withMeta(meta)), name).toContain(want)
     // Optional fields stay optional; nulls are accepted where the spec allows them.
-    expect(err(withMeta(searchMeta({ drawSeed: null, posteriorSha: null, evalPanel: null, evalSeed: 10_000, confirmation: { id: 0, arm: "candidate" } })))).toBe("")
+    expect(err(withMeta(searchMeta({ drawSeed: null, posteriorSha: null, evalPanel: null })))).toBe("")
+    expect(err(withMeta(confirmMeta()))).toBe("")
     expect(err(withMeta(searchMeta({ method: "ts", drawSeed: 2 ** 32 - 1 })))).toBe("")
+  })
+
+  it("confirmation and evalSeed are set iff role confirm; evalSeed lies in its confirmation's block [10,000 + 1,000·id, 10,999 + 1,000·id] (spec §4.5)", () => {
+    for (const arm of ["candidate", "centre", "newborn"]) expect(err(withMeta(confirmMeta({ confirmation: { id: 3, arm } }))), arm).toBe("")
+    expect(err(withMeta(confirmMeta({ evalSeed: 13_000 })))).toBe("")
+    expect(err(withMeta(confirmMeta({ evalSeed: 13_999 })))).toBe("")
+    expect(err(withMeta(confirmMeta({ evalSeed: 10_000, confirmation: { id: 0, arm: "centre" } })))).toBe("")
+    expect(err(withMeta(confirmMeta({ evalSeed: 12_999 })))).toContain("meta.evalSeed must lie in confirmation 3's block [13000, 13999]")
+    expect(err(withMeta(confirmMeta({ evalSeed: 14_000 })))).toContain("meta.evalSeed must lie in confirmation 3's block")
+    // A confirm life needs both; it meets the confirmation's own variants, so it has no panel.
+    expect(err(withMeta(confirmMeta({ confirmation: null })))).toContain("meta.confirmation must be set for role confirm")
+    expect(err(withMeta(confirmMeta({ evalSeed: null })))).toContain("meta.evalSeed must be set for role confirm")
+    expect(err(withMeta(confirmMeta({ evalPanel: 3 })))).toContain("meta.evalPanel must be null for role confirm")
+    // Every other role has neither.
+    const other = [searchMeta(), legacyMeta()]
+    for (const m of other) {
+      expect(err(withMeta({ ...m, confirmation: { id: 3, arm: "centre" } })), String(m.role)).toContain("meta.confirmation is only for role confirm")
+      expect(err(withMeta({ ...m, evalSeed: 13_004 })), String(m.role)).toContain("meta.evalSeed is only for role confirm")
+    }
+    expect(err(parseLogFile(newbornFile(newbornMeta({ evalSeed: 13_004 }))))).toContain("meta.evalSeed is only for role confirm")
+    expect(err(parseLogFile(newbornFile(newbornMeta({ confirmation: { id: 3, arm: "newborn" } }))))).toContain("meta.confirmation is only for role confirm")
+  })
+
+  it("parseMeta's widths are optional: without them a block without filters parses and one with filters is rejected", () => {
+    const f = { cu: 512, stepsTotal: 1000, final: false }
+    expect(typeof parseMeta(searchMeta(), f)).toBe("object")
+    expect(parseMeta(searchMeta({ filters: floats(1664) }), f)).toContain("meta.filters needs the file's widths")
   })
 
   it("meta.missing (role legacy): sorted unique names of meta.genome; legacy accepts any genome values (bounds are the gate's, and not for legacy)", () => {

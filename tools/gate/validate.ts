@@ -140,7 +140,8 @@ const canonical = (v: unknown): string => JSON.stringify(v, (_k, x: unknown) =>
 /**
  * The gate's meta checks (spec §7.3; plan 05a Task 5), over the PR's files (`pr`) after the learner's files on main
  * (`previous`), both in seq order:
- * - bounds: a non-legacy genome lies in `space` when it is of the space's schema (another schema: structure only);
+ * - schema: never newer than `space`'s;
+ * - bounds: a non-legacy genome lies in `space` when it is of the space's schema (an older schema: structure only);
  *   legacy lives keep their pre-05a values (plan gap 4);
  * - integrity: genomeSha recomputes, for every role;
  * - constancy: every field but filters, heldOut and end equals the learner's first file with meta (absence allowed);
@@ -152,7 +153,10 @@ async function metaErrors(pr: { path: string; log: LogFile }[], previous: LogFil
   for (const { path, log } of pr) {
     const m = metaOf(log)
     if (!m) continue
-    if (m.role !== "legacy") {
+    // A tab is served from main, so its genome schema cannot be ahead of main's space (any role). An older one is
+    // checked for structure only: its bounds are not this space's.
+    if (space && m.genomeSchema > space.schemaVersion) errors.push(`${path}: meta.genomeSchema ${m.genomeSchema} is newer than main's genome space (${space.schemaVersion})`)
+    else if (m.role !== "legacy") {
       if (!space) errors.push(`${path}: no genome space to check meta.genome against`)
       else if (m.genomeSchema === space.schemaVersion) {
         const bad = checkGenome(space, m.genome)

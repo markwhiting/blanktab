@@ -401,8 +401,13 @@ describe("validateSessionPr: the meta block (spec §7.3; Plan 05a)", () => {
     expect(await msg([file(withMeta(0, await metaOf({}, { ...CENTRE, latentWeight: 1 })))])).toContain("latentWeight is not implemented")
     // Review Focus 1: a forever life born before 05a keeps its old values; bounds are not applied to legacy.
     expect((await errs([file(withMeta(0, await legacyOf(outOfBounds, ["caregiverPeriod"])))])).errors).toEqual([])
-    // Another genome schema: structure only (a newer or older space's bounds are not this one's).
-    expect((await errs([file(withMeta(0, await metaOf({}, outOfBounds, SPACE.schemaVersion + 1)))])).errors).toEqual([])
+    // A newer genome schema than main's: rejected (a tab is served from main, so it cannot be ahead), every role.
+    expect(await msg([file(withMeta(0, await metaOf({}, CENTRE, SPACE.schemaVersion + 1)))])).toContain(`meta.genomeSchema ${SPACE.schemaVersion + 1} is newer than main's genome space (${SPACE.schemaVersion})`)
+    const aheadLegacy = { ...(await legacyOf(outOfBounds)), genomeSchema: SPACE.schemaVersion + 1, genomeSha: await genomeSha(SPACE.schemaVersion + 1, outOfBounds) }
+    expect(await msg([file(withMeta(0, aheadLegacy))])).toContain("is newer than main's genome space")
+    // An older schema: structure only (an older space's bounds are not this one's). Main here is one schema ahead.
+    const newerMain = { ...SPACE, schemaVersion: SPACE.schemaVersion + 1 }
+    expect((await errs([file(withMeta(0, await metaOf({}, outOfBounds)))], [], { space: newerMain })).errors).toEqual([])
     // No space to check against: never accepted unchecked (legacy needs none).
     expect((await errs([file(withMeta(0, await metaOf()))], [], {})).errors.join("\n")).toContain("no genome space")
     expect((await errs([file(withMeta(0, await legacyOf(outOfBounds)))], [], {})).ok).toBe(true)

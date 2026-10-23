@@ -49,6 +49,8 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **A role and its method agree.** `search` has `centre`, `calibrate`, `uniform` or `ts`; `confirm`, `newborn` and `legacy` have the method of their own name.
 - **`drawSeed` and `posteriorSha` are null together**, as `birthDraw` makes them.
 - **`meta.missing`** (role `legacy` only): legacyGenome's sorted list of genes the life's settings did not record. Their values in `genome` are placeholders, not claims (see "Settings an older life did not record" below). It is constant across the life's files.
+- **Confirmation fields belong to confirmation lives** (controller ruling, Task 5 review). `confirmation` and `evalSeed` are set if and only if `role` is `confirm`. `evalSeed` lies in its confirmation's block, [10,000 + 1,000·id, 10,999 + 1,000·id] (spec §4.5). `confirmation.arm` is `candidate`, `centre` or `newborn` (spec §4.5). A confirm life has no `evalPanel`: it meets the confirmation's own variants (spec §7.3 "evalPanel or evalSeed").
+- **No genome schema newer than main's** (controller ruling, Task 5 review). A tab is served from main, so the gate rejects `meta.genomeSchema` above `knowledge/genome-space.json`'s `schemaVersion`, for every role. An older schema is still checked for structure only. The parser caps `genomeSchema` at 1,000.
 - **The gate never accepts a genome unchecked.** `validateSessionPr` rejects a non-legacy `meta` when it has no genome space; the gate and `validate-cli` read main's `knowledge/genome-space.json` and stop before deciding anything if it is missing or invalid.
 - **Cost if wrong.** A parser is easier to relax than to tighten: loosening a rule later accepts every file accepted now.
 

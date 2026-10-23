@@ -100,10 +100,8 @@ export function checkCheckpoint(c: unknown, learnerId: string): asserts c is Che
     const m = r.meta
     if (isRec(m) && "filters" in m) fail("meta.filters is never stored in a checkpoint")
     if (isRec(m) && "end" in m) fail("meta.end is never stored in a checkpoint")
-    // Without filters, parseMeta reads no widths; the learner state's own are passed when it has them.
-    const ls = r.learnerState
-    const widths = isRec(ls) && isRec(ls.widths) ? (ls.widths as { conv1: number; conv2: number; enc: number; hidden: number }) : { conv1: 1, conv2: 1, enc: 1, hidden: 1 }
-    const e = parseMeta(m, { cu: r.cu as number, stepsTotal: r.steps as number, final: false, widths })
+    // No widths: they only check filters, which a checkpoint never stores.
+    const e = parseMeta(m, { cu: r.cu as number, stepsTotal: r.steps as number, final: false })
     if (typeof e === "string") fail(e)
   }
   if (!("learnerState" in r)) fail("no learnerState")

@@ -103,8 +103,12 @@ export const NEWBORN_LEVELS: readonly number[] = [512, 1024, 2048]
 export const FILTER_FLOATS_PER_CONV1 = 104
 /** The number of shared checkup panels: @blanktab/meta PANELS (log.ts imports no package; log.test.ts pins it). */
 export const MAX_EVAL_PANEL = 16
-/** Confirmation seeds start here (spec §4.5). */
+/** Confirmation seeds start here (spec §4.5): confirmation c's block is [MIN_EVAL_SEED + 1,000c, MIN_EVAL_SEED + 999 + 1,000c]. */
 export const MIN_EVAL_SEED = 10_000
+/** Seeds per confirmation block (spec §4.5). */
+export const EVAL_SEED_BLOCK = 1000
+/** A generous cap on meta.genomeSchema (the gate also rejects any schema newer than main's genome space). */
+export const MAX_GENOME_SCHEMA = 1000
 
 /** The log schedule: the first threshold (2^3 CU: a young life writes no log files in a burst). */
 export const FIRST_LOG_CU = 8
@@ -490,7 +494,8 @@ const ENDS: readonly MetaEnd[] = ["failed", "orphan", "budget"]
 /** At most this many genes in `meta.genome` (@blanktab/meta MAX_GENES). */
 const MAX_META_GENES = 40
 const MAX_GENE_STRING = 64
-const CONFIRM_ARM_RE = /^[a-z]{1,16}$/
+/** A confirmation's arms (spec §4.5: j mod 4 → candidate, centre, newborn, newborn). */
+const CONFIRM_ARMS = ["candidate", "centre", "newborn"]
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 const isUint32 = (v: unknown): v is number => isNonNegInt(v) && v <= 0xffff_ffff
 
@@ -502,12 +507,13 @@ function base64Bytes(s: string, expectBytes: number): number | null {
 
 /**
  * The `meta` block (spec §7.3), or what is wrong with it, checked against the file (or checkpoint) it sits in.
+ * `f.widths` is needed only to check `filters` (a checkpoint, which never stores filters, gives none).
  * Structure only, browser-safe: genome bounds, the genomeSha and constancy across files are the gate's (validate.ts).
  * Strict keys; `filters` only in a file whose levelAtOrBelow(cu) is a FILTER_LEVELS level, of exactly
  * FILTER_FLOATS_PER_CONV1·widths.conv1 float32; `heldOut` only for role "newborn"; `missing` only for role "legacy";
  * `end` only in a final file. A newborn's file has cu 0, stepsTotal 0, final true, method "newborn" and a panel.
  */
-export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final: boolean; widths: LogFileV2["widths"] }): MetaBlock | string {
+export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final: boolean; widths?: LogFileV2["widths"] }): MetaBlock | string {
   if (!isObj(v)) return "meta must be an object"
   const uk = unknownKey(v, META_KEYS, "meta")
   if (uk) return uk
@@ -516,7 +522,7 @@ export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final
   if (!ROLES.includes(role)) return `meta.role must be one of ${ROLES.join(", ")}`
   const method = v.method as MetaMethod
   if (!ROLE_METHODS[role].includes(method)) return `meta.method must be one of ${ROLE_METHODS[role].join(", ")} for role ${role}`
-  if (!(isNonNegInt(v.genomeSchema) && v.genomeSchema >= 1)) return "meta.genomeSchema must be an integer >= 1"
+  if (!(isNonNegInt(v.genomeSchema) && v.genomeSchema >= 1 && v.genomeSchema <= MAX_GENOME_SCHEMA)) return `meta.genomeSchema must be an integer in [1, ${MAX_GENOME_SCHEMA}]`
   const g = v.genome
   if (!isObj(g)) return "meta.genome must be an object"
   const genes = Object.entries(g)
@@ -539,8 +545,20 @@ export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final
     const ck = unknownKey(c, ["id", "arm"], "meta.confirmation")
     if (ck) return ck
     if (!isNonNegInt(c.id)) return "meta.confirmation.id must be a non-negative integer"
-    if (typeof c.arm !== "string" || !CONFIRM_ARM_RE.test(c.arm)) return `meta.confirmation.arm must match ${CONFIRM_ARM_RE}`
+    if (typeof c.arm !== "string" || !CONFIRM_ARMS.includes(c.arm)) return `meta.confirmation.arm must be one of ${CONFIRM_ARMS.join(", ")}`
     confirmation = { id: c.id, arm: c.arm }
+  }
+  // A confirmation life, and only one, carries its confirmation and its seed from that confirmation's block; it meets
+  // the confirmation's own variants, so it has no panel (spec §4.5; decision 0022).
+  if (role === "confirm") {
+    if (confirmation === null) return "meta.confirmation must be set for role confirm"
+    if (v.evalSeed === null) return "meta.evalSeed must be set for role confirm"
+    const lo = MIN_EVAL_SEED + EVAL_SEED_BLOCK * confirmation.id, hi = lo + EVAL_SEED_BLOCK - 1
+    if ((v.evalSeed as number) < lo || (v.evalSeed as number) > hi) return `meta.evalSeed must lie in confirmation ${confirmation.id}'s block [${lo}, ${hi}]`
+    if (v.evalPanel !== null) return "meta.evalPanel must be null for role confirm"
+  } else {
+    if (confirmation !== null) return "meta.confirmation is only for role confirm"
+    if (v.evalSeed !== null) return "meta.evalSeed is only for role confirm"
   }
   const inh = v.inheritance
   if (!isObj(inh)) return "meta.inheritance must be { filters: \"none\" }"
@@ -562,6 +580,7 @@ export function parseMeta(v: unknown, f: { cu: number; stepsTotal: number; final
   if ("filters" in v) {
     const level = levelAtOrBelow(f.cu)
     if (level === null || !FILTER_LEVELS.includes(level)) return `meta.filters is only in a file at ${FILTER_LEVELS.join(", ")} CU`
+    if (!f.widths) return "meta.filters needs the file's widths"
     const bytes = FILTER_FLOATS_PER_CONV1 * f.widths.conv1 * 4
     if (typeof v.filters !== "string" || base64Bytes(v.filters, bytes) !== bytes) {
       return `meta.filters must be base64 of ${FILTER_FLOATS_PER_CONV1 * f.widths.conv1} float32 (${FILTER_FLOATS_PER_CONV1}·widths.conv1)`
