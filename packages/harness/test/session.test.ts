@@ -294,6 +294,7 @@ describe("session v2", { timeout: 60_000 }, () => {
     // settings: the learner settings as the learner uses them (lr clamped), the speed cap and the seed.
     expect(f.settings).toEqual({ ...clampSettings(SETTINGS), maxStepsPerSec: 30, seed: 7 })
     expect(f.settings.lr).toBe(1e-2)
+    expect(f.settings.gamma).toBe(0.9) // Plan 05a: gamma is a learner setting, logged with the rest
     // The curve: a point at every sleep (every 50 steps) and one at the end of life, each in the file that follows it.
     expect(logs.flatMap(l => l.curve.map(p => p.steps))).toEqual([...Array.from({ length: 20 }, (_, i) => 50 * (i + 1)), 1024])
     expect(logs[0]!.curve.map(p => p.steps)).toEqual([50, 100])
@@ -1047,6 +1048,30 @@ describe("session v2", { timeout: 60_000 }, () => {
       valid(logs)
       expect(logs.at(-1)).toMatchObject({ seq: cp.seq, final: true, stepsTotal: 50, restores: MAX_RESTORES, lostCU: 10, skippedUpdates: 20 })
       expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+    })
+
+    it("a real learner's checkpoint saved before Plan 05a (settings without gamma) resumes at γ 0.9 and logs and checkpoints it", async () => {
+      const idb = new IDBFactory()
+      const make = (init: LearnerInit) => createLearner({ backend: createCpuBackend(), ...init })
+      const real = cfgFor({ lifetimeCU: 10, sleepInterval: 20, learnerSettings: { ...DEFAULT_SETTINGS, replayPerSleep: 2, bufferSize: 50 } })
+      await expect(runSession(real, depsFor(idb, { createLearner: make, onTick: ({ steps }) => { if (steps === 45) throw new Error("reload") } }))).rejects.toThrow("reload")
+      const cp = (await loadCheckpoint(idb, ID))!
+      const { gamma: _g, ...older } = cp.learnerState.settings
+      void _g
+      await saveCheckpoint(idb, { ...cp, learnerState: { ...cp.learnerState, settings: older as LearnerSettings } })
+      const later: { steps: number; gamma: number | undefined }[] = []
+      await runSession(real, depsFor(idb, { createLearner: make, onTick: async () => {
+        const c = await loadCheckpoint(idb, ID)
+        if (c && c.steps > cp.steps) later.push({ steps: c.steps, gamma: c.learnerState.settings.gamma })
+      } }))
+      const logs = await logsOf(idb)
+      valid(logs)
+      expect(logs.at(-1)).toMatchObject({ final: true })
+      expect(logs.at(-1)!.stepsTotal).toBeGreaterThan(cp.steps)
+      for (const f of logs) expect(f.settings.gamma).toBe(0.9)
+      // The resumed learner's own checkpoints now carry gamma.
+      expect(later.length).toBeGreaterThan(0)
+      expect(later.every((c) => c.gamma === 0.9)).toBe(true)
     })
 
     it("a checkpoint the learner refuses (a learner state version mismatch, on a real learner)", async () => {

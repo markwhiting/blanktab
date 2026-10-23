@@ -54,7 +54,7 @@ describe("golden CPU trajectory (Plan 04c Task 2)", { timeout: 120_000 }, () => 
     // The saved settings are hashed without gamma (Plan 05a Task 2): the fixture predates that key, and gamma must
     // still be the default the fixture's learning used. Everything else in the state is hashed as before.
     const state = await learner.save()
-    const { gamma, ...settings } = state.settings as typeof state.settings & { gamma?: number }
+    const { gamma, ...settings } = state.settings
     expect(gamma === undefined || gamma === GAMMA).toBe(true)
     value(h, { ...state, settings })
     learner.dispose()

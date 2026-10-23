@@ -11,7 +11,7 @@ describe("birthSettings", () => {
   it("takes each picked learner setting and maxStepsPerSec, rounds the integer ones, and ignores the rest (moveProbability)", () => {
     const b = birthSettings({ lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1234.6, replayPerSleep: 16.4, headLrScale: 0.05, exploreEpsilon: 0.15, residualDecay: 1e-3, maxStepsPerSec: 30, moveProbability: 0.7 })
     expect(b).toEqual({
-      learnerSettings: { lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1235, replayPerSleep: 16, headLrScale: 0.05, exploreEpsilon: 0.15, residualDecay: 1e-3 },
+      learnerSettings: { lr: 0.002, entropyWeight: 0.02, curiosityWeight: 1.5, bufferSize: 1235, replayPerSleep: 16, headLrScale: 0.05, exploreEpsilon: 0.15, residualDecay: 1e-3, gamma: 0.9 },
       maxStepsPerSec: 30,
     })
   })

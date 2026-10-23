@@ -3,7 +3,7 @@ import { BUTTON_OPTIONS, KEYS, MOVE_OPTIONS, SCROLL_OPTIONS, emptyObservation, i
 import type { Action, Observation } from "@blanktab/interface"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
 import type { Backend, Storage } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, LearnerStateVersionError, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
+import { DEFAULT_SETTINGS, GAMMA, GAMMA_RANGE, LearnerStateVersionError, EXPLORE_EPSILON_RANGE, HEAD_LR_SCALE_RANGE, RESIDUAL_DECAY_RANGE, LEARNER_STATE_VERSION, clampSettings, createLearner, curiosityReward, LR_RANGE, sampleAction } from "../src/learner"
 import type { HeldOutSet, LearnerSettings, LearnerState, UpdateInfo } from "../src/learner"
 import { copyLastBaseline, targetsFromObs } from "../src/encode"
 import type { Widths } from "../src/model"
@@ -1293,5 +1293,71 @@ describe("step speed (Plan 04c Task 2)", { timeout: 60_000 }, () => {
     expect(perStep).toEqual(Array(18).fill(3))
     l.dispose()
     expect(be.stats.liveBuffers).toBe(0)
+  })
+})
+
+describe("gamma setting (Plan 05a)", { timeout: 60_000 }, () => {
+  it("DEFAULT_SETTINGS.gamma is GAMMA (0.9)", () => {
+    expect(GAMMA).toBe(0.9)
+    expect(DEFAULT_SETTINGS.gamma).toBe(GAMMA)
+    expect(GAMMA_RANGE).toEqual([0, 0.999])
+    // Appended last, so the earlier keys keep their order.
+    expect(Object.keys(DEFAULT_SETTINGS).at(-1)).toBe("gamma")
+  })
+
+  it("clampSettings: gamma absent → 0.9; 1.2 → 0.999; −1 → 0; NaN → RangeError", () => {
+    const { gamma: _g, ...older } = DEFAULT_SETTINGS
+    void _g
+    expect(clampSettings(older as LearnerSettings).gamma).toBe(0.9)
+    expect(clampSettings({ ...DEFAULT_SETTINGS, gamma: 1.2 }).gamma).toBe(0.999)
+    expect(clampSettings({ ...DEFAULT_SETTINGS, gamma: -1 }).gamma).toBe(0)
+    expect(clampSettings({ ...DEFAULT_SETTINGS, gamma: 0.6 }).gamma).toBe(0.6)
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => clampSettings({ ...DEFAULT_SETTINGS, gamma: bad }), String(bad)).toThrow(RangeError)
+    }
+  })
+
+  it("a state saved without gamma resumes with γ 0.9, and its next 50 steps are bit-identical to a learner whose state had gamma 0.9", async () => {
+    const first = await run({ seed: 51, steps: 40, sleepEvery: 20 })
+    const state = await first.learner.save()
+    first.learner.dispose()
+    expect(state.settings.gamma).toBe(0.9)
+    const { gamma: _g, ...older } = state.settings
+    void _g
+    const without = { ...state, settings: older as LearnerSettings } // as saved before Plan 05a
+    const withGamma = { ...state, settings: { ...older, gamma: 0.9 } }
+    const a = await run({ seed: -1, steps: 50, sleepEvery: 20, stream: createSyntheticStream(), state: without })
+    const b = await run({ seed: -1, steps: 50, sleepEvery: 20, stream: createSyntheticStream(), state: withGamma })
+    expect(a.updates.length).toBe(50)
+    expect(a.actions).toEqual(b.actions)
+    expect(a.updates).toEqual(b.updates)
+    const [sa, sb] = [await a.learner.save(), await b.learner.save()]
+    expect(sa.settings.gamma).toBe(0.9) // the next save writes gamma
+    expect(Object.keys(sa.settings)).toEqual(Object.keys(DEFAULT_SETTINGS))
+    expect(firstDifference(sa, sb)).toBeNull()
+    for (const r of [a, b]) r.learner.dispose()
+    expect(a.be.stats.liveBuffers).toBe(0)
+    expect(b.be.stats.liveBuffers).toBe(0)
+  })
+
+  it("a stored gamma that is not a clamped setting is a bad checkpoint", async () => {
+    const { learner } = await run({ seed: 52, steps: 3 })
+    const state = await learner.save()
+    learner.dispose()
+    for (const bad of [1.2, -1, Number.NaN, "0.9"]) {
+      const s = { ...state, settings: { ...state.settings, gamma: bad } } as unknown as LearnerState
+      await expect(createLearner({ backend: createCpuBackend(), state: s }), String(bad)).rejects.toThrow(RangeError)
+    }
+  })
+
+  it("γ 0.6 gives a different advantage trajectory from γ 0.9 on the same stream", async () => {
+    const a = await run({ seed: 53, steps: 30, settings: { gamma: 0.6 } })
+    const b = await run({ seed: 53, steps: 30, settings: { gamma: 0.9 } })
+    // The first update's advantage uses the same untrained value head; from there the targets differ.
+    const adv = (r: typeof a) => r.updates.map((u) => u.advantage)
+    expect(adv(a)).toHaveLength(29)
+    expect(adv(a)).not.toEqual(adv(b))
+    expect((await a.learner.save()).settings.gamma).toBe(0.6)
+    for (const r of [a, b]) r.learner.dispose()
   })
 })

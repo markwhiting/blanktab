@@ -40,12 +40,20 @@ export interface LearnerSettings {
    * 0 is off and bit-exact to the learner without it. Clamped into RESIDUAL_DECAY_RANGE.
    */
   residualDecay: number
+  /**
+   * TD discount of the critic's target: curiosityWeight · reward + gamma · V(next). Default GAMMA (0.9), the constant
+   * every life before Plan 05a learned with. A state saved before 05a has no gamma and resumes at GAMMA. Clamped into
+   * GAMMA_RANGE.
+   */
+  gamma: number
 }
+/** The default TD discount (DEFAULT_SETTINGS.gamma), and the one a state saved without gamma resumes with. */
+export const GAMMA = 0.9
 export const DEFAULT_SETTINGS: LearnerSettings = Object.freeze({
   // lr 5e-4 and residualDecay 1e-3: Plan 04a.2 Task 1 sweep (held-out ≤ 0.95 at 5k steps on 5 of 6 seeds; see the
   // task-1 report). exploreEpsilon 0.1: controller ruling.
   lr: 5e-4, entropyWeight: 0.01, curiosityWeight: 1, bufferSize: 2000, replayPerSleep: 64, headLrScale: 0.1, exploreEpsilon: 0.1,
-  residualDecay: 1e-3,
+  residualDecay: 1e-3, gamma: GAMMA, // gamma last (Plan 05a), so the earlier keys keep their order
 })
 export interface LearnerStats {
   steps: number
@@ -194,8 +202,8 @@ export const HEAD_LR_SCALE_RANGE = [0.01, 1] as const
 export const EXPLORE_EPSILON_RANGE = [0, 0.5] as const
 /** residualDecay is clamped into this range. */
 export const RESIDUAL_DECAY_RANGE = [0, 1e-2] as const
-/** TD discount. */
-export const GAMMA = 0.9
+/** gamma is clamped into this range. */
+export const GAMMA_RANGE = [0, 0.999] as const
 /** Smoothing of the predLoss / baselineLoss moving averages. */
 export const STATS_ALPHA = 0.01
 
@@ -212,7 +220,10 @@ const FACTOR_ROWS = FACTORS.map((n, f) => Int32Array.from({ length: n }, (_, k) 
 const isPosInt = (v: number) => Number.isInteger(v) && v >= 1
 const isNonNeg = (v: number) => Number.isFinite(v) && v >= 0
 
-/** Validates settings and clamps lr, headLrScale, exploreEpsilon and residualDecay into their ranges. Throws RangeError for values that cannot be clamped. */
+/**
+ * Validates settings and clamps lr, headLrScale, exploreEpsilon, residualDecay and gamma into their ranges. Throws
+ * RangeError for values that cannot be clamped. An absent gamma (settings saved before Plan 05a) reads as GAMMA.
+ */
 export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.lr)) throw new RangeError(`lr must be finite, got ${s.lr}`)
   if (!isNonNeg(s.entropyWeight)) throw new RangeError(`entropyWeight must be finite and >= 0, got ${s.entropyWeight}`)
@@ -222,10 +233,13 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
   if (!Number.isFinite(s.exploreEpsilon)) throw new RangeError(`exploreEpsilon must be finite, got ${s.exploreEpsilon}`)
   if (!Number.isFinite(s.residualDecay)) throw new RangeError(`residualDecay must be finite, got ${s.residualDecay}`)
+  const gamma = (s as { gamma?: number }).gamma ?? GAMMA
+  if (!Number.isFinite(gamma)) throw new RangeError(`gamma must be finite, got ${gamma}`)
   const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
   return {
     ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE),
     exploreEpsilon: clamp(s.exploreEpsilon, EXPLORE_EPSILON_RANGE), residualDecay: clamp(s.residualDecay, RESIDUAL_DECAY_RANGE),
+    gamma: clamp(gamma, GAMMA_RANGE),
   }
 }
 
@@ -352,6 +366,8 @@ function checkState(s: LearnerState): void {
   for (const k of ["conv1", "conv2", "enc", "hidden"] as const) if (!isPosInt(s.widths[k])) fail(`widths.${k} must be an integer >= 1`)
   const clamped = clampSettings(s.settings)
   for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof LearnerSettings)[]) {
+    // A state saved before Plan 05a has no gamma: it reads as GAMMA (createLearner), so there is nothing to compare.
+    if (k === "gamma" && s.settings.gamma === undefined) continue
     if (clamped[k] !== s.settings[k]) fail(`settings.${k} = ${s.settings[k]} is not a clamped setting`)
   }
   const n = s.params.length
@@ -478,7 +494,8 @@ export async function createLearner(opts: {
     : Number.NaN
   const seed = saved ? saved.seed : (opts as { seed: number }).seed
   const widths: Widths = saved ? saved.widths : (opts as { widths: Widths }).widths
-  const settings = saved ? saved.settings : clampSettings((opts as { settings: LearnerSettings }).settings)
+  // A saved state without gamma (from before Plan 05a) resumes at GAMMA, and its next save() writes it.
+  const settings = saved ? { ...saved.settings, gamma: saved.settings.gamma ?? GAMMA } : clampSettings((opts as { settings: LearnerSettings }).settings)
   const model = createModel(backend, seed, widths, saved?.params)
   // Two optimizers over disjoint parameters: the residual output layers at lr × headLrScale (they start at zero and
   // see near-zero gradients over static background, where Adam's normalized step at full lr is pure jitter that
@@ -909,7 +926,7 @@ export async function createLearner(opts: {
 
       // 4. Actor-critic on a_{t-1}, only when the curiosity reward was measured.
       if (last && info && Number.isFinite(info.lossAfter)) {
-        const target = settings.curiosityWeight * info.reward + GAMMA * valueNext
+        const target = settings.curiosityWeight * info.reward + settings.gamma * valueNext
         const { loss, adv } = actorCriticLoss(h, last.action, target)
         try {
           const [lac, advantage] = (await readAll([loss, adv])).map((v) => v[0]!) as [number, number]
