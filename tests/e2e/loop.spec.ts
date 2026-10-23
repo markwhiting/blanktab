@@ -2,6 +2,7 @@ import { test, expect, type Page, type Request } from "@playwright/test"
 import { fakeGithub } from "../../packages/harness/test/fakeGithub"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 import { validateSessionPr } from "../../tools/gate/validate"
+import { GENOME_SPACE } from "../../packages/harness/test/helpers"
 
 const TOKEN = "test-token"
 const UP = "markwhiting/learner"
@@ -466,7 +467,7 @@ test("a closed tab's learner is adopted by the next new tab; surplus and stale o
     expect(r.file).toMatchObject({ schemaVersion: 2, learnerId: r.learnerId, seq: 0, final: true, condition: "A" })
     expect(r.file.stepsTotal as number).toBeGreaterThanOrEqual(50)
     // As the gate reads it: it parses and is accepted as the learner's first PR.
-    const v = await validateSessionPr([{ path: `data/runs/${r.learnerId}/0.json`, content: JSON.stringify(r.file, null, 2) }], [])
+    const v = await validateSessionPr([{ path: `data/runs/${r.learnerId}/0.json`, content: JSON.stringify(r.file, null, 2) }], [], { space: GENOME_SPACE })
     expect(v.errors).toEqual([])
   }
   expect(rows.filter(r => r.learnerId === others[0]!.learnerId || r.learnerId === others[1]!.learnerId)).toEqual([])

@@ -3,7 +3,7 @@ import { Adam, add, backward, readSyncCpu, createCpuBackend, createRng, detach, 
 import type { Tensor } from "@blanktab/tensor"
 import { PERIPHERY, FOVEA } from "@blanktab/interface"
 import { ACTION_DIM } from "../src/encode"
-import { CPU_WIDTHS, GPU_WIDTHS, SHIFT_TAPS, createModel } from "../src/model"
+import { CPU_WIDTHS, FIRST_LAYER_PARAMS, GPU_WIDTHS, SHIFT_TAPS, createModel } from "../src/model"
 import type { Widths } from "../src/model"
 
 const rand = (n: number, seed: number) => {
@@ -74,6 +74,19 @@ describe("model", () => {
     expect(m.outputParams.length).toBe(4)
     m.outputParams.forEach((t, i) => expect(t).toBe(m.params.slice(-4)[i]))
     m.dispose()
+  })
+
+  it("FIRST_LAYER_PARAMS name 75·c, c, 27·c, c values at widths conv1 = c (16 and 8)", () => {
+    expect(FIRST_LAYER_PARAMS).toEqual([0, 1, 6, 7])
+    for (const w of [GPU_WIDTHS, CPU_WIDTHS]) {
+      const c = w.conv1
+      const m = createModel(createCpuBackend(), 3, w)
+      // Periphery conv1 (5x5 over 3 channels) w and b, then fovea conv1 (3x3 over 3 channels) w and b.
+      expect(FIRST_LAYER_PARAMS.map(i => m.params[i]!.shape)).toEqual([[c, 75], [c, 1], [c, 27], [c, 1]])
+      expect(FIRST_LAYER_PARAMS.map(i => m.params[i]!.size)).toEqual([75 * c, c, 27 * c, c])
+      m.dispose()
+    }
+    expect([GPU_WIDTHS.conv1, CPU_WIDTHS.conv1]).toEqual([16, 8])
   })
 
   it("residualParams are the shift gate then the four output layers: every parameter that starts at zero and expresses deviation from copy-last", async () => {

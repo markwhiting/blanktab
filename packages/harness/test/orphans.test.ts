@@ -9,7 +9,7 @@ import { validateSessionPr } from "../../../tools/gate/validate"
 import { openQueue } from "../src/queue"
 import { MAX_ORPHANS, ORPHAN_MAX_AGE_MS, learnerLockName, sweepCheckpoints, waitLock, webLock } from "../src/orphans"
 import { adoptLearnerId, storedLearnerId } from "../src/identity"
-import { mkFile, stubStorage } from "./helpers"
+import { GENOME_SPACE, birthBlock, mkFile, stubStorage } from "./helpers"
 
 /** When set, finalLogOf throws for a final built from a checkpoint (the sweep's fallback is tested with it). */
 const finalSpy = vi.hoisted(() => ({ throwWithCp: false }))
@@ -291,7 +291,7 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
       expect(p.ok, p.ok ? "" : p.error).toBe(true)
     }
     const last = files.at(-1)!
-    const v = await validateSessionPr([{ path: `data/runs/${last.learnerId}/${last.seq}.json`, content: JSON.stringify(last, null, 2) }], files.slice(0, -1))
+    const v = await validateSessionPr([{ path: `data/runs/${last.learnerId}/${last.seq}.json`, content: JSON.stringify(last, null, 2) }], files.slice(0, -1), { space: GENOME_SPACE })
     expect(v.errors).toEqual([])
     expect(v.ok).toBe(true)
   }
@@ -377,6 +377,30 @@ describe("orphans deleted by the sweep end on the record with a final log (Plan 
     const files = await filesOf(idb, L)
     expect(files[2]).toEqual({ ...files[1]!, seq: 2, final: true, curve: [], writtenAt: NOW.toISOString() })
     await gateAccepts(files)
+  })
+
+  it("an orphan with a meta block gets meta.end orphan: from its checkpoint's block, or its latest file's without that file's filters", async () => {
+    const meta = await birthBlock(id(1))
+    const filters = btoa(String.fromCharCode(...new Uint8Array(new Float32Array(104 * W.conv1).buffer)))
+    // Seq 0..6 at 8..512 CU; the 512 file carries the filters.
+    const files7 = (L: string) => Array.from({ length: 7 }, (_, s) => v2(L, s, { meta: { ...meta, ...(s === 6 ? { filters } : {}) } }))
+    // A version orphan: from its latest file.
+    const idb = new IDBFactory()
+    const L = id(1)
+    await put(idb, files7(L))
+    await saveCheckpoint(idb, cp(L, HOUR, { steps: 60_000, cu: 600, seq: 7, learnerState: { version: 1, seed: 7, widths: W, stats: { cu: 600 } } }))
+    expect((await sweepCheckpoints({ idb, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })).verdicts).toEqual({ [L]: "version" })
+    const files = await filesOf(idb, L)
+    expect(files[7]!.meta).toEqual({ ...meta, end: "orphan" })
+    await gateAccepts(files)
+    // A stale orphan: from its checkpoint's block.
+    const idb2 = new IDBFactory()
+    await put(idb2, files7(L))
+    await saveCheckpoint(idb2, cp(L, 30 * HOUR, { steps: 60_000, cu: 600, seq: 7, knowledgeSha: K, sessionsSeenAtBirth: 2, meta, learnerState: state({ cu: 600, skippedUpdates: 1, evalCU: 0.5 }) }))
+    expect((await sweepCheckpoints({ idb: idb2, tryLock: (await locks()).tryLock, now: () => NOW, adopt: true, final: FINAL })).verdicts).toEqual({ [L]: "stale" })
+    const files2 = await filesOf(idb2, L)
+    expect(files2[7]).toMatchObject({ final: true, stepsTotal: 60_000, meta: { ...meta, end: "orphan" } })
+    await gateAccepts(files2)
   })
 
   it("a final that cannot be built from the checkpoint is built from the latest log file instead (said on console.warn)", async () => {

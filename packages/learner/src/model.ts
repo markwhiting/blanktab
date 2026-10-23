@@ -11,6 +11,11 @@ export interface Widths { conv1: number; conv2: number; enc: number; hidden: num
 export const GPU_WIDTHS: Widths = { conv1: 16, conv2: 32, enc: 128, hidden: 256 }
 /** CPU fallback: half width. */
 export const CPU_WIDTHS: Widths = { conv1: 8, conv2: 16, enc: 64, hidden: 128 }
+/**
+ * Indices in Model.params of the first layer's filters (spec §5.1, the harness's meta.filters): periphery conv1 w
+ * [conv1, 75] and b [conv1, 1], then fovea conv1 w [conv1, 27] and b [conv1, 1]. 104·conv1 values in all.
+ */
+export const FIRST_LAYER_PARAMS: readonly number[] = Object.freeze([0, 1, 6, 7])
 
 /**
  * The learner's network. `core`, `heads` and `predict` build autograd graph nodes (every parameter

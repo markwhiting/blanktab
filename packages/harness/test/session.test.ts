@@ -2,10 +2,10 @@ import { describe, it, expect, vi } from "vitest"
 import { IDBFactory, IDBObjectStore as FakeObjectStore } from "fake-indexeddb"
 import { NOOP_ACTION, emptyObservation, decodeMove, PERIPHERY, WORLD, type Action, type Observation, type WorldView } from "@blanktab/interface"
 import { createCpuBackend, createRng } from "@blanktab/tensor"
-import { DEFAULT_SETTINGS, clampSettings, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
+import { DEFAULT_SETTINGS, LEARNER_STATE_VERSION, clampSettings, createLearner, type FrozenRun, type FrozenRunOptions, type LearnerSettings, type LearnerState, type LearnerStats, type Widths } from "@blanktab/learner"
 import { openQueue } from "../src/queue"
 import { loadCheckpoint, readCheckpointRecord, saveCheckpoint } from "../src/checkpoint"
-import { MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_IDS, MILESTONE_SUITE_VERSION, levelAtOrBelow, parseLogFile, type LogFile, type LogFileV2 } from "../src/log"
+import { FILTER_FLOATS_PER_CONV1, MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_IDS, MILESTONE_SUITE_VERSION, levelAtOrBelow, parseLogFile, type LogFile, type LogFileV2, type MetaBlock } from "../src/log"
 import { createWorld, hashSeed, type TraceEvent } from "@blanktab/world"
 import { uniformAction } from "../src/heldout"
 import { MILESTONES_V1, type Milestone } from "../src/milestones"
@@ -14,8 +14,12 @@ import { validateSessionPr } from "../../../tools/gate/validate"
 import { createCanvas } from "@napi-rs/canvas"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "../src/knowledge"
 import { buildHeldOut } from "../src/heldout"
-import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner } from "../src/session"
-import { mkFile } from "./helpers"
+import { DEFAULT_CHECKPOINT_EVERY_MS, curvePoint, DEFAULT_MAX_STEPS_PER_SEC, FIRST_LOG_CU, LAST_DOUBLING_CU, SessionInbox, logThresholds, nextCrossing, runSession, createPacer, type Clock, type LearnerInit, type SessionConfig, type SessionDeps, type SessionEvent, type SessionLearner, type SessionMeta } from "../src/session"
+import { GENOME_SPACE, birthBlock, legacyBlock, mkFile } from "./helpers"
+import { checkupSeed, panelSeed } from "../src/checkup"
+import { sweepCheckpoints } from "../src/orphans"
+import { FIRST_LAYER_PARAMS } from "@blanktab/learner"
+import { legacyGenome } from "@blanktab/meta"
 import { pre04cCheckpointError } from "./pre04c-checkpoint"
 
 // Plan 04b: a spy on every caregiver the session makes (each delegates to a real one), in one call log with the events.
@@ -86,7 +90,7 @@ interface StubState { seed: number; widths: Widths; settings: LearnerSettings; s
  * Flailer-like TrainableLearner: no-op actions, `cuPerStep` CU per step and `sleepCu` per sleep, and losses that are
  * a pure function of the step count (NaN before step `nanUntil`). `skip(steps)` makes that step's update a skipped one.
  */
-interface StubOpts { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number; frozen?: { evalPerStep: number } }
+interface StubOpts { cuPerStep: number; sleepCu?: number; nanUntil?: number; skip?: (steps: number) => boolean; saves?: number[]; savedSteps?: number[]; created?: LearnerInit[]; throwAt?: { steps: number; error: Error }; knowledge?: [number, string][]; onSave?: (steps: number) => void; evalCu?: number; heldOutLoss?: (steps: number) => number; frozen?: { evalPerStep: number }; frozenSeeds?: number[]; readParams?: boolean }
 function stubFactory(o: StubOpts) {
   return async (init: LearnerInit): Promise<SessionLearner> => {
     o.created?.push(init)
@@ -122,7 +126,10 @@ function stubFactory(o: StubOpts) {
       dispose: () => {},
       ...(o.knowledge ? { onKnowledge: (m: Manifest) => void o.knowledge!.push([st.stats.steps, m.knowledgeSha]) } : {}),
       // With `frozen`, a frozen run (Plan 04b checkups): uniform actions from its own seed, `evalPerStep` evalCU a step, nothing else changes.
+      // With `readParams`, params laid out as the model's first layer is (stubParams).
+      ...(o.readParams ? { readParams: async () => stubParams(st.widths, st.stats.steps) } : {}),
       ...(o.frozen ? { frozenRun: (fo: FrozenRunOptions): FrozenRun => {
+        o.frozenSeeds?.push(fo.seed)
         const rnd = createRng(fo.seed)
         return {
           step: async () => { st.stats.evalCU += o.frozen!.evalPerStep; return uniformAction(rnd) },
@@ -133,6 +140,17 @@ function stubFactory(o: StubOpts) {
     }
   }
 }
+
+/**
+ * A stub learner's params at `steps`: 8 arrays, those at FIRST_LAYER_PARAMS of the model's first-layer sizes (75·c, c,
+ * 27·c, c), every value a function of (index, position, steps), so a snapshot shows when it was read.
+ */
+function stubParams(w: Widths, steps: number): Float32Array[] {
+  const sizes = [75 * w.conv1, w.conv1, 5, 5, 5, 5, 27 * w.conv1, w.conv1]
+  return sizes.map((n, i) => Float32Array.from({ length: n }, (_, j) => i + j / 1024 + steps / 65536))
+}
+/** meta.filters decoded (base64 of float32 LE). */
+const floatsOf = (b64: string) => new Float32Array(Uint8Array.from(atob(b64), ch => ch.charCodeAt(0)).buffer)
 
 /** What the page posts on a knowledge refresh: the manifest only (its knowledgeSha is what the logs record). */
 const knowledgeWith = (knowledgeSha: string): Manifest => ({ knowledgeSha, codeSha: "dev", learnerStateVersion: 1 })
@@ -1200,7 +1218,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         const p = parseLogFile(JSON.parse(JSON.stringify(f)))
         expect(p.ok, p.ok ? "" : p.error).toBe(true)
       }
-      const v = await validateSessionPr(logs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [])
+      const v = await validateSessionPr(logs.map(f => ({ path: `data/runs/${f.learnerId}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [], { space: GENOME_SPACE })
       expect(v.errors).toEqual([])
       expect(v.ok).toBe(true)
     }
@@ -1843,6 +1861,288 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(inits.some(i => "state" in i)).toBe(true)
       expect(calls.filter(([n]) => n === "frozen.step").length).toBeGreaterThan(0)
       expectWall(calls, inits)
+    })
+
+    describe("the meta block (Plan 05a Task 6)", () => {
+      /** cfg.meta as the page gives it: `birth` (default this learner's offline draw); `legacy` records its calls. */
+      const metaOf = async (o: { birth?: MetaBlock; calls?: Record<string, number | string>[] } = {}): Promise<SessionMeta> => ({
+        birth: o.birth ?? await birthBlock(ID),
+        legacy: async flat => { o.calls?.push(structuredClone(flat)); return legacyBlock(flat) },
+      })
+      /** The block a file carries, without its per-file fields. */
+      const constant = (f: LogFileV2) => {
+        const { filters: _f, end: _e, ...m } = f.meta!
+        void _f
+        void _e
+        return m
+      }
+      const reload = (at: (s: { steps: number; cu: number }) => boolean) => ({ onTick: (s: { steps: number; cu: number }) => { if (at(s)) throw new Error("reload") } })
+      /** The policy seeds a checkup at `level` uses, given each milestone's variant seed. */
+      const seedsAt = (level: number, variant: (l: number, m: string) => number) => SUITE.map(m => hashSeed(variant(level, m.id), "policy"))
+
+      it("a newborn with cfg.meta: every log file and checkpoint carries the birth block; the meta event fires once", async () => {
+        const idb = new IDBFactory()
+        const meta = await metaOf()
+        const events: SessionEvent[] = []
+        const checkpoints: unknown[] = []
+        await grow(idb, {
+          cfg: { lifetimeCU: 140, sleepInterval: 10, meta },
+          deps: { onEvent: e => events.push(e), onTick: async () => { checkpoints.push((await loadCheckpoint(idb, ID))?.meta) } },
+        })
+        const logs = await logsOf(idb)
+        expect(logs.length).toBeGreaterThan(3)
+        for (const f of logs) expect(f.meta).toEqual(meta.birth) // no filters below 512, no end on a lifetime's end
+        expect(checkpoints).toHaveLength(70)
+        for (const m of checkpoints) expect(m).toEqual(meta.birth)
+        expect(events.filter(e => e.type === "meta")).toEqual([{ type: "meta", meta: meta.birth }])
+        await gateAccepts(logs)
+      })
+
+      it("a resumed checkpoint without meta gets the legacy block from its flat settings (gamma 0.9 included), logs it, and checkups keep checkupSeed", async () => {
+        const idb = new IDBFactory()
+        await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10 }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const before = await logsOf(idb)
+        expect(before.every(f => !("meta" in f))).toBe(true)
+        // A pre-05a learner state: its settings have no gamma.
+        const c = (await loadCheckpoint(idb, ID))!
+        const st = c.learnerState as unknown as StubState
+        delete (st.settings as Partial<LearnerSettings>).gamma
+        await saveCheckpoint(idb, c)
+        const calls: Record<string, number | string>[] = []
+        const frozenSeeds: number[] = []
+        const events: SessionEvent[] = []
+        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ calls }) }, stub: { frozenSeeds }, deps: { onEvent: e => events.push(e) } })
+        const logs = await logsOf(idb)
+        const after = logs.slice(before.length)
+        // The flat settings are the files' own settings, gamma (the pre-05a constant) included.
+        expect(calls).toEqual([before[0]!.settings])
+        expect(calls[0]!.gamma).toBe(0.9)
+        const legacy = await legacyBlock(calls[0]!)
+        expect(legacy).toMatchObject({ role: "legacy", method: "legacy", evalPanel: null, missing: legacyGenome(calls[0]!, GENOME_SPACE).missing })
+        expect(legacy.genome.gamma).toBe(0.9)
+        expect(after.length).toBeGreaterThan(1)
+        for (const f of after) expect(f.meta).toEqual(legacy)
+        expect(events.filter(e => e.type === "meta")).toEqual([{ type: "meta", meta: legacy }])
+        // The checkups after the resume (64, 128) met checkupSeed's variants, as the life's earlier ones did.
+        expect(levelsOf(after)).toEqual([64, 128])
+        expect(frozenSeeds).toEqual([64, 128].flatMap(l => seedsAt(l, (lv, m) => checkupSeed(ID, lv, m))))
+        await gateAccepts(logs)
+      })
+
+      it("a resumed checkpoint with meta keeps it, even when cfg.meta.birth differs", async () => {
+        const idb = new IDBFactory()
+        const a = await metaOf()
+        await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const calls: Record<string, number | string>[] = []
+        const b = await metaOf({ birth: await birthBlock("lrn_ffffffffffffffff"), calls })
+        expect(b.birth).not.toEqual(a.birth)
+        await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: b } })
+        const logs = await logsOf(idb)
+        for (const f of logs) expect(f.meta).toEqual(a.birth)
+        expect(calls).toEqual([])
+        await gateAccepts(logs)
+      })
+
+      it("with evalPanel p, every checkup's variants are panelSeed(p, …)", async () => {
+        const base = await birthBlock(ID)
+        for (const p of [3, 16]) {
+          const frozenSeeds: number[] = []
+          const idb = new IDBFactory()
+          const birth = { ...base, evalPanel: p }
+          await grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: await metaOf({ birth }) }, stub: { frozenSeeds } })
+          const logs = await logsOf(idb)
+          expect(levelsOf(logs)).toEqual([16, 32, 64, 128])
+          expect(frozenSeeds).toEqual([16, 32, 64, 128].flatMap(l => seedsAt(l, (lv, m) => panelSeed(p, lv, m))))
+          expect(frozenSeeds).not.toContain(seedsAt(16, (lv, m) => checkupSeed(ID, lv, m))[0])
+          await gateAccepts(logs)
+        }
+      })
+
+      it("crossing files at 512, 1024 and 2048 carry filters of 104·conv1 floats; the 8–256 and 3072 files do not", async () => {
+        const idb = new IDBFactory()
+        const meta = await metaOf()
+        await runSession(cfgFor({ lifetimeCU: 3300, sleepInterval: 50, meta }), depsFor(idb, { createLearner: stubFactory({ cuPerStep: 4, readParams: true }) }))
+        const logs = await logsOf(idb)
+        expect(logs.map(f => levelAtOrBelow(f.cu))).toEqual([8, 16, 32, 64, 128, 256, 512, 1024, 2048, 3072, 3072])
+        for (const f of logs) {
+          const level = levelAtOrBelow(f.cu)!
+          if (!f.final && [512, 1024, 2048].includes(level)) {
+            const got = floatsOf(f.meta!.filters!)
+            expect(got.length).toBe(FILTER_FLOATS_PER_CONV1 * TINY.conv1)
+            const params = stubParams(TINY, f.stepsTotal) // read at the file's own step
+            expect([...got]).toEqual(FIRST_LAYER_PARAMS.flatMap(i => [...params[i]!]))
+          } else {
+            expect("filters" in f.meta!, `file at ${f.cu} CU`).toBe(false)
+          }
+          expect(constant(f)).toEqual(meta.birth)
+        }
+        await gateAccepts(logs)
+        // A learner that cannot read its params writes none; without meta there are none either.
+        for (const [m, readParams] of [[meta, false], [undefined, true]] as const) {
+          const idb2 = new IDBFactory()
+          await runSession(cfgFor({ lifetimeCU: 1100, sleepInterval: 50, ...(m ? { meta: m } : {}) }), depsFor(idb2, { createLearner: stubFactory({ cuPerStep: 4, readParams }) }))
+          expect((await logsOf(idb2)).some(f => f.meta?.filters !== undefined)).toBe(false)
+        }
+      })
+
+      describe("short lives (Review Focus 2)", () => {
+        /** 64 CU a step, a sleep every 5: the 2048 crossing at step 32, its checkup at the sleep at step 35. */
+        const live = (idb: IDBFactory, o: { meta?: SessionMeta; inbox: SessionInbox; sleepInterval?: number; deps?: Partial<SessionDeps> }) => grow(idb, {
+          cfg: { lifetimeCU: undefined, sleepInterval: o.sleepInterval ?? 5, ...(o.meta ? { meta: o.meta } : {}) },
+          stub: { cuPerStep: 64, readParams: true },
+          deps: { inbox: o.inbox, ...o.deps },
+        })
+        /** A reload once the 5120 file (step 80) has logged the 4096 checkup: a life the switch did not end. */
+        const past4096 = reload(s => s.cu > 5120 + 64)
+        const checkupStepOf = (events: SessionEvent[], level: number) => events.flatMap(e => (e.type === "checkup" && e.result.level === level ? [e.result.steps] : []))
+
+        it("shortLives on: the life ends at the sleep where the 2048 checkup finished; the final file has end budget and that checkup; ended budget", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          inbox.setShortLives(true)
+          const events: SessionEvent[] = []
+          const r = await live(idb, { meta: await metaOf(), inbox, deps: { onEvent: e => events.push(e) } })
+          expect(r).toMatchObject({ ended: "budget", halted: false, steps: 35 })
+          expect(checkupStepOf(events, 2048)).toEqual([35])
+          const logs = await logsOf(idb)
+          const fin = logs.at(-1)!
+          expect(fin).toMatchObject({ final: true, stepsTotal: 35 })
+          expect(fin.meta!.end).toBe("budget")
+          expect(fin.checkups!.map(c => c.level)).toEqual([2048])
+          expect(logs.filter(f => f.final)).toHaveLength(1)
+          expect(logs.slice(0, -1).every(f => f.meta!.end === undefined)).toBe(true)
+          expect(await loadCheckpoint(idb, ID)).toBeUndefined()
+          expect(events.filter(e => e.type === "logged" && e.final)).toHaveLength(1)
+          await gateAccepts(logs)
+        })
+
+        it("a budget sleep that is also the 2048 crossing: one final file, with the filters and the checkup", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          inbox.setShortLives(true)
+          const r = await live(idb, { meta: await metaOf(), inbox, sleepInterval: 4 })
+          expect(r).toMatchObject({ ended: "budget", steps: 32 })
+          const logs = await logsOf(idb)
+          const fin = logs.at(-1)!
+          expect(fin).toMatchObject({ final: true, stepsTotal: 32, cu: 2048 })
+          expect(fin.meta!.end).toBe("budget")
+          expect(fin.checkups!.map(c => c.level)).toEqual([2048])
+          expect(floatsOf(fin.meta!.filters!).length).toBe(FILTER_FLOATS_PER_CONV1 * TINY.conv1)
+          expect(logs.filter(f => levelAtOrBelow(f.cu) === 2048)).toHaveLength(1)
+          await gateAccepts(logs)
+        })
+
+        it("shortLives switched on after the 2048 checkup was logged: ends at the next clean sleep", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          let checked = false
+          const events: SessionEvent[] = []
+          const r = await live(idb, { meta: await metaOf(), inbox, deps: { onEvent: e => {
+            events.push(e)
+            if (e.type === "checkup" && e.result.level === 2048) checked = true
+            if (e.type === "logged" && checked) inbox.setShortLives(true) // the 3072 file (step 48) took the 2048 checkup
+          } } })
+          expect(r.ended).toBe("budget")
+          const logs = await logsOf(idb)
+          const logged2048 = logs.find(f => (f.checkups ?? []).some(c => c.level === 2048))!
+          expect(logged2048).toMatchObject({ final: false, stepsTotal: 48 })
+          expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 50 })
+          expect(logs.at(-1)!.meta!.end).toBe("budget")
+          expect(checkupStepOf(events, 3072)).toEqual([50]) // that sleep's own checkup ran first, and is in the final file
+          expect(logs.at(-1)!.checkups!.map(c => c.level)).toEqual([3072])
+          await gateAccepts(logs)
+        })
+
+        it("switched on then off before 2048: no end", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          await expect(live(idb, { meta: await metaOf(), inbox, deps: { onTick: s => {
+            if (s.steps === 10) inbox.setShortLives(true)
+            if (s.steps === 30) inbox.setShortLives(false)
+            past4096.onTick(s)
+          } } })).rejects.toThrow("reload")
+          const logs = await logsOf(idb)
+          expect(logs.some(f => f.final)).toBe(false)
+          expect(levelsOf(logs)).toContain(4096)
+        })
+
+        it("a halt waiting at that sleep wins; the resumed run ends at its next clean sleep", async () => {
+          // After the 2048 checkup (it goes into the halt's file), and during it (abandoned: the resumed run checks it).
+          for (const when of ["checkup", "checkupStarted"] as const) {
+            const idb = new IDBFactory()
+            const inbox = new SessionInbox()
+            inbox.setShortLives(true)
+            const meta = await metaOf()
+            let asked = false
+            const first = await live(idb, { meta, inbox, deps: { onEvent: e => {
+              const level = e.type === "checkup" ? e.result.level : e.type === "checkupStarted" ? e.level : 0
+              if (e.type === when && level === 2048 && !asked) { asked = true; void inbox.checkpointNow({ halt: true }) }
+            } } })
+            expect(first, when).toMatchObject({ halted: true, steps: 35 })
+            expect(first.ended).toBeUndefined()
+            expect((await logsOf(idb)).some(f => f.final)).toBe(false)
+            const events: SessionEvent[] = []
+            const second = await live(idb, { meta, inbox, deps: { onEvent: e => events.push(e) } })
+            expect(second, when).toMatchObject({ ended: "budget", halted: false, steps: 40 })
+            const logs = await logsOf(idb)
+            expect(logs.at(-1)).toMatchObject({ final: true, stepsTotal: 40 })
+            expect(logs.at(-1)!.meta!.end).toBe("budget")
+            const where2048 = logs.filter(f => (f.checkups ?? []).some(c => c.level === 2048)).map(f => f.stepsTotal)
+            expect(where2048, when).toEqual(when === "checkup" ? [35] : [40])
+            expect(checkupStepOf(events, 2048)).toEqual(when === "checkup" ? [] : [40])
+            await gateAccepts(logs)
+          }
+        })
+
+        it("off (the default): the life passes 4096 CU and never ends", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          expect(inbox.shortLives).toBe(false)
+          await expect(live(idb, { meta: await metaOf(), inbox, deps: past4096 })).rejects.toThrow("reload")
+          const logs = await logsOf(idb)
+          expect(logs.some(f => f.final)).toBe(false)
+          expect(levelsOf(logs)).toEqual(expect.arrayContaining([2048, 3072, 4096]))
+          await gateAccepts(logs)
+        })
+
+        it("without cfg.meta, shortLives has no effect", async () => {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          inbox.setShortLives(true)
+          await expect(live(idb, { inbox, deps: past4096 })).rejects.toThrow("reload")
+          const logs = await logsOf(idb)
+          expect(logs.some(f => f.final || "meta" in f)).toBe(false)
+          expect(levelsOf(logs)).toContain(4096)
+        })
+      })
+
+      it("a failed life's final file has meta.end failed; a swept orphan's has meta.end orphan; without meta neither has end", async () => {
+        for (const withMeta of [true, false]) {
+          const meta = withMeta ? { meta: await metaOf() } : {}
+          // Failed: the learner throws at step 13.
+          const idb = new IDBFactory()
+          await expect(grow(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, stub: { throwAt: { steps: 13, error: new Error("boom") } } })).rejects.toThrow("boom")
+          const failed = await logsOf(idb)
+          expect(failed.at(-1)!.final).toBe(true)
+          if (withMeta) expect(failed.at(-1)!.meta).toEqual({ ...meta.meta!.birth, end: "failed" })
+          else expect("meta" in failed.at(-1)!).toBe(false)
+          await gateAccepts(failed)
+          // Orphan: the tab closes at step 33; a day later another tab's sweep deletes the checkpoint with a final file.
+          const idb2 = new IDBFactory()
+          await expect(grow(idb2, { cfg: { lifetimeCU: 140, sleepInterval: 10, ...meta }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+          // The stub's state has no version: label it this code's, so the sweep reads it (not a version orphan).
+          const c = (await loadCheckpoint(idb2, ID))!
+          await saveCheckpoint(idb2, { ...c, learnerState: { ...c.learnerState, version: LEARNER_STATE_VERSION } })
+          const later = () => new Date(1_700_000_000_000 + 25 * 3600_000)
+          const r = await sweepCheckpoints({ idb: idb2, tryLock: async () => ({ release: () => {}, wanted: async () => false }), now: later, adopt: true, final: { hostSig: cfgFor().hostSig, codeSha: "dev", now: later } })
+          expect(r.verdicts).toEqual({ [ID]: "stale" })
+          const orphaned = await logsOf(idb2)
+          expect(orphaned.at(-1)!.final).toBe(true)
+          if (withMeta) expect(orphaned.at(-1)!.meta).toEqual({ ...meta.meta!.birth, end: "orphan" })
+          else expect("meta" in orphaned.at(-1)!).toBe(false)
+          await gateAccepts(orphaned)
+        }
+      })
     })
 
     describe("world continuity: a resumed or restored learner wakes up in its checkpoint's room (Plan 04c)", () => {

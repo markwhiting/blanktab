@@ -60,6 +60,16 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **Call:** the page asks for confirmation. Once confirmed, the life ends at its next clean sleep, as a short life ends at its budget checkup. Switching short lives off never ends a life: without the switch no forever life ends (0014, 0019).
 - **Cost if wrong:** one prompt.
 
+### The switch, end reasons and the block in the session (Task 6) [agent]
+
+- **The switch is read at clean sleeps only.** A life with a meta block ends at the first clean sleep where the switch is on, its 2,048 CU checkup is done, and no checkup is still due. Its final file carries `meta.end = "budget"` and the checkups not yet logged. A flip between sleeps does nothing until the next one, so a life switched on and then off before a sleep never ends.
+- **A life already past its budget** ends at the next clean sleep once the switch goes on (ruling A above; the confirmation prompt is the page's).
+- **A halt waiting at that sleep goes first.** The resumed run ends at its next clean sleep. A halt asked during the 2,048 checkup abandons it, so the resumed run checks it again, and the checkup lands in the final file.
+- **Without a meta block the switch does nothing.** Test lives and lives without a genome space are unchanged.
+- **Other end reasons.** A failed life's final file has `meta.end = "failed"`. A swept orphan's has `meta.end = "orphan"`, but only when it has a block, from its checkpoint or its latest file (without that file's `filters`).
+- **A checkpoint's block is kept** even when the page gives no `cfg.meta` (for example, when the genome space failed to load). If it were dropped, the next resume would relabel a search life `legacy`, and the gate would refuse that because the block must stay constant.
+- **A legacy block is saved at once.** A pre-05a life resumed with `cfg.meta` saves a checkpoint with its new legacy block straight away. So every checkpoint it can be restored or ended from has that block.
+
 ### Settings an older life did not record (controller ruling) [agent]
 
 - **Call:** `legacyGenome` returns the genome plus `missing`, the sorted genes absent from a pre-05a life's settings whose value is genuinely unknown (for example sleepInterval, the caregiver genes, and exploreEpsilon or residualDecay on older lives). Those genes get centres only as placeholders, and the page shows "some settings not recorded". An absent mechanism is not mapped to "off", because we do not know what that life ran.

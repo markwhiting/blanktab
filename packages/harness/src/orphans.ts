@@ -166,7 +166,7 @@ export async function sweepCheckpoints(o: {
           learnerId, now: fin.now, hostSig: latest?.hostSig ?? fin.hostSig, codeSha: fin.codeSha, maxStepsPerSec: typeof m === "number" ? m : DEFAULT_MAX_STEPS_PER_SEC,
           knowledgeSha, sessionsSeenAtBirth,
         },
-        cp: from, latest,
+        cp: from, latest, end: "orphan", // only a life with a meta block gets an end (finalLogOf)
       })
     }
     try {

@@ -4,7 +4,7 @@ import { clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerStats, Widths } from "@blanktab/learner"
 import type { CaregiverState } from "./caregiver"
 import type { Checkpoint } from "./checkpoint"
-import { MAX_CURVE_POINTS, MILESTONE_SUITE_VERSION, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2 } from "./log"
+import { MAX_CURVE_POINTS, MILESTONE_SUITE_VERSION, type CurvePoint, type LogFile, type LogFileV1, type LogFileV2, type MetaBlock } from "./log"
 
 export const DEFAULT_MAX_STEPS_PER_SEC = 30
 
@@ -78,6 +78,9 @@ export interface Lived {
  * - Else, with no log file yet, from what it lived (with `birth`).
  * Counters never go below the latest file's. Labelled with the code the life was lived on: the checkpoint's, else the
  * latest file's, else `ctx.codeSha`.
+ *
+ * Its meta block (Plan 05a) is the checkpoint's, else the latest file's (without that file's `filters`, `heldOut` or
+ * `end`), with `end` set to `o.end` when given. A life without a block gets none (and so no `end`).
  */
 export function finalLogOf(o: {
   ctx: FinalContext
@@ -88,6 +91,8 @@ export function finalLogOf(o: {
   birth?: Birth | undefined
   /** The caregiver's carries since `cp` was saved (a live session counts them; an orphan's are unknown: 0). */
   carriesSinceSave?: number
+  /** Why the life ended (meta.end): "failed" from the session, "orphan" from the startup sweep. */
+  end?: "failed" | "orphan"
 }): LogFileV2 | null {
   const { ctx, cp, latest: last, lived } = o
   if (last?.final) return null
@@ -104,9 +109,19 @@ export function finalLogOf(o: {
       birth = undefined // a state of another version, or a stub: its birth facts are not known
     }
   }
+  const metaFrom = cp?.meta ?? prior?.meta
+  let meta: MetaBlock | undefined
+  if (metaFrom) {
+    const { filters: _f, heldOut: _h, end: _e, ...constant } = structuredClone(metaFrom)
+    void _f
+    void _h
+    void _e
+    meta = { ...constant, ...(o.end ? { end: o.end } : {}) }
+  }
+  const metaField = meta ? { meta } : {}
   const base = {
     schemaVersion: 2 as const, learnerId: id, seq: nextSeq, codeSha: cp?.codeSha ?? prior?.codeSha ?? ctx.codeSha, writtenAt: ctx.now().toISOString(), hostSig: { ...ctx.hostSig },
-    final: true, condition: "A" as const,
+    final: true, condition: "A" as const, ...metaField,
   }
   const birthFields = (b: Birth, care?: CaregiverState) => ({
     settings: { ...b.settings, maxStepsPerSec: ctx.maxStepsPerSec, seed: b.seed, ...(care ? care.settings : {}) }, widths: { ...b.widths },
@@ -152,9 +167,10 @@ export function finalLogOf(o: {
   }
   if (prior) {
     // Its counters, not its checkups or carries: those are on the record already, once.
-    const { checkups: _c, caregiver: _g, ...counters } = prior
+    const { checkups: _c, caregiver: _g, meta: _m, ...counters } = prior
     void _c
     void _g
+    void _m
     return { ...counters, ...base, knowledgeSha: prior.knowledgeSha, sessionsSeenAtBirth: prior.sessionsSeenAtBirth, curve: [] }
   }
   if (!last && birth && lived && lived.steps > 0) {

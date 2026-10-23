@@ -1,14 +1,17 @@
 // A learner's life: steps in the world, measured in compute units (CU), with sleeps, checkpoints and log files (v2).
 import type { Observation, WorldView } from "@blanktab/interface"
-import { clampSettings } from "@blanktab/learner"
+import { FIRST_LAYER_PARAMS, clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { hashSeed, type CanvasLike, type RoomKind, type World } from "@blanktab/world"
 import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings } from "./caregiver"
-import { runCheckup } from "./checkup"
+import { panelSeed, runCheckup } from "./checkup"
 import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf, thin, birthOf, type Birth, type Lived } from "./final"
 import { deleteCheckpoint, fromRecord, loadCheckpoint, saveCheckpoint, tailEvalCUError, type Checkpoint } from "./checkpoint"
 import { OFFLINE_KNOWLEDGE_SHA, type Manifest } from "./knowledge"
-import { MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing, type CheckupResult, type CurvePoint, type LogFileV2 } from "./log"
+import {
+  BUDGET_CU, parseMeta, FILTER_FLOATS_PER_CONV1, FILTER_LEVELS, MAX_CHECKUPS_PER_FILE, MAX_RESTORES, MILESTONE_SUITE_VERSION, isCurveLoss, levelAtOrBelow, nextCrossing,
+  type CheckupResult, type CurvePoint, type LogFileV2, type MetaBlock, type MetaEnd,
+} from "./log"
 import type { Milestone } from "./milestones"
 import { openQueue } from "./queue"
 // The log schedule lives in log.ts (browser-safe, shared with the gate); re-exported for existing callers.
@@ -23,6 +26,21 @@ export const RESTORE_AFTER_SKIPS = 20
 export const MAX_RESTORES_PER_CHECKPOINT = 3
 /** Five minutes: a GPU checkpoint is tens of MB, too much to write at every sleep. */
 export const DEFAULT_CHECKPOINT_EVERY_MS = 300_000
+
+/**
+ * Where a life's meta block comes from (spec §7.3; Plan 05a). The harness never reads a genome: it stores the block in
+ * every checkpoint and repeats it into every log file (with `filters` and `end` where they belong).
+ */
+export interface SessionMeta {
+  /** A newborn's draw (role search). */
+  birth: MetaBlock
+  /**
+   * The block of a resumed life whose checkpoint has none (born before 05a): role and method "legacy", evalPanel null
+   * (decision 0022: it keeps checkupSeed). `flat` is the life's settings as its log files record them.
+   */
+  legacy(flat: Record<string, number | string>): Promise<MetaBlock>
+}
+
 export interface SessionConfig {
   learnerId: string
   codeSha: string
@@ -51,6 +69,11 @@ export interface SessionConfig {
    * when these (or the checkpoint's caregiver) are set and the world has state, rooms and bringToFront.
    */
   caregiver?: CaregiverSettings
+  /**
+   * The meta-learner's block (Plan 05a). Absent: a newborn or a pre-05a resume gets no meta block (as before 05a), and
+   * the short-lives switch does nothing. A checkpoint's own block is kept either way (see runSession).
+   */
+  meta?: SessionMeta
 }
 
 /**
@@ -61,6 +84,8 @@ export type SessionLearner = Pick<TrainableLearner, "step" | "stats" | "sleep" |
   onKnowledge?(m: Manifest): void
   /** Checkups need it (decision 0016); a learner without it gets none. */
   frozenRun?: TrainableLearner["frozenRun"]
+  /** The filter snapshots (meta.filters at FILTER_LEVELS) need it; a learner without it gets none. */
+  readParams?: TrainableLearner["readParams"]
 }
 /** How the session asks for a learner: newborn, or from a checkpoint's state (createLearner's options minus the backend). */
 export type LearnerInit = { seed: number; widths: Widths; settings: LearnerSettings } | { state: LearnerState }
@@ -82,6 +107,8 @@ export type SessionEvent =
   | { type: "checkup"; result: CheckupResult }
   /** The caregiver carried the learner to room `to` after step `steps`. */
   | { type: "carried"; to: string; steps: number }
+  /** The life's meta block, once per run (after the resumed event, or at birth). */
+  | { type: "meta"; meta: MetaBlock }
 
 /**
  * The page's requests to a running life (decision 0014), handled by runSession between steps, so never during a step
@@ -91,6 +118,7 @@ export class SessionInbox {
   #knowledge: Manifest | undefined
   #waiting: { resolve: (saved: boolean) => void; halt: boolean }[] = []
   #halted = false
+  #shortLives = false
 
   /**
    * The manifest of refreshed knowledge, in force from the next clean step on (never while skipped updates are
@@ -113,6 +141,17 @@ export class SessionInbox {
     if (this.#halted) return Promise.resolve(true)
     return new Promise(resolve => this.#waiting.push({ resolve, halt: opts.halt ?? false }))
   }
+
+  /**
+   * The short-lives switch (decisions 0019, 0022), off by default. runSession reads it at clean sleeps only: a life with
+   * a meta block ends at the first clean sleep where it is on, its budget checkup (BUDGET_CU) is done and no checkup is
+   * still due. So a life already past its budget ends at the next clean sleep once it is switched on; switching it off
+   * never ends a life. Like the inbox, it outlives a run.
+   */
+  setShortLives(on: boolean): void {
+    this.#shortLives = on
+  }
+  get shortLives(): boolean { return this.#shortLives }
 
   /** Whether a waiting request asks to halt (a running checkup is abandoned for it). */
   get haltWaiting(): boolean { return this.#waiting.some(r => r.halt) }
@@ -186,6 +225,20 @@ export interface SessionResult {
   alreadyFinal: boolean
   /** The life stopped after a forced save asked to halt (SessionInbox.checkpointNow): it is not over; its checkpoint is that save. */
   halted: boolean
+  /** "budget": the short-lives switch ended the life at its budget checkup (decision 0019); its final file says so. */
+  ended?: "budget"
+}
+
+/** base64 of the floats, little-endian float32 (meta.filters). */
+function float32Base64(parts: readonly Float32Array[]): string {
+  const n = parts.reduce((a, p) => a + p.length, 0)
+  const view = new DataView(new ArrayBuffer(4 * n))
+  let i = 0
+  for (const p of parts) for (const x of p) view.setFloat32(4 * i++, x, true)
+  const bytes = new Uint8Array(view.buffer)
+  let bin = ""
+  for (let j = 0; j < bytes.length; j += 0x8000) bin += String.fromCharCode(...bytes.subarray(j, j + 0x8000))
+  return btoa(bin)
 }
 
 /**
@@ -272,6 +325,13 @@ export function curvePoint(
  *   room's loss; nor is the first one of a run or after a restore), and every caregiverPeriod steps may carry the learner
  *   to another room through world.bringToFront (never during a checkup). Nothing it reads or
  *   decides reaches the learner. Its carries go into each log file, its settings into `settings`, its state into checkpoints.
+ * - The meta block (Plan 05a): the checkpoint's if it has one; else, with `cfg.meta`, a resumed life's legacy block
+ *   (cfg.meta.legacy of its flat settings, saved in a checkpoint at once) or a newborn's `cfg.meta.birth`; else none.
+ *   It goes into every checkpoint and log file, and nothing of it reaches the learner. A crossing file at a FILTER_LEVELS level
+ *   carries `filters` (the first layer, through learner.readParams). With a meta block evalPanel, checkups meet
+ *   panelSeed variants. A failed life's final file has `end: "failed"`. With the inbox's short-lives switch on, at a
+ *   clean sleep with the BUDGET_CU checkup done, no checkup due and no halt waiting, the life ends: its final file has
+ *   `end: "budget"` and the result says `ended: "budget"`.
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
   const lifetimeCU = cfg.lifetimeCU ?? Number.POSITIVE_INFINITY // no lifetime: the life ends only by failure or the caller
@@ -323,7 +383,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     return finalLogOf({
       ctx: { learnerId: id, now, hostSig: cfg.hostSig, codeSha: cfg.codeSha, maxStepsPerSec, knowledgeSha, sessionsSeenAtBirth },
-      cp, latest: await queue.latest(id), lived, birth, carriesSinceSave,
+      cp, latest: await queue.latest(id), lived, birth, carriesSinceSave, end: "failed",
     })
   }
 
@@ -394,6 +454,17 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       : cfg.caregiver ? { settings: clampCaregiverSettings(cfg.caregiver), seed: hashSeed(seed, "caregiver") }
       : undefined
     let caregiver: Caregiver | undefined = careInit ? createCaregiver(careInit) : undefined
+    /** The life's settings as its log files record them (learner, speed cap, seed and the caregiver's). */
+    const flatSettings = (): Record<string, number> => ({ ...settings, maxStepsPerSec, seed, ...(caregiver ? caregiver.state().settings : {}) })
+    // The life's meta block (Plan 05a): its checkpoint's, kept whatever the config says (a life never changes its block,
+    // and the gate holds it constant); else, with cfg.meta, a pre-05a life's legacy block or a newborn's draw.
+    const metaFromConfig = cp?.meta === undefined && cfg.meta !== undefined
+    const meta: MetaBlock | undefined = cp?.meta ?? (cfg.meta === undefined ? undefined : cp ? await cfg.meta.legacy(flatSettings()) : cfg.meta.birth)
+    if (metaFromConfig && meta) {
+      // Never write a block the parser refuses: no filters, end or heldOut here (they are per file), no newborn role.
+      const bad = parseMeta(meta, { cu: 0, stepsTotal: 0, final: false })
+      if (typeof bad === "string") throw new TypeError(`learner ${id}: cfg.meta gave a bad meta block: ${bad}`)
+    }
     /** The room the previous frame was seen in (undefined: no previous frame this run, or a restore since). */
     let prevRoom: string | undefined
     /**
@@ -423,6 +494,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, stats: learner.stats() })
       restoreRoom(cp)
       if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)) })
+      if (meta) emit({ type: "meta", meta: structuredClone(meta) })
 
       const checkpointNow = async (): Promise<Checkpoint> => {
         const c: Checkpoint = {
@@ -433,6 +505,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), ...(tail.length > 0 && tailSuite !== 1 ? { suiteVersion: tailSuite } : {}) } } : {}),
           ...(caregiver ? { caregiver: caregiver.state() } : {}),
           ...(typeof world.state === "function" ? { world: { room: world.state().room } } : {}),
+          ...(meta ? { meta: structuredClone(meta) } : {}),
           learnerState: await learner.save(),
         }
         // Never write a checkpoint that would not load (checkCheckpoint): a tail is billed inside the learner's evalCU.
@@ -441,8 +514,27 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         return c
       }
       const checkupsOn = () => deps.checkups !== undefined && typeof learner.frozenRun === "function"
-      /** The log file of this moment. It takes the checkup results and the caregiver's carries since the last file. */
-      const logFile = (final: boolean): LogFileV2 => {
+      /**
+       * meta.filters for a file at `cu` (spec §5.1): the first layer's filters (FIRST_LAYER_PARAMS) when levelAtOrBelow(cu)
+       * is a FILTER_LEVELS level, the life has a meta block and the learner can read its params; else undefined.
+       */
+      const filtersAt = async (cu: number): Promise<string | undefined> => {
+        const level = levelAtOrBelow(cu)
+        if (!meta || !learner.readParams || level === null || !FILTER_LEVELS.includes(level)) return undefined
+        const params = await learner.readParams()
+        const parts = FIRST_LAYER_PARAMS.map(i => params[i])
+        const n = parts.reduce((a, p) => a + (p?.length ?? 0), 0)
+        // Never a file the parser refuses: exactly FILTER_FLOATS_PER_CONV1 per unit of widths.conv1.
+        if (parts.some(p => p === undefined) || n !== FILTER_FLOATS_PER_CONV1 * widths.conv1) {
+          throw new Error(`learner ${id}: the first layer has ${n} values, not ${FILTER_FLOATS_PER_CONV1}·${widths.conv1}`)
+        }
+        return float32Base64(parts as Float32Array[])
+      }
+      /**
+       * The log file of this moment. It takes the checkup results and the caregiver's carries since the last file. Its
+       * meta block (if the life has one) carries `filters` and `end` when given.
+       */
+      const logFile = (final: boolean, filters?: string, end?: MetaEnd): LogFileV2 => {
         // checkupAtSleep never lets the tail grow past this; a file with more would be refused by the gate.
         if (tail.length > MAX_CHECKUPS_PER_FILE) throw new Error(`log file: ${tail.length} checkups, more than ${MAX_CHECKUPS_PER_FILE}`)
         const st = learner.stats()
@@ -450,10 +542,11 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         tail = []
         return {
           schemaVersion: 2, learnerId: id, seq, codeSha: cfg.codeSha, knowledgeSha, writtenAt: now().toISOString(),
-          stepsTotal: steps, settings: { ...settings, maxStepsPerSec, seed, ...(caregiver ? caregiver.state().settings : {}) }, hostSig: { ...cfg.hostSig },
+          stepsTotal: steps, settings: flatSettings(), hostSig: { ...cfg.hostSig },
           sessionsSeenAtBirth, final, cu: st.cu, condition: "A", widths: { ...widths }, curve: [...curve],
           skippedUpdates: st.skippedUpdates + lostSkips, restores, lostCU, evalCU: st.evalCU,
           ...checked, ...(caregiver ? { caregiver: caregiver.takeSummary() } : {}),
+          ...(meta ? { meta: { ...structuredClone(meta), ...(filters !== undefined ? { filters } : {}), ...(end ? { end } : {}) } } : {}),
         }
       }
       const addPoint = (atSleep: boolean) => {
@@ -468,8 +561,9 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         lastSavedAt = clock.now()
       }
 
-      // A newborn's first checkpoint, so there is always one to restore.
-      if (!cp) {
+      // A newborn's first checkpoint, so there is always one to restore. A resumed life given its block just now (a
+      // legacy one) saves at once too, so every checkpoint it may restore or fail from has the block.
+      if (!cp || (cp.meta === undefined && meta !== undefined)) {
         const first = await checkpointNow()
         await saveCheckpoint(idb, first)
         cp = first
@@ -498,6 +592,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         const out = await runCheckup({
           learnerId: id, level, steps, learner: { frozenRun: o => l.frozenRun!(o), stats: () => l.stats() },
           canvas: () => c.canvas(), ...(c.suite ? { suite: c.suite } : {}),
+          // A shared panel (decision 0022); a life without meta, or a legacy one, keeps checkupSeed.
+          ...(meta && meta.evalPanel !== null ? { variantSeed: (lv: number, m: string) => panelSeed(meta.evalPanel!, lv, m) } : {}),
           ...(deps.recoverable ? { recoverable: deps.recoverable } : {}),
           shouldStop: () => inbox?.haltWaiting ?? false, yieldNow: pace,
         })
@@ -510,6 +606,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         return true
       }
 
+      /** Whether a checkup is due that has not run (the highest level at or below cu is above the last one checked). */
+      const checkupDue = (cu: number) => checkupsOn() && (levelAtOrBelow(cu) ?? 0) > lastLevel
+      /** Set when the short-lives switch ends the life. */
+      let ended: "budget" | undefined
       while (learner.stats().cu < lifetimeCU) {
         await pace()
         const room = caregiver ? world.state!().room : undefined // the room the coming frame is seen in
@@ -524,7 +624,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         }
         let checkpointDue = false
         let saveNow = false // a checkup finished: its level is saved at once, so a reload never checks it again
-        if (steps % sleepInterval === 0) {
+        const slept = steps % sleepInterval === 0
+        if (slept) {
           await learner.sleep()
           addPoint(true)
           checkpointDue = true
@@ -584,6 +685,12 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           inbox?.answer(false) // not now: the page asks again later
           continue // no checkpoint now; a crossing waits until updates apply again
         }
+        // Short lives (decisions 0019, 0022): the switch is read at clean sleeps only. A life with a meta block ends once
+        // its budget checkup is done and no checkup is still due; a halt waiting goes first (the resumed run ends).
+        if (slept && meta && inbox?.shortLives && !inbox.haltWaiting && lastLevel >= BUDGET_CU && !checkupDue(st.cu)) {
+          ended = "budget"
+          break
+        }
         // Taken before the save: a request made while it is written waits for the next step's.
         const forced = inbox?.take() ?? []
         const halt = forced.some(r => r.halt)
@@ -591,7 +698,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
         // A log file now: at a crossing; before a halt (a code reload: the points so far are this code's); and before a
         // new knowledgeSha comes into force (the points so far are the old knowledge's). One file covers all three.
         if (st.cu >= crossing || halt || (fresh !== undefined && fresh.knowledgeSha !== knowledgeSha)) {
-          const f = logFile(false) // under the code and knowledge the points in it were lived with
+          const filters = st.cu >= crossing ? await filtersAt(st.cu) : undefined // a crossing at 512, 1024 or 2048
+          const f = logFile(false, filters) // under the code and knowledge the points in it were lived with
           seq++
           curve = []
           crossing = nextCrossing(st.cu)
@@ -623,14 +731,16 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       }
 
       addPoint(false) // the end of the life: no sleep here, so no held-out score of its own
-      const end = logFile(true)
+      // The final file is also a crossing file when it falls on one (a short life's budget sleep can).
+      const cuNow = learner.stats().cu
+      const end = logFile(true, cuNow >= crossing ? await filtersAt(cuNow) : undefined, ended)
       await queue.put(end, { remove: id })
       cp = undefined // the life is over: nothing left to fail
       live = undefined
       seq++
       inbox?.answer(false) // the life is over: there is no checkpoint now
       emit({ type: "logged", seq: end.seq, steps: end.stepsTotal, cu: end.cu, final: true })
-      return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: false }
+      return { steps, cu: learner.stats().cu, seq, resumedFrom, alreadyFinal: false, halted: false, ...(ended ? { ended } : {}) }
     } finally {
       learner.dispose()
     }
