@@ -5,10 +5,10 @@ import type { LogFileV2 } from "@blanktab/harness/log"
 import { budgetWindow, clip, isGpuWidths, isV2, median } from "./life"
 import type { EvalOutput, Evaluator, LifeInput, MilestoneKey, References } from "./types"
 
-/** This version's own budget and levels (config/evaluation.json must agree; tools/eval/config.test.ts checks). */
-export const SEARCH_BUDGET_CU = 2048
-export const SEARCH_LEVELS: readonly number[] = [512, 1024, 2048]
-/** The suite this version reads: checkups of any other suite are not read. */
+/** This version's own budget and levels, published as `searchComposite.budget` (config/evaluation.json must agree). */
+const SEARCH_BUDGET_CU = 2048
+const SEARCH_LEVELS: readonly number[] = Object.freeze([512, 1024, 2048])
+/** The milestone suite this version reads (the newborn reference's suite). */
 const SUITE = 1
 /** C's milestones and κ_m = 0.1 × each pass threshold (decision 0016). M1 is left out of C (H covers prediction). */
 const KAPPA: Readonly<Record<Exclude<MilestoneKey, "M1">, number>> = { M2: 0.2, M3: 0.2, M4: 0.06, M5: 0.15, M6: 0.3 }
@@ -51,16 +51,19 @@ function evaluateLife(life: LifeInput, refs: References): EvalOutput {
   if (!files.every(f => isGpuWidths(f.widths))) return ineligible("not gpu widths")
   const ref = refs.newborn
   if (!ref) return ineligible("no newborn reference")
-  const last = files[files.length - 1]!
-  if (last.final && last.cu < SEARCH_BUDGET_CU) {
-    if (last.meta!.end === "failed") return scored(FAILED, FAILED, { failed: true, cu: last.cu })
-    return ineligible("abandoned", { cu: last.cu, end: last.meta!.end ?? null })
-  }
+  const suites = files.filter(f => (f.checkups ?? []).length > 0).map(f => f.milestoneSuiteVersion)
+  if (suites.some(v => v !== SUITE)) return ineligible("wrong milestone suite", { suites })
 
   const measures = new Map<number, Record<string, number | null>>()
   for (const f of files) {
-    if (f.milestoneSuiteVersion !== SUITE) continue
     for (const c of f.checkups ?? []) if (SEARCH_LEVELS.includes(c.level) && !measures.has(c.level)) measures.set(c.level, c.measures)
+  }
+  // The life's end. A life that failed before its budget checkup is a row, ranked worst, whatever its cu (spec §2.4);
+  // one that stopped below the budget without failing is abandoned.
+  const last = files[files.length - 1]!
+  if (last.final && !measures.has(SEARCH_BUDGET_CU)) {
+    if (last.meta!.end === "failed") return scored(FAILED, FAILED, { failed: true, cu: last.cu })
+    if (last.cu < SEARCH_BUDGET_CU) return ineligible("abandoned", { cu: last.cu, end: last.meta!.end ?? null })
   }
   if (!measures.has(SEARCH_BUDGET_CU)) return ineligible("no 2048 checkup")
   const levels = SEARCH_LEVELS.filter(L => measures.has(L))
@@ -123,8 +126,13 @@ function midRanks(xs: readonly number[]): number[] {
   return ranks
 }
 
-/** The rank sums rank(C) + rank(H) over the eligible outputs, in order. Mid-ranks are halves, so the sums are exact. */
+/**
+ * The rank sums rank(C) + rank(H) over the eligible outputs, in order. Mid-ranks are halves, so the sums are exact.
+ * Every output must be this evaluator's at this version: rows never mix evaluator versions (decision 0020).
+ */
 function rankSums(outs: readonly EvalOutput[]): number[] {
+  const alien = outs.find(o => o.evaluator !== ID || o.version !== VERSION)
+  if (alien) throw new Error(`${ID}@${VERSION} cannot rank an output of ${alien.evaluator}@${alien.version}: rows never mix evaluator versions`)
   const rows = outs.filter(o => o.eligible)
   const comp = (k: "C" | "H") => rows.map(o => {
     const v = o.components[k]
@@ -151,5 +159,6 @@ function targets(outs: EvalOutput[]): number[] {
 }
 
 export const searchComposite: Evaluator = Object.freeze({
-  id: ID, version: VERSION, kind: "life" as const, needs: Object.freeze(["newborn"]) as string[], evaluateLife, targets,
+  id: ID, version: VERSION, kind: "life" as const, needs: Object.freeze(["newborn"]) as string[],
+  budget: Object.freeze({ budgetCU: SEARCH_BUDGET_CU, levels: SEARCH_LEVELS }), evaluateLife, targets,
 })

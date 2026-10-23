@@ -31,7 +31,8 @@ const ref = (over: Partial<NewbornReference> = {}): NewbornReference => {
 const score = (life: LifeInput, refs = { newborn: ref() }) => searchComposite.evaluateLife!(life, refs)
 
 describe("search-composite@1 (spec §2.4)", () => {
-  it("is registered under its id@version, with the newborn reference as its need", () => {
+  it("is registered under its id@version, with the newborn reference as its need and its own budget", () => {
+    expect(searchComposite.budget).toEqual({ budgetCU: 2048, levels: [512, 1024, 2048] })
     expect(REGISTRY["search-composite@1"]).toBe(searchComposite)
     expect(getEvaluator("search-composite@1")).toBe(searchComposite)
     expect(searchComposite).toMatchObject({ id: "search-composite", version: 1, kind: "life", needs: ["newborn"] })
@@ -102,6 +103,9 @@ describe("search-composite@1 (spec §2.4)", () => {
       ]],
       ["abandoned", [...typical.slice(0, 2), file({ learnerId: id, seq: 2, cu: 1500, final: true, meta: meta({ end: "orphan" }) })]],
     ]
+    // Suite 2 does not exist yet, so its file is built by hand (parseLogFile would reject it).
+    const suite2 = score({ learnerId: id, files: [...typical.slice(0, 3), { ...typical[3]!, milestoneSuiteVersion: 2 } as LogFile] })
+    expect(suite2).toMatchObject({ eligible: false, reason: "wrong milestone suite", score: null })
     for (const [reason, files, refs] of cases) {
       const out = score(lifeOf(id, files), (refs ?? { newborn: ref() }) as { newborn: NewbornReference })
       expect(out, reason).toMatchObject({ evaluator: "search-composite", version: 1, eligible: false, reason, score: null, components: { C: null, H: null } })
@@ -121,6 +125,13 @@ describe("search-composite@1 (spec §2.4)", () => {
       const m = meta(end ? { end } : {})
       expect(score(lifeOf(id, [...head, file({ learnerId: id, seq: 2, cu: 1300, final: true, meta: m })])).reason).toBe("abandoned")
     }
+    // A life that failed past 2048 CU before its 2048 checkup ran is a failed row too, not dropped.
+    const typical = typicalLife(id)
+    const failedLate = score(lifeOf(id, [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: 2600, final: true, meta: meta({ end: "failed" }) })]))
+    expect(failedLate).toMatchObject({ eligible: true, score: -4, components: { C: -2, H: -2 }, diagnostics: { failed: true, cu: 2600 } })
+    // An orphan past 2048 without the checkup is not abandoned (it lived its budget) but has no checkup.
+    expect(score(lifeOf(id, [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: 2600, final: true, meta: meta({ end: "orphan" }) })])).reason)
+      .toBe("no 2048 checkup")
     // A life still running below 2048 (its last file is not final) is not abandoned: its checkup may come.
     expect(score(lifeOf(id, head)).reason).toBe("no 2048 checkup")
   })
@@ -165,6 +176,11 @@ describe("search-composite@1 (spec §2.4)", () => {
     const split = [out(1, 4), out(2, 3), out(3, 5), out(4, 1), out(5, 2)]
     expect(searchComposite.targets!(split)).toEqual([0.3, 0.3, 0.9, 0.3, 0.7].map(normInv))
     expect(searchComposite.targets!([out(1, 1)])).toEqual([0])
+    // Rows never mix evaluator versions: an output of another evaluator or version is refused, eligible or not.
+    for (const alien of [{ ...out(0, 0), version: 2 }, { ...out(0, 0, false), evaluator: "other" }]) {
+      expect(() => searchComposite.targets!([out(1, 1), alien])).toThrow(/never mix evaluator versions/)
+      expect(() => rankAverage([alien, out(1, 1)])).toThrow(/never mix evaluator versions/)
+    }
     expect(searchComposite.targets!([])).toEqual([])
   })
 

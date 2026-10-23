@@ -23,12 +23,23 @@ export interface NewbornReference {
   heldOutMedian: number
 }
 
-/** The pinned reference files an evaluator may read (by its `needs`). Absent → the evaluator says it is ineligible. */
-export interface References { newborn?: NewbornReference }
+/**
+ * The pinned reference files, by name. An evaluator declares the names it reads in `needs`; tools/eval/config.ts loads
+ * exactly those, each with its parser from REFERENCE_PARSERS. An absent one → the evaluator says it is ineligible.
+ * `newborn` is the only reference in v1; a new one is a parser entry plus a typed key here.
+ */
+export interface References { newborn?: NewbornReference; [name: string]: unknown }
+
+/** A reference file's parser: the parsed reference, or null if the JSON is not one. */
+export type ReferenceParser = (v: unknown) => unknown
+
+/** The evaluation budget an evaluator reads (a life evaluator's own constants; config/evaluation.json must agree). */
+export interface EvalBudget { budgetCU: number; levels: readonly number[] }
 
 export interface Evaluator {
   id: string; version: number; kind: "life" | "cohort"
-  needs: string[] // reference ids it reads, e.g. ["newborn"]
+  needs: string[] // reference names it reads, e.g. ["newborn"]: the source of truth for what config loads
+  budget?: EvalBudget // the CU budget and checkup levels it reads (life evaluators)
   evaluateLife?(life: LifeInput, refs: References): EvalOutput // kind "life"
   evaluateCohort?(groups: Record<string, LifeInput[]>, refs: References): EvalOutput // kind "cohort": a test over arms
   targets?(outs: EvalOutput[]): number[] // search only: the GP target transform (spec §2.4)

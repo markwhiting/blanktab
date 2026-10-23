@@ -5,10 +5,10 @@ import { newbornBaseline } from "./newborn-baseline"
 import { searchComposite } from "./search-composite"
 import type { Evaluator } from "./types"
 
-export type { EvalOutput, Evaluator, LifeInput, MilestoneKey, NewbornReference, References } from "./types"
+export type { EvalBudget, EvalOutput, Evaluator, LifeInput, MilestoneKey, NewbornReference, ReferenceParser, References } from "./types"
 export { GPU_WIDTHS_CLASS } from "./types"
-export { parseNewbornReference } from "./reference"
-export { rankAverage, searchComposite, SEARCH_BUDGET_CU, SEARCH_LEVELS } from "./search-composite"
+export { parseNewbornReference, REFERENCE_PARSERS } from "./reference"
+export { rankAverage, searchComposite } from "./search-composite"
 export { newbornBaseline } from "./newborn-baseline"
 
 export const REGISTRY: Readonly<Record<string, Evaluator>> = Object.freeze({

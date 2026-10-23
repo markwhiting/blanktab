@@ -15,10 +15,13 @@ The meta-learner (0018) ranks genomes by a score, decides when to promote by a t
 
 - **One package, one interface.** `packages/evaluators` (`@blanktab/evaluators`) holds every evaluator behind the spec §2.1 interface (`Evaluator`, `LifeInput`, `EvalOutput`, `References`). It may import only `@blanktab/harness/log` and `@blanktab/detmath`, and it is pure: no IO, no clock, no `Math.random`, and no engine transcendentals or `**` (the lint purity rules of plan 05a). The same input bytes give the same output bytes.
 - **Versioned, and old versions stay.** `REGISTRY` is keyed `id@version` (`search-composite@1`, `newborn-baseline@1`; `signal-check@1` and `confirm-fisher@1` join in Task 8). `getEvaluator` throws on an unknown key. A registered version is never edited or removed, so any merged life can be rescored under any version.
-- **The version-bump rule.** Any change to what an evaluator computes, including its constants, means a new version in `REGISTRY` and a recorded decision. `search-composite@1` keeps its own copies of the budget (2,048 CU) and levels (512, 1,024, 2,048), so it cannot move silently with harness constants. `tools/eval/config.test.ts` checks that they agree with `config/evaluation.json` and the harness's `BUDGET_CU` and `FILTER_LEVELS`.
+- **The version-bump rule.** Any change to what an evaluator computes, including its constants, means a new version in `REGISTRY` and a recorded decision.
+- **Swapping an evaluator touches only a new module, one `REGISTRY` line and `config/evaluation.json`** (the user's requirement). To make that hold:
+  - **The budget lives on the evaluator.** A life evaluator declares its own `budget` (`{ budgetCU, levels }`). `search-composite@1`'s is 2,048 CU at 512, 1,024 and 2,048, so it cannot move silently with harness constants. `tools/eval/config.test.ts` checks the config's `budgetCU` and `levels` against `REGISTRY[config.search].budget`, whichever evaluator is pinned, and against the harness's `BUDGET_CU` and `FILTER_LEVELS`.
+  - **References are generic.** `config.references` maps a reference name to a file directly under `config/references/`. Each evaluator's `needs` is the source of truth. `loadEvalConfig` fails, naming the evaluator and the reference, when a pinned evaluator needs a reference that has no registered parser (`REFERENCE_PARSERS`) or no pinned path. It also fails when the config pins a reference that no pinned evaluator needs, or pins an unknown evaluator (other than the pending Task 8 pins in `PENDING_PINS`). `loadReferences` loads exactly the needed references, each with its parser. `newborn` is the only reference in v1.
 - **The pinned config.** `config/evaluation.json` is spec §2.2, with `decision` pointing here. It is not in `knowledgeSha`, because learners never read it. `tools/eval/config.ts` reads it strictly (`loadEvalConfig`) and loads its references (`loadReferences`). An absent reference gives `{}`, so scores are ineligible ("no newborn reference"). A malformed one throws.
 - **The gate never writes `config/`.** A change to a pin is an edit to `config/evaluation.json` by a person or a coding agent, under a recorded decision. The gate labels any PR touching it `needs-human`, as for every non-log path.
-- **Rows never mix evaluator versions.** A posterior or a table is built under one `evaluator@version`, and says which. Changing the search evaluator starts a fresh fit, and old lives are rescored rather than mixed.
+- **Rows never mix evaluator versions.** A posterior or a table is built under one `evaluator@version`, and says which. Changing the search evaluator starts a fresh fit, and old lives are rescored rather than mixed. This is enforced in code: `targets` and `rankAverage` throw on any output whose `evaluator` or `version` is not their own, whether or not it is eligible.
 - **`search-composite@1`** is spec §2.4. These are the details the spec left open:
   - **The budget window.** It reads the files up to and including the first one that holds the 2,048 checkup. If no file holds it, the window ends at the first file past 2,048 CU, or else it is all the files. Within the window it reads only curve points at cu ≤ 2,048 and the checkups at 512, 1,024 and 2,048 of suite 1. Later files never change a score.
   - **The eligibility order.** The reasons are checked in this order:
@@ -26,12 +29,15 @@ The meta-learner (0018) ranks genomes by a score, decides when to promote by a t
     2. "no meta block before the checkup";
     3. "not gpu widths": the widths class only, so a GPU life that fell back to the CPU still counts;
     4. "no newborn reference";
-    5. then the life's end: a final file below 2,048 CU with `end: "failed"` is a row with C = H = −2, and any other final file below 2,048 CU is "abandoned", including one with no `end` from older code;
-    6. "no 2048 checkup";
-    7. "fewer than 2 of 3 levels";
-    8. "fewer than 3 held-out points in (1024, 2048]".
+    5. "wrong milestone suite": a window file's checkups are not of the reference's suite (1);
+    6. then the life's end, when the window holds no 2,048 checkup and its last file is final:
+       - with `end: "failed"`, the life is a row with C = H = −2 at any cu. A life that failed past 2,048 CU before its 2,048 checkup ran is ranked worst, not dropped;
+       - otherwise, below 2,048 CU, it is "abandoned", including a final file with no `end` from older code;
+    7. "no 2048 checkup";
+    8. "fewer than 2 of 3 levels";
+    9. "fewer than 3 held-out points in (1024, 2048]".
 
-    "Abandoned" comes before the checkup checks because such a life can never hold the 2,048 checkup. A life whose last file is not final and is below 2,048 CU may still be running, so it reads "no 2048 checkup", not "abandoned".
+    "Abandoned" comes before the checkup checks because such a life can never hold the 2,048 checkup. A life whose last file is not final and is below 2,048 CU may still be running, so it reads "no 2048 checkup", not "abandoned". So does an orphan past 2,048 CU without the checkup.
   - **Held-out points** with a zero baseline are skipped.
   - **Measures.** A measure that would make (x + κ) ≤ 0 gives q = −2. M1's diagnostic q uses κ = 0.08 (0.1 × its 0.8 threshold), and a null M1 stays null. M1 is not part of C.
   - **The GP targets** rank a_i through the exact rank sums rank(C) + rank(H). These are half-integers, so floating-point rounding cannot split a tie. `rankAverage` returns (rank(C) + rank(H) − 1)/(2n), which is (u_C + u_H)/2.
