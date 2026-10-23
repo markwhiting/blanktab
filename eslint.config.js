@@ -99,6 +99,15 @@ const purity = pkg => ({
   },
 })
 
+// The one Web Crypto exception (decision 0021): sha256Hex in packages/meta/src/sha.ts hashes through crypto.subtle,
+// which is a pure function of its input. Only `crypto` is dropped, and only there; every other ban stays.
+const webCryptoException = {
+  files: ["packages/meta/src/sha.ts"],
+  rules: {
+    "no-restricted-globals": ["error", ...IMPURE_GLOBALS.filter(name => name !== "crypto").map(name => ({ name, message: `${name} ${IMPURE}` }))],
+  },
+}
+
 export default tseslint.config(
   { ignores: ["node_modules/**", "dist/**", "**/dist/**", "app/dist-e2e/**", "test-results/**", "playwright-report/**", ".local/**", ".superpowers/**", ".worktrees/**"] },
   js.configs.recommended,
@@ -110,4 +119,5 @@ export default tseslint.config(
   ...Object.entries(FORBIDDEN).filter(([, b]) => b.length).flatMap(([p]) => [wall(p), dynamicWall(p)]),
   worldPurity,
   ...PURE.map(purity),
+  webCryptoException,
 )

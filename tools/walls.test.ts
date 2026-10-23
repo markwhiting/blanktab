@@ -102,6 +102,16 @@ describe("walls for detmath, meta and evaluators", () => {
       expect(await determinismErrors("Date.now()", `packages/${pkg}/test/x.test.ts`)).toHaveLength(0)
     }
   })
+  it("the Web Crypto exception (0021): crypto passes only in packages/meta/src/sha.ts, where every other ban stays", async () => {
+    const code = "export const d = crypto.subtle.digest('SHA-256', new Uint8Array())"
+    expect(await determinismErrors(code, "packages/meta/src/sha.ts")).toHaveLength(0)
+    for (const f of ["packages/meta/src/genome.ts", "packages/meta/src/x.ts", "packages/meta/src/sub/sha.ts", "packages/detmath/src/sha.ts", "packages/evaluators/src/sha.ts"])
+      expect(await determinismErrors(code, f), f).toHaveLength(1)
+    for (const g of ["Date.now()", "performance.now()", "fetch('x')", "setTimeout(() => 0)", "Math.random()", "Math.exp(1)", "globalThis.crypto.subtle"])
+      expect(await determinismErrors(g, "packages/meta/src/sha.ts"), g).toHaveLength(1)
+    expect(await errors(`import "node:crypto"`, "packages/meta/src/sha.ts")).toHaveLength(1)
+    expect(await errors("const y = 2 ** 3", "packages/meta/src/sha.ts")).toHaveLength(1)
+  })
   it("all maths goes through detmath: Math transcendentals and ** are errors in packages/{detmath,meta,evaluators}/src", async () => {
     const MATH = ["exp", "expm1", "log", "log1p", "log2", "log10", "pow", "sin", "cos", "tan", "asin", "acos", "atan",
       "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "cbrt", "hypot"]

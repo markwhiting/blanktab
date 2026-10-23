@@ -26,7 +26,7 @@
 - **Decoding** (`decodeGenome`) emits the implemented genes only, grouped by target: the learner's settings (`LearnerSettings`, with `gamma`), the caregiver's settings, and the harness's `maxStepsPerSec` and `sleepInterval`. A reserved slot never reaches code. The learner never sees its genome (AGENTS.md invariant 2).
 - **Integrity.** `genomeSha` = sha256 (Web Crypto) of `JSON.stringify({ schemaVersion, values })`, with `values` keys sorted, so key order never changes it.
 - **A slot goes live only with a bit-exact-at-centre golden test, under a new schemaVersion.** The mechanism's code lands with a golden test proving that the learner at the slot's centre is bit-identical to the learner without it. The gene then becomes implemented under a new genome-space `schemaVersion`, which means a fresh fit.
-- **Code.** The schema, maps and decoding live in `packages/meta` (`@blanktab/meta`), which imports only `@blanktab/detmath` and is pure (the lint purity bans of plan 05a). Its one Web Crypto call, in `sha256Hex`, is the only permitted use of the `crypto` global there, because sha256 is a pure function of its input.
+- **Code.** The schema, maps and decoding live in `packages/meta` (`@blanktab/meta`), which imports only `@blanktab/detmath` and is pure (the lint purity bans of plan 05a). Its one Web Crypto call, in `sha256Hex`, is the only permitted use of the `crypto` global there, because sha256 is a pure function of its input. The exception lives in `eslint.config.js` (`webCryptoException`). It drops only `crypto`, only for `packages/meta/src/sha.ts`, and keeps every other ban; `tools/walls.test.ts` pins it.
 - `knowledge/settings-space.json` stays, unchanged, for cached older pages.
 
 ## Alternatives considered

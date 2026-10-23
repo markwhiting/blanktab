@@ -155,7 +155,8 @@ export function fromUnit(space: GenomeSpace, u: readonly number[], centre: Genom
 
 /**
  * Why `g` is not a valid genome of `space`, or null. Its keys must be the genes exactly; each value of the gene's type,
- * inside [min, max] (integral for integers, among values for categoricals); an implemented:false gene at its centre.
+ * inside [min, max] (integral for integers, among values for categoricals); every fixed gene (implemented:false ones
+ * included) exactly at its centre.
  */
 export function checkGenome(space: GenomeSpace, g: Genome): string | null {
   const names = new Set(space.genes.map(x => x.name))
@@ -170,7 +171,8 @@ export function checkGenome(space: GenomeSpace, g: Genome): string | null {
       if (gene.type === "integer" && !Number.isInteger(v)) return `${gene.name} must be an integer, got ${v}`
       if (v < gene.min! || v > gene.max!) return `${gene.name} ${v} is outside [${gene.min}, ${gene.max}]`
     }
-    if (gene.implemented === false && v !== gene.centre) return `${gene.name} is not implemented and must stay at its centre ${JSON.stringify(gene.centre)}`
+    if (gene.owner === "fixed" && v !== gene.centre)
+      return `${gene.name} is ${gene.implemented === false ? "not implemented" : "fixed"} and must stay at its centre ${JSON.stringify(gene.centre)}`
   }
   return null
 }

@@ -39,7 +39,7 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 ### A life already past budget when short lives are switched on (controller ruling A) [agent]
 
 - 0019 does not say what happens to a life already past 2,048 CU when the short-lives switch goes on.
-- **Call:** the page asks for confirmation. Once confirmed, the life ends at its next sleep, as a short life ends at its budget checkup. Switching short lives off never ends a life: without the switch no forever life ends (0014, 0019).
+- **Call:** the page asks for confirmation. Once confirmed, the life ends at its next clean sleep, as a short life ends at its budget checkup. Switching short lives off never ends a life: without the switch no forever life ends (0014, 0019).
 - **Cost if wrong:** one prompt.
 
 ## Alternatives considered

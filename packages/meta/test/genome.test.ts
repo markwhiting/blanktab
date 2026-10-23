@@ -50,21 +50,25 @@ describe("parseGenomeSpace", () => {
     }
   })
   it("rejects malformed structure: not an object, bad schemaVersion, unknown type, scale, owner or target", () => {
-    for (const [what, v] of [
-      ["null", null],
-      ["schemaVersion 0", { ...SPACE_JSON, schemaVersion: 0 }],
-      ["genes not an array", { ...SPACE_JSON, genes: {} }],
-      ["unknown type", withGene("lr", { type: "real" })],
-      ["unknown scale", withGene("lr", { scale: "exp" })],
-      ["unknown owner", withGene("lr", { owner: "me" })],
-      ["unknown target", withGene("lr", { target: "world" })],
-      ["implemented true", withGene("lr", { implemented: true })],
-      ["non-finite min", withGene("lr", { min: null })],
-      ["integer gene with a fractional bound", withGene("bufferSize", { min: 500.5 })],
-      ["horizon gene with max >= 1", withGene("gamma", { max: 1 })],
-      ["categorical centre not among values", withGene("creditMode", { centre: "on" })],
-      ["a searched categorical (bandit genes only)", withGene("creditMode", { owner: "gp", implemented: undefined })],
-    ] as [string, unknown][]) expect(() => parseGenomeSpace(v), what).toThrow(RangeError)
+    for (const [what, v, why] of [
+      ["null", null, /genome space is not an object/],
+      ["schemaVersion 0", { ...SPACE_JSON, schemaVersion: 0 }, /schemaVersion must be an integer >= 1/],
+      ["genes not an array", { ...SPACE_JSON, genes: {} }, /genes must be an array/],
+      ["unknown key", withGene("lr", { colour: "red" }), /unknown key "colour"/],
+      ["unknown type", withGene("lr", { type: "real" }), /type must be one of/],
+      ["unknown scale", withGene("lr", { scale: "exp" }), /scale must be one of/],
+      ["unknown owner", withGene("lr", { owner: "me" }), /owner must be "gp" or "fixed"/],
+      ["unknown target", withGene("lr", { target: "world" }), /target must be one of/],
+      ["implemented true", withGene("lr", { implemented: true }), /implemented may only be false/],
+      ["non-finite min", withGene("lr", { min: null }), /min, max and centre must be finite numbers/],
+      ["integer gene with a fractional bound", withGene("bufferSize", { min: 500.5 }), /must be integers/],
+      ["horizon gene with max >= 1", withGene("gamma", { max: 1 }), /horizon gene needs max < 1/],
+      ["categorical centre not among values", withGene("creditMode", { centre: "on" }), /centre must be one of values/],
+      ["a searched categorical (bandit genes only)", withGene("creditMode", { owner: "gp", implemented: undefined }), /cannot be searched by the GP/],
+    ] as [string, unknown, RegExp][]) {
+      expect(() => parseGenomeSpace(v), what).toThrow(RangeError)
+      expect(() => parseGenomeSpace(v), what).toThrow(why)
+    }
   })
 })
 
@@ -141,17 +145,24 @@ describe("checkGenome", () => {
   it("checkGenome rejects a missing key, an extra key, an out-of-range value, a fractional integer and a reserved gene off centre", () => {
     expect(checkGenome(space, centre)).toBeNull()
     const missing = Object.fromEntries(Object.entries(centre).filter(([k]) => k !== "lr"))
-    for (const [what, g] of [
-      ["missing key", missing],
-      ["extra key", { ...centre, moveProbability: 0.5 }],
-      ["out of range", { ...centre, lr: 1e-2 }],
-      ["fractional integer", { ...centre, bufferSize: 2000.5 }],
-      ["reserved gene off centre", { ...centre, latentWeight: 1 }],
-      ["reserved categorical off centre", { ...centre, creditMode: "gae16" }],
-      ["string for a number", { ...centre, lr: "5e-4" }],
-      ["categorical not among values", { ...centre, modulator: "xyz" }],
-      ["non-finite", { ...centre, curiosityWeight: Number.NaN }],
-    ] as [string, Genome][]) expect(checkGenome(space, g), what).toEqual(expect.any(String))
+    for (const [what, g, why] of [
+      ["missing key", missing, /missing gene lr/],
+      ["extra key", { ...centre, moveProbability: 0.5 }, /unknown gene "moveProbability"/],
+      ["out of range", { ...centre, lr: 1e-2 }, /lr 0\.01 is outside/],
+      ["fractional integer", { ...centre, bufferSize: 2000.5 }, /bufferSize must be an integer/],
+      ["reserved gene off centre", { ...centre, latentWeight: 1 }, /latentWeight is not implemented and must stay at its centre/],
+      ["reserved categorical off centre", { ...centre, creditMode: "gae16" }, /creditMode is not implemented and must stay at its centre/],
+      ["string for a number", { ...centre, lr: "5e-4" }, /lr must be a finite number/],
+      ["categorical not among values", { ...centre, modulator: "xyz" }, /modulator must be one of/],
+      ["non-finite", { ...centre, curiosityWeight: Number.NaN }, /curiosityWeight must be a finite number/],
+    ] as [string, Genome, RegExp][]) expect(checkGenome(space, g), what).toMatch(why)
+  })
+  it("checkGenome holds every fixed gene at its centre, implemented ones too, even inside a wider range", () => {
+    const wide = parseGenomeSpace(withGene("maxStepsPerSec", { min: 10, max: 60 }))
+    expect(checkGenome(wide, centre)).toBeNull()
+    expect(checkGenome(wide, { ...centre, maxStepsPerSec: 40 })).toMatch(/maxStepsPerSec is fixed and must stay at its centre 30/)
+    // A searched gene may take any value in its range.
+    expect(checkGenome(space, { ...centre, lr: 1e-3 })).toBeNull()
   })
 })
 
@@ -173,6 +184,36 @@ describe("legacyGenome", () => {
     expect("moveProbability" in g).toBe(false)
     expect(checkGenome(space, g)).toMatch(/entropyWeight/)
     expect(() => legacyGenome({ lr: "x" }, space)).toThrow(RangeError)
+  })
+})
+
+describe("legacyGenome on real committed logs", () => {
+  // Pre-05a lives store their caregiver settings flat inside `settings`, beside the learner's and maxStepsPerSec
+  // (harness session.ts: settings = { ...learner, maxStepsPerSec, seed, ...caregiver.settings }); there is no other
+  // place. Checked over every committed data/runs file on 2026-10-23.
+  const settingsOf = (path: string) =>
+    (JSON.parse(readFileSync(new URL(`../../../data/runs/${path}`, import.meta.url), "utf8")) as { settings: Record<string, number> }).settings
+  it("a life with a caregiver: every learner, caregiver and harness value is read from settings; seed is ignored", () => {
+    const settings = settingsOf("lrn_dfd5c5085147992a/0.json")
+    const g = legacyGenome(settings, space)
+    for (const k of ["lr", "entropyWeight", "curiosityWeight", "bufferSize", "replayPerSleep", "headLrScale", "exploreEpsilon",
+      "residualDecay", "maxStepsPerSec", "caregiverPeriod", "caregiverTau", "caregiverEpsilon", "caregiverThreshold", "caregiverStuckSteps"])
+      expect(g[k], k).toBe(settings[k])
+    expect(g.lr).toBe(0.0005837009815593332)
+    expect(g.bufferSize).toBe(3149)
+    expect("seed" in g).toBe(false)
+    expect(g.gamma).toBe(0.9) // not logged before 05a; every such life learned at 0.9
+    expect(g.sleepInterval).toBe(250)
+    expect(decodeGenome(g, space).caregiver).toEqual({
+      caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000,
+    })
+  })
+  it("an older life without caregiver keys gets the caregiver centres", () => {
+    const settings = settingsOf("lrn_1787a3c93600cc87/3.json")
+    expect("caregiverPeriod" in settings).toBe(false)
+    const g = legacyGenome(settings, space)
+    expect(g.lr).toBe(settings.lr)
+    expect(g.caregiverPeriod).toBe(500)
   })
 })
 
