@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { readFileSync, writeFileSync } from "node:fs"
 import { chiSquareSf } from "@blanktab/detmath"
 import {
-  birthDraw, checkGenome, evalPanelOf, fromUnit, parseCentre, parseGenomeSpace, parsePosterior, searched,
+  birthDraw, checkGenome, drawSeedOf, evalPanelOf, fromUnit, genomeSha, parseCentre, parseGenomeSpace, parsePosterior, searched,
   PANELS, UNIFORM_SHARE,
   type Draw, type DrawInput, type Genome, type Mode, type Posterior,
 } from "@blanktab/meta"
@@ -18,11 +18,14 @@ const HEX = (s: string) => createHash("sha256").update(s).digest("hex")
 const n = searched(space).length
 const CALIB: Genome[] = [centre, ...Array.from({ length: 9 }, (_, k) => fromUnit(space, Array.from({ length: n }, (_, j) => ((k + 1) * 0.1 + j * 0.037) % 1), centre))]
 
+const centreSha = await genomeSha(space.schemaVersion, centre)
+const CALIB_SHAS = await Promise.all(CALIB.map(g => genomeSha(space.schemaVersion, g)))
+
 function posterior(mode: Mode, need: number[] = CALIB.map(() => 3), genomes: Genome[] = CALIB): Posterior {
   return {
     schemaVersion: 1, genomeSchema: 1, evaluator: "search-composite@1", sourceCommit: "a".repeat(40), mode,
-    centre: { genomeSha: HEX("centre"), values: centre },
-    calibration: { genomes: genomes.map((values, i) => ({ genomeSha: HEX(`g${i}`), values })), need },
+    centre: { genomeSha: centreSha, values: centre },
+    calibration: { genomes: genomes.map((values, i) => ({ genomeSha: CALIB_SHAS[i] ?? HEX(`g${i}`), values })), need },
     models: {}, incumbent: null, confirmation: null, diagnostics: {},
     page: { eligibleLives: 0, lastPromotion: null, calibrationLives: 0, calibrationTarget: 30, looks: 0 },
   }
@@ -30,11 +33,15 @@ function posterior(mode: Mode, need: number[] = CALIB.map(() => 3), genomes: Gen
 
 /** The input a tab would build: the posterior is parsed from its own bytes, and posteriorSha is their sha256. */
 function input(learnerId: string, p: Posterior | null, widthsClass: "gpu" | "cpu" = "gpu"): DrawInput {
-  if (p === null) return { learnerId, space, centre, widthsClass, posterior: null, posteriorSha: null }
+  if (p === null) return { learnerId, space, centre, centreSha, widthsClass, posterior: null, posteriorSha: null }
   const text = JSON.stringify(p)
-  return { learnerId, space, centre, widthsClass, posterior: parsePosterior(text), posteriorSha: HEX(text) }
+  const parsed = parsePosterior(text)
+  if (parsed === null) throw new Error("test posterior does not parse")
+  return { learnerId, space, centre, centreSha, widthsClass, posterior: parsed, posteriorSha: HEX(text) }
 }
 
+const UNIFORM_PAUSED_ID = "lrn_fixture_paused_5"
+const CALIB_NONCENTRE_ID = "lrn_fixture_calib_0"
 const ids = (k: number, tag: string) => Array.from({ length: k }, (_, i) => `lrn_${tag}_${i.toString(36)}`)
 
 describe("birthDraw", () => {
@@ -45,11 +52,21 @@ describe("birthDraw", () => {
       const mode = modes[i % modes.length]!
       cases.push(input(`lrn_fixture_${i}`, mode === null ? null : posterior(mode), i % 3 === 2 ? "cpu" : "gpu"))
     }
+    // Added cases (review round 1), ids chosen so the fixture pins a uniform draw in mode paused and a calibrate
+    // draw that picks a non-centre genome.
+    cases.push(input(UNIFORM_PAUSED_ID, posterior("paused")))
+    cases.push(input(CALIB_NONCENTRE_ID, posterior("calibrate")))
     const draws = cases.map(c => birthDraw(c))
+    expect(draws[20]!.method).toBe("uniform")
+    expect(draws[21]!.method).toBe("calibrate")
+    expect(draws[21]!.calibrationIndex).toBeGreaterThan(0)
     for (let i = 0; i < cases.length; i++) expect(birthDraw(cases[i]!)).toEqual(draws[i])
     // The 20 cases cover every method 05a has.
     expect(new Set(draws.map(d => d.method))).toEqual(new Set(["centre", "calibrate", "uniform"]))
-    if (process.env.DRAW_WRITE === "1") writeFileSync(FIXTURE, JSON.stringify(draws, null, 2) + "\n")
+    if (process.env.DRAW_WRITE === "1") {
+      expect(process.env.CI, "never regenerate the golden draws in CI").toBeUndefined()
+      writeFileSync(FIXTURE, JSON.stringify(draws, null, 2) + "\n")
+    }
     const fixture = JSON.parse(readFileSync(FIXTURE, "utf8")) as Draw[]
     expect(draws).toEqual(fixture)
   })
@@ -61,10 +78,39 @@ describe("birthDraw", () => {
         expect(d).toEqual({ role: "search", method: "centre", drawSeed: null, posteriorSha: null, evalPanel: evalPanelOf(id), genome: centre })
       }
     }
-    // A posterior without its sha (or the reverse) is no posterior either.
+  })
+
+  it("programming errors throw: posterior and posteriorSha half-null, a sha that is not 64 lowercase hex", () => {
     const p = posterior("flat")
-    expect(birthDraw({ learnerId: "lrn_x", space, centre, widthsClass: "gpu", posterior: p, posteriorSha: null }).drawSeed).toBeNull()
-    expect(birthDraw({ learnerId: "lrn_x", space, centre, widthsClass: "gpu", posterior: null, posteriorSha: HEX("x") }).drawSeed).toBeNull()
+    const at = { learnerId: "lrn_x", space, centre, centreSha, widthsClass: "gpu" as const }
+    expect(() => birthDraw({ ...at, posterior: p, posteriorSha: null })).toThrow(/null together/)
+    expect(() => birthDraw({ ...at, posterior: null, posteriorSha: HEX("x") })).toThrow(/null together/)
+    for (const sha of ["", "abc", HEX("x").toUpperCase(), HEX("x") + "0", "g".repeat(64)])
+      expect(() => birthDraw({ ...at, posterior: p, posteriorSha: sha }), sha).toThrow(/64 lowercase hex/)
+    expect(() => birthDraw({ ...at, centreSha: "nope", posterior: null, posteriorSha: null })).toThrow(/centreSha/)
+  })
+
+  it("a posterior that does not fit the tab's knowledge → centre with a reason, drawSeed and posteriorSha kept", () => {
+    const check = (p: Posterior, why: RegExp, w: "gpu" | "cpu" = "gpu") => {
+      const i = input("lrn_mismatch", p, w)
+      const d = birthDraw(i)
+      expect(d.method).toBe("centre")
+      expect(d.genome).toEqual(centre)
+      expect(d.reason).toMatch(why)
+      expect(d.posteriorSha).toBe(i.posteriorSha)
+      expect(d.drawSeed).toBe(drawSeedOf("lrn_mismatch", i.posteriorSha!))
+    }
+    for (const mode of ["calibrate", "flat"] as const) {
+      check({ ...posterior(mode), genomeSchema: 2 }, /genomeSchema 2 is not the space's 1/)
+      check({ ...posterior(mode), centre: { genomeSha: HEX("other"), values: centre } }, /posterior built for another centre/)
+    }
+    const { lr: _lr, ...noLr } = CALIB[1]!
+    void _lr
+    const only1 = CALIB.map((_, i) => i === 1 ? 1 : 0)
+    check(posterior("calibrate", only1, CALIB.map((g, i) => i === 1 ? noLr : g)), /calibration genome 1 is invalid: missing gene lr/)
+    check(posterior("calibrate", only1, CALIB.map((g, i) => i === 1 ? { ...g, lr: 1 } : g)), /calibration genome 1 is invalid: lr 1 is outside/)
+    // A valid draw carries no reason.
+    expect(birthDraw(input("lrn_ok", posterior("calibrate"))).reason).toBeUndefined()
   })
 
   it("parsePosterior: garbage, wrong schemaVersion, a need/genomes length mismatch → null", () => {
