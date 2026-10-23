@@ -4,3 +4,7 @@ export {
 } from "./genome"
 export type { Decoded, GeneSpec, GeneValue, Genome, GenomeSpace, LegacyGenome } from "./genome"
 export { genomeSha, sha256Hex } from "./sha"
+export { parsePosterior } from "./posterior"
+export type { Mode, Posterior } from "./posterior"
+export { birthDraw, drawSeedOf, evalPanelOf, PANELS, UNIFORM_SHARE } from "./draw"
+export type { Draw, DrawInput, Method, Role } from "./draw"
