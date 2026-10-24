@@ -7,7 +7,7 @@ import { buildHeldOut } from "@blanktab/harness/heldout"
 import { GPU_WIDTHS, LearnerStateVersionError, createLearner, type Widths } from "@blanktab/learner"
 import { createWebGpuBackend } from "@blanktab/tensor"
 import type { Manifest } from "@blanktab/harness/knowledge"
-import { CONFIG_BUDGET, budgetError, type CheckupResult, type CurvePoint, type EvalBudget, type LogFile } from "@blanktab/harness/log"
+import { CONFIG_BUDGET, budgetError, lifeBudget, type CheckupResult, type CurvePoint, type EvalBudget, type LogFile } from "@blanktab/harness/log"
 import { runNewborn } from "@blanktab/harness/newborn"
 import { openQueue } from "@blanktab/harness/queue"
 import {
@@ -19,6 +19,7 @@ import { frameGate } from "./frames"
 import { isRecoverable, liveOnBestBackend, resumeStatus, seedsOf, type Restore, type RunLife } from "./life"
 import { checkupStatus, createCarryTally, fmtLevel, type CarryFile } from "./milestones"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
+import { shortLivesGate } from "./shortlives"
 
 const scope = self as unknown as {
   onmessage: ((e: MessageEvent<ToWorker>) => void) | null
@@ -32,6 +33,8 @@ const frames = frameGate(FRAME_MS)
 const RATE_WINDOW_MS = 3000
 /** The page's refreshed knowledge and forced checkpoints, for whichever run of the life is current (it outlives GPU restores). */
 const inbox = new SessionInbox()
+/** The short-lives switch as the session gets it: a life resumed past its budget needs the page's confirm (shortlives.ts). */
+let shortLives: ReturnType<typeof shortLivesGate> | undefined
 
 /** The widths class the gate recomputes a draw with (tools/gate/meta.ts): "gpu" exactly at the GPU widths. */
 const widthsClassOf = (w: Widths): "gpu" | "cpu" =>
@@ -123,7 +126,8 @@ const learnerOn = (chosen: Chosen, init: LearnerInit) => createLearner({
 
 async function start(m: StartMessage): Promise<void> {
   const { cfg, backend: force, widths, hidden, checkpointRecord } = m
-  inbox.setShortLives(m.shortLives)
+  shortLives = shortLivesGate(inbox, { on: m.shortLives, consent: m.shortLivesConsent ?? false })
+  const gate = shortLives
   frames.setHidden(hidden ?? false)
   if (m.newborns) return newborns(m, m.newborns)
   /** Used by the first run only: a restore after a GPU failure reads the (updated) checkpoint from the database. */
@@ -163,6 +167,7 @@ async function start(m: StartMessage): Promise<void> {
     const adopted = record
     record = undefined
     const run = configOf(c, m, cand)
+    gate.run()
     return runSession(run, {
       ...(adopted !== undefined ? { checkpointRecord: adopted } : {}),
       world, idb: indexedDB, now: () => new Date(), recoverable: isRecoverable(chosen), inbox,
@@ -204,6 +209,7 @@ async function start(m: StartMessage): Promise<void> {
       },
       onEvent: e => {
         if (e.type === "resumed") {
+          gate.resumed(e.lastLevel)
           steps = e.steps
           cu = e.cu
           post({ type: "curve", points: [...prior, ...e.curveTail], reset: true })
@@ -211,7 +217,7 @@ async function start(m: StartMessage): Promise<void> {
           postCare()
           post({ type: "status", message: resumeStatus(e.steps, restore) })
         } else if (e.type === "meta") {
-          post({ type: "meta", meta: e.meta })
+          post({ type: "meta", meta: e.meta, lastLevel: gate.meta(lifeBudget(e.meta).budgetCU) })
         } else if (e.type === "restored") {
           post({ type: "status", message: `its updates kept failing at step ${e.fromSteps}: restored from its checkpoint at step ${e.toSteps} (${e.restores} restore${e.restores === 1 ? "" : "s"} so far)` })
         } else if (e.type === "logged") {
@@ -300,7 +306,7 @@ scope.onmessage = e => {
   if (m.type === "visibility") { frames.setHidden(m.hidden); return }
   if (m.type === "knowledge") { inbox.setKnowledge(m.manifest); return }
   if (m.type === "checkpointNow") { void inbox.checkpointNow({ halt: m.halt }).then(saved => post({ type: "checkpointed", id: m.id, saved })); return }
-  if (m.type === "shortLives") { inbox.setShortLives(m.on); return }
+  if (m.type === "shortLives") { shortLives?.switched(m.on, m.consent ?? false); return }
   if (m.type !== "start" || started) return
   started = true
   start(m).catch((err: unknown) => post({

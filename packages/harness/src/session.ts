@@ -3,7 +3,7 @@ import type { Observation, WorldView } from "@blanktab/interface"
 import { FIRST_LAYER_PARAMS, clampSettings } from "@blanktab/learner"
 import type { LearnerSettings, LearnerState, LearnerStats, TrainableLearner, Widths } from "@blanktab/learner"
 import { hashSeed, type CanvasLike, type RoomKind, type World } from "@blanktab/world"
-import { checkGenome, settingsMismatch, type GenomeSpace } from "@blanktab/meta"
+import { checkGenome, genomeSha, settingsMismatch, type GenomeSpace } from "@blanktab/meta"
 import { clampCaregiverSettings, createCaregiver, type Caregiver, type CaregiverSettings } from "./caregiver"
 import { panelSeed, runCheckup } from "./checkup"
 import { DEFAULT_MAX_STEPS_PER_SEC, finalLogOf, thin, birthOf, type Birth, type Lived } from "./final"
@@ -54,7 +54,8 @@ export interface SessionMeta {
    * The speed cap and sleep interval a life resumed from a checkpoint with block `block` runs: its genome's (the page
    * decodes it, test knobs over it), so a resumed life never runs harness genes other than its own. A key left out
    * keeps the config's (e.g. a legacy block's unrecorded gene). Absent: the config's. A result that throws or is out
-   * of range is said on console.warn and the config's are kept (a page bug never ends a forever life).
+   * of range is said on console.warn and the config's are kept (a page bug never ends a forever life); if they are not
+   * what the block's genome decodes to, that run's log files go without the block (its checkpoints keep it).
    */
   resumedHarness?(block: MetaBlock): { maxStepsPerSec?: number; sleepInterval?: number }
 }
@@ -121,8 +122,11 @@ export interface Clock { now(): number; sleep(ms: number): Promise<void> }
 const realClock: Clock = { now: () => performance.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
 
 export type SessionEvent =
-  /** Resumed from the checkpoint at `steps` and `cu`; `curveTail` is its curve since the latest log file. */
-  | { type: "resumed"; steps: number; cu: number; curveTail: CurvePoint[]; checkupTail: CheckupResult[] }
+  /**
+   * Resumed from the checkpoint at `steps` and `cu`; `curveTail` is its curve since the latest log file. `lastLevel`: the
+   * highest checkup level the life has had (0: none), from the checkpoint, so it is known when older log files are gone.
+   */
+  | { type: "resumed"; steps: number; cu: number; curveTail: CurvePoint[]; checkupTail: CheckupResult[]; lastLevel: number }
   /** After RESTORE_AFTER_SKIPS skipped updates in a row at `fromSteps`, the learner went back to its checkpoint at `toSteps`. */
   | { type: "restored"; fromSteps: number; toSteps: number; restores: number; lostCU: number }
   /** A log file was queued (with its checkpoint). A failed life's last file is final too (see runSession). */
@@ -400,6 +404,8 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
    * broken to report cannot hide them. A restore and a failed life put them on the record as lost carries.
    */
   let carriesSinceSave = 0
+  /** This run writes no meta block although the life has one (liveTheLife: its block is not what runs). */
+  let metaOff = false
 
   /** The final log file of a life that failed (see runSession), or null if there is nothing to put on the record. */
   const failedLog = async (): Promise<LogFileV2 | null> => {
@@ -411,7 +417,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     }
     return finalLogOf({
       ctx: { learnerId: id, now, hostSig: cfg.hostSig, codeSha: cfg.codeSha, maxStepsPerSec, knowledgeSha, sessionsSeenAtBirth },
-      cp, latest: await queue.latest(id), lived, birth, carriesSinceSave, end: "failed",
+      cp, latest: await queue.latest(id), lived, birth, carriesSinceSave, end: "failed", ...(metaOff ? { noMeta: true } : {}),
     })
   }
 
@@ -446,6 +452,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       const block = await m.legacy(flat)
       const bad = block.role !== "legacy" ? `role ${JSON.stringify(block.role)}, not legacy` : parseMeta(block, { cu: c.cu, stepsTotal: c.steps, final: false })
       if (typeof bad === "string") throw new Error(bad)
+      if (await genomeSha(block.genomeSchema, block.genome) !== block.genomeSha) throw new Error("its genomeSha does not match its genome")
       return block
     } catch (e) {
       console.warn(`learner ${id}: no legacy meta block (the life runs on without one):`, e)
@@ -454,10 +461,10 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
   }
   /**
    * A newborn's block, checked: the parser accepts it (no filters, end or heldOut; not a newborn reference), its genome
-   * lies in cfg.meta.space at that space's schema, and it decodes to the settings this life runs and logs (`flat`).
-   * BadMetaBlockError otherwise, before any learner exists (the page falls back to another draw).
+   * lies in cfg.meta.space at that space's schema, its genomeSha is its genome's, and it decodes to the settings this
+   * life runs and logs (`flat`). BadMetaBlockError otherwise, before any learner exists (the page falls back to another draw).
    */
-  function newbornBlock(m: SessionMeta, flat: Record<string, number>): MetaBlock {
+  async function newbornBlock(m: SessionMeta, flat: Record<string, number>): Promise<MetaBlock> {
     const b = m.birth
     const bad = parseMeta(b, { cu: 0, stepsTotal: 0, final: false })
     if (typeof bad === "string") throw new BadMetaBlockError(id, bad)
@@ -471,7 +478,17 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     if (outside !== null) throw new BadMetaBlockError(id, `genome outside the space: ${outside}`)
     const off = settingsMismatch(m.space, b.genome, flat)
     if (off !== null) throw new BadMetaBlockError(id, `genome is not what runs: ${off}`)
+    if (await genomeSha(b.genomeSchema, b.genome) !== b.genomeSha) throw new BadMetaBlockError(id, "its genomeSha does not match its genome")
     return b
+  }
+
+  /** A resumed life's block if it decodes to the settings this run logs (`flat`), as the gate checks; else undefined (warned). */
+  function resumedBlockOrNone(space: GenomeSpace, b: MetaBlock, flat: Record<string, number>): MetaBlock | undefined {
+    if (b.role === "legacy" || b.genomeSchema !== space.schemaVersion) return b // the gate checks neither against settings
+    const off = settingsMismatch(space, b.genome, flat)
+    if (off === null) return b
+    console.warn(`learner ${id}: its block is not what this run runs (${off}); this run's log files go without it`)
+    return undefined
   }
 
   async function liveTheLife(): Promise<SessionResult> {
@@ -535,7 +552,13 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     const flatSettings = (): Record<string, number> => ({ ...settings, maxStepsPerSec, seed, ...(caregiver ? caregiver.state().settings : {}) })
     // The life's meta block (Plan 05a): its checkpoint's, kept whatever the config says (a life never changes its block,
     // and the gate holds it constant); else, with cfg.meta, a pre-05a life's legacy block or a newborn's draw.
-    const meta: MetaBlock | undefined = cp?.meta ?? (cfg.meta === undefined ? undefined : cp ? await legacyBlock(cfg.meta, cp, flatSettings()) : newbornBlock(cfg.meta, flatSettings()))
+    const block: MetaBlock | undefined = cp?.meta ?? (cfg.meta === undefined ? undefined : cp ? await legacyBlock(cfg.meta, cp, flatSettings()) : await newbornBlock(cfg.meta, flatSettings()))
+    // What this run writes into its log files. A resumed block that no longer decodes to what runs (resumedHarness fell
+    // back to config values, or the page has none) would be refused by the gate (settingsMismatch on every non-legacy
+    // block of main's schema): this run's files go without it (said on console.warn), as does a failed life's final
+    // file. Its checkpoints keep it, so a later run whose settings agree writes it again.
+    const meta: MetaBlock | undefined = block && cp?.meta && cfg.meta ? resumedBlockOrNone(cfg.meta.space, block, flatSettings()) : block
+    if (block && !meta) metaOff = true
     /** The room the previous frame was seen in (undefined: no previous frame this run, or a restore since). */
     let prevRoom: string | undefined
     /**
@@ -564,7 +587,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
       const resumedFrom = cp ? cp.steps : null
       live = () => ({ steps, seq, curve, restores, lostCU, lostSkips, stats: learner.stats() })
       restoreRoom(cp)
-      if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)) })
+      if (cp) emit({ type: "resumed", steps: cp.steps, cu: cp.cu, curveTail: [...cp.curveTail], checkupTail: tail.map(r => structuredClone(r)), lastLevel })
       if (meta) emit({ type: "meta", meta: structuredClone(meta) })
 
       const checkpointNow = async (): Promise<Checkpoint> => {
@@ -576,7 +599,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
           ...(keepCheckups ? { checkups: { lastLevel, tail: tail.map(r => structuredClone(r)), ...(tail.length > 0 && tailSuite !== 1 ? { suiteVersion: tailSuite } : {}) } } : {}),
           ...(caregiver ? { caregiver: caregiver.state() } : {}),
           ...(typeof world.state === "function" ? { world: { room: world.state().room } } : {}),
-          ...(meta ? { meta: structuredClone(meta) } : {}),
+          ...(block ? { meta: structuredClone(block) } : {}),
           learnerState: await learner.save(),
         }
         // Never write a checkpoint that would not load (checkCheckpoint): a tail is billed inside the learner's evalCU.
@@ -637,7 +660,7 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
 
       // A newborn's first checkpoint, so there is always one to restore. A resumed life given its block just now (a
       // legacy one) saves at once too, so every checkpoint it may restore or fail from has the block.
-      if (!cp || (cp.meta === undefined && meta !== undefined)) {
+      if (!cp || (cp.meta === undefined && block !== undefined)) {
         const first = await checkpointNow()
         await saveCheckpoint(idb, first)
         cp = first

@@ -80,7 +80,7 @@ export interface Lived {
  * latest file's, else `ctx.codeSha`.
  *
  * Its meta block (Plan 05a) is the checkpoint's, else the latest file's (without that file's `filters`, `heldOut` or
- * `end`), with `end` set to `o.end` when given. A life without a block gets none (and so no `end`).
+ * `end`), with `end` set to `o.end` when given. A life without a block, or `o.noMeta`, gets none (and so no `end`).
  */
 export function finalLogOf(o: {
   ctx: FinalContext
@@ -93,6 +93,8 @@ export function finalLogOf(o: {
   carriesSinceSave?: number
   /** Why the life ended (meta.end): "failed" from the session, "orphan" from the startup sweep. */
   end?: "failed" | "orphan"
+  /** No meta block (a run whose block was not what it ran writes none, its final file included). */
+  noMeta?: boolean
 }): LogFileV2 | null {
   const { ctx, cp, latest: last, lived } = o
   if (last?.final) return null
@@ -109,7 +111,7 @@ export function finalLogOf(o: {
       birth = undefined // a state of another version, or a stub: its birth facts are not known
     }
   }
-  const metaFrom = cp?.meta ?? prior?.meta
+  const metaFrom = o.noMeta ? undefined : cp?.meta ?? prior?.meta
   let meta: MetaBlock | undefined
   if (metaFrom) {
     const { filters: _f, heldOut: _h, end: _e, ...constant } = structuredClone(metaFrom)

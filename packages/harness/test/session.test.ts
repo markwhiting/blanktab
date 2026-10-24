@@ -21,6 +21,8 @@ import { sweepCheckpoints } from "../src/orphans"
 import { FIRST_LAYER_PARAMS } from "@blanktab/learner"
 import { decodeGenome, genomeSha, legacyGenome } from "@blanktab/meta"
 import { pre04cCheckpointError } from "./pre04c-checkpoint"
+import { parseNewbornReference, searchComposite } from "@blanktab/evaluators"
+import referenceJson from "../../evaluators/test/fixtures/reference.json" with { type: "json" }
 
 // Plan 04b: a spy on every caregiver the session makes (each delegates to a real one), in one call log with the events.
 const cgSpy = vi.hoisted(() => ({ log: [] as string[], inits: [] as unknown[] }))
@@ -430,7 +432,7 @@ describe("session v2", { timeout: 60_000 }, () => {
         }))
         expect(r.resumedFrom).toBe(cp!.steps)
         // The page redraws the curve from the event: the checkpoint's place in the life and its curve since the last log.
-        expect(events[0]).toEqual({ type: "resumed", steps: cp!.steps, cu: cp!.cu, curveTail: cp!.curveTail, checkupTail: [] })
+        expect(events[0]).toEqual({ type: "resumed", steps: cp!.steps, cu: cp!.cu, curveTail: cp!.curveTail, checkupTail: [], lastLevel: 0 })
         expect(ticks[0]).toBe(cp!.steps + 1)
         const logs = await logsOf(idb)
         expectContinuous(logs)
@@ -1428,7 +1430,7 @@ describe("session v2", { timeout: 60_000 }, () => {
       expect(levelsOf(await logsOf(idb))).toEqual([8])
       const again: SessionEvent[] = []
       await grow(idb, { suite, deps: { onEvent: e => again.push(e) } })
-      expect(again[0]).toMatchObject({ type: "resumed", steps: 10, checkupTail: [] })
+      expect(again[0]).toMatchObject({ type: "resumed", steps: 10, checkupTail: [], lastLevel: 8 }) // the abandoned 16 is still pending
       expect(checkupEvents(again)).toEqual([["start", 16], ["done", 16, 15], ["start", 32], ["done", 32, 20]])
       const logs = await logsOf(idb)
       expect(levelsOf(logs)).toEqual([8, 16, 32])
@@ -1991,6 +1993,54 @@ describe("session v2", { timeout: 60_000 }, () => {
         for (const p of pts) expect(p.steps % 10).toBe(0)
       })
 
+      it("final review: a resumed block that is not what runs (resumedHarness fell back to other config values) is left out of the run's files, kept in its checkpoints", async () => {
+        const idb = new IDBFactory()
+        const a = await metaOf()
+        await expect(growM(idb, { cfg: { lifetimeCU: 400, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const before = (await logsOf(idb)).length
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        const events: SessionEvent[] = []
+        try {
+          // The page's resumedHarness throws: the config's speed cap (999, not the block's 30) runs, so the block is not what ran.
+          await expect(growM(idb, {
+            cfg: { lifetimeCU: 400, sleepInterval: 10, maxStepsPerSec: 999, meta: { ...a, resumedHarness: () => { throw new Error("page bug") } } },
+            deps: { onEvent: e => events.push(e), onTick: s => { if (s.steps === 70) throw new Error("reload") } },
+          })).rejects.toThrow("reload")
+          expect(warn.mock.calls.some(c => String(c[0]).includes("this run's log files go without it"))).toBe(true)
+        } finally {
+          warn.mockRestore()
+        }
+        const mid = (await logsOf(idb)).slice(before)
+        expect(mid.length).toBeGreaterThan(0)
+        for (const f of mid) {
+          expect(f.settings.maxStepsPerSec).toBe(999)
+          expect("meta" in f).toBe(false)
+        }
+        expect(events.some(e => e.type === "meta")).toBe(false)
+        expect((await loadCheckpoint(idb, ID))!.meta).toEqual(a.birth) // the life keeps its block
+        // A later run whose settings agree writes the block again; then it fails: its final file carries it (end failed).
+        await expect(growM(idb, { cfg: { lifetimeCU: 400, sleepInterval: 10, maxStepsPerSec: 30, meta: a }, stub: { throwAt: { steps: 90, error: new Error("boom") } } })).rejects.toThrow("boom")
+        const logs = await logsOf(idb)
+        const last = logs.slice(before + mid.length)
+        expect(last.length).toBeGreaterThan(0)
+        for (const f of last.slice(0, -1)) expect(f.meta).toEqual(a.birth)
+        expect(last.at(-1)!.meta).toEqual({ ...a.birth, end: "failed" })
+        await gateAccepts(logs)
+        // A run without the block that fails: its final file has none either (the gate would refuse it).
+        const idb2 = new IDBFactory()
+        await expect(growM(idb2, { cfg: { lifetimeCU: 400, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const warn2 = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          await expect(growM(idb2, { cfg: { lifetimeCU: 400, sleepInterval: 10, maxStepsPerSec: 999, meta: a }, stub: { throwAt: { steps: 50, error: new Error("boom") } } })).rejects.toThrow("boom")
+        } finally {
+          warn2.mockRestore()
+        }
+        const failed = await logsOf(idb2)
+        expect(failed.at(-1)!.final).toBe(true)
+        expect("meta" in failed.at(-1)!).toBe(false)
+        await gateAccepts(failed)
+      })
+
       it("with evalPanel p, every checkup's variants are panelSeed(p, …)", async () => {
         const base = await birthBlock(ID)
         for (const p of [3, 16]) {
@@ -2040,6 +2090,7 @@ describe("session v2", { timeout: 60_000 }, () => {
           async () => ({ ...good, end: "budget" }), // a final-only field
           async () => ({ ...good, filters: "AAAA" }), // filters at the checkpoint's 66 CU: refused at cp.cu
           async () => ({ ...good, role: "search", method: "centre" }), // not a legacy block
+          async () => ({ ...good, genomeSha: "0".repeat(64) }), // final review: a genomeSha not of its genome
         ]
         for (const legacy of bad) {
           const idb = new IDBFactory()
@@ -2076,6 +2127,8 @@ describe("session v2", { timeout: 60_000 }, () => {
           // A new life is born under the current config's budget (decision 0020): none, or another, is refused.
           ["must carry the config's budget (2048 CU at 512, 1024, 2048)", { meta: await metaOf({ birth: withoutBudget }) }],
           ["must carry the config's budget (4096 CU at 1024, 2048, 4096)", { meta: { ...(await metaOf()), budget: { budgetCU: 4096, levels: [1024, 2048, 4096] } } }],
+          // Final review: the gate recomputes genomeSha; a block whose sha is not its genome's is never written.
+          ["its genomeSha does not match its genome", { meta: await metaOf({ birth: { ...birth, genomeSha: "0".repeat(64) } }) }],
         ]
         for (const [why, cfg] of cases) {
           const idb = new IDBFactory()
@@ -2335,6 +2388,36 @@ describe("session v2", { timeout: 60_000 }, () => {
           expect(logs.some(f => f.final || "meta" in f)).toBe(false)
           expect(levelsOf(logs)).toContain(4096)
         })
+      })
+
+      it("seam (final review): a real session's files, fractional crossings and checkups at sleeps, are an eligible search-composite life", { timeout: 120_000 }, async () => {
+        // 0.73 CU a step, a sleep every 250 steps (182.5 CU): every crossing file is a fraction over its level, written at a
+        // step that is not a sleep, so each checkup lands in a later file. Short lives: the 2048 checkup is in the final
+        // file. Forever (a lifetime past 3072): it is in the 3072 crossing file.
+        const GPU_W: Widths = { conv1: 16, conv2: 32, enc: 128, hidden: 256 }
+        const newborn = parseNewbornReference(referenceJson)!
+        for (const shortLives of [true, false]) {
+          const idb = new IDBFactory()
+          const inbox = new SessionInbox()
+          inbox.setShortLives(shortLives)
+          await growM(idb, {
+            cfg: { lifetimeCU: shortLives ? undefined : 3200, sleepInterval: 250, widths: GPU_W, meta: await metaOf() },
+            stub: { cuPerStep: 0.73, readParams: true, evalCu: 0.01 },
+            deps: { inbox },
+          })
+          const logs = await logsOf(idb)
+          const crossing = logs.find(f => f.cu >= 2048)!
+          expect(crossing.cu, String(shortLives)).toBeGreaterThan(2048)
+          expect((crossing.checkups ?? []).some(c => c.level === 2048)).toBe(false)
+          const holder = logs.find(f => (f.checkups ?? []).some(c => c.level === 2048))!
+          expect(holder.seq).toBeGreaterThan(crossing.seq)
+          if (!shortLives) expect(holder.cu).toBeGreaterThan(3072)
+          const life = { learnerId: ID, files: logs.map(f => { const r = parseLogFile(JSON.parse(JSON.stringify(f))); if (!r.ok) throw new Error(r.error); return r.value }) }
+          const out = searchComposite.evaluateLife!(life, { newborn })
+          expect(out.reason, String(shortLives)).toBeUndefined()
+          expect(out).toMatchObject({ eligible: true, diagnostics: { levels: [512, 1024, 2048] } })
+          expect((out.diagnostics as { heldOutPoints: number }).heldOutPoints).toBeGreaterThanOrEqual(3)
+        }
       })
 
       it("a failed life's final file has meta.end failed; a swept orphan's has meta.end orphan; without meta neither has end", async () => {

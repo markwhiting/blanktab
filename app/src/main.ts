@@ -16,6 +16,7 @@ import { newbornText, readNewborns } from "./newborns"
 import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
 import { flushPolicy } from "./schedule"
+import { readConsent, writeConsent } from "./shortlives"
 import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
 import { WORKER_LOAD_MESSAGE, onWorkerLoadFailure, startUpdates } from "./updates"
@@ -42,8 +43,9 @@ const overrides: NonNullable<StartMessage["overrides"]> = {
 const SHORT_LIVES_KEY = "blanktab:shortLives"
 const shortLivesOn = () => localStorage.getItem(SHORT_LIVES_KEY) === "1"
 /**
- * Asked before switching short lives on for a life that has already had its budget checkup (ruling A, decision 0022):
- * the session ends such a life at its next clean sleep.
+ * Asked before switching short lives on for a life that has already had its budget checkup (ruling A, decision 0022),
+ * and once when such a life is resumed with the switch on: only a yes ends it (at its next clean sleep), and the answer
+ * is stored for that learnerId (shortlives.ts); the stored switch alone never ends it.
  */
 const pastBudgetQuestion = (budgetCU: number) =>
   `This learner has had its ${budgetCU.toLocaleString("en-US")} CU checkup, so it will end at its next sleep and a newborn will start. Go on?`
@@ -128,11 +130,12 @@ interface Life {
   checkpoint(halt: boolean): Promise<boolean>
   /** Stops the learner where it is (before a reload onto the checkpoint just saved). */
   halt(): void
-  /** The short-lives switch changed. */
-  shortLives(on: boolean): void
+  /** The short-lives switch changed; `confirmed`: the past-budget question was asked for this learner and answered yes. */
+  shortLives(on: boolean, confirmed?: boolean): void
   /**
    * Its budget (CU) if switching short lives on would end it at its next sleep: it has a meta block and its budget
-   * checkup is done (the session's end condition, session.ts); else null.
+   * checkup is done (the session's end condition, session.ts; the level it resumed at is the session's own, so a
+   * pruned outbox does not hide it); else null.
    */
   pastBudget(): number | null
 }
@@ -177,6 +180,10 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   /** What the switch's question needs: the highest checkup level done, and the life's budget once its block is known. */
   let checkedTo = 0
   let budgetCU: number | null = null
+  /** The highest checkup level the life had when this run started (the session's own; meta message). */
+  let resumedAt = 0
+  /** Whether the past-budget question was asked at this resume. */
+  let askedAtResume = false
   /** The knowledge this life is drawn from (the worker draws from `draw` below): its recipe line reads it, not a later refresh. */
   const drawnFrom = drawContextOf(knowledge)
   let nextCheckpoint = 0
@@ -192,7 +199,10 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
       worker.postMessage({ type: "checkpointNow", id, halt } satisfies ToWorker)
     }),
     halt: () => worker.terminate(),
-    shortLives: on => worker.postMessage({ type: "shortLives", on } satisfies ToWorker),
+    shortLives: (on, confirmed = false) => {
+      if (confirmed) writeConsent(localStorage, id, "yes") // the decision survives a code-update reload
+      worker.postMessage({ type: "shortLives", on, ...(confirmed ? { consent: true } : {}) } satisfies ToWorker)
+    },
     pastBudget: () => (budgetCU !== null && checkedTo >= budgetCU ? budgetCU : null),
   }
   ctx.life = life
@@ -225,12 +235,29 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "curve") ui.curve(m.points, m.reset)
     else if (m.type === "status") ui.status(m.message)
     else if (m.type === "checkups") {
-      checkedTo = Math.max(m.reset ? 0 : checkedTo, ...m.results.map(r => r.level))
+      const before = checkedTo
+      checkedTo = Math.max(m.reset ? resumedAt : checkedTo, resumedAt, ...m.results.map(r => r.level))
+      // Its budget checkup done in this tab with the switch on: the session ends it at this sleep, as agreed. Should a
+      // halt win that sleep, the resumed run must end too, so its end counts as confirmed.
+      if (!m.reset && budgetCU !== null && before < budgetCU && checkedTo >= budgetCU && shortLivesOn()) writeConsent(localStorage, id, "yes")
       ui.checkups(m.results, m.reset)
     }
     else if (m.type === "carried") ui.caregiver(caregiverText(m))
     else if (m.type === "meta") {
       budgetCU = lifeBudget(m.meta).budgetCU
+      resumedAt = m.lastLevel
+      checkedTo = Math.max(checkedTo, m.lastLevel)
+      // Resumed past its budget with the switch on, and never asked: the switch alone does not end it (ruling A); ask once.
+      const past = life.pastBudget()
+      if (past !== null && m.lastLevel >= past && shortLivesOn() && readConsent(localStorage, id) === null && !askedAtResume) {
+        askedAtResume = true
+        setTimeout(() => {
+          if (over || ctx.life !== life) return
+          const yes = confirm(pastBudgetQuestion(past))
+          if (yes) life.shortLives(shortLivesOn(), true)
+          else writeConsent(localStorage, id, "no")
+        }, 0)
+      }
       const meta = m.meta
       void drawnFrom.then(dc => { if (ctx.life === life) ui.recipe({ meta, ctx: dc }) })
     }
@@ -244,7 +271,10 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "halted") ctx.halted()
     else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
     else if (m.type === "error") end(() => (m.olderVersion ? ui.notice(OLDER_VERSION_MESSAGE) : ui.error(`${m.message}. A newborn takes its place.`)))
-    else if (m.type === "final") end(() => ui.lifeComplete(id, m.ended))
+    else if (m.type === "final") {
+      writeConsent(localStorage, id, null) // the life is over: its answer is no longer needed
+      end(() => ui.lifeComplete(id, m.ended))
+    }
   }
   worker.onerror = e => {
     const failed = () => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
@@ -261,7 +291,7 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   const draw = drawOf(knowledge)
   const start: ToWorker = {
     type: "start", cfg, hidden: document.hidden, ...(record !== undefined ? { checkpointRecord: record } : {}),
-    ...(draw ? { draw } : {}), ownCap, shortLives: shortLivesOn(),
+    ...(draw ? { draw } : {}), ownCap, shortLives: shortLivesOn(), shortLivesConsent: readConsent(localStorage, id) === "yes",
     ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),
     ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
   }
@@ -328,7 +358,7 @@ async function main(ui: Ui): Promise<void> {
     if (past !== null && !confirm(pastBudgetQuestion(past))) return false
     if (on) localStorage.setItem(SHORT_LIVES_KEY, "1")
     else localStorage.removeItem(SHORT_LIVES_KEY)
-    ctx.life?.shortLives(on)
+    ctx.life?.shortLives(on, past !== null)
     return true
   })
   const release = await ownLock

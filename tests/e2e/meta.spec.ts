@@ -204,13 +204,8 @@ test("the short-lives switch: off by default; checking it stores blanktab:shortL
 
 test("with a test budget of 8 CU: switching short lives on past it asks first; once on, the life ends at a clean sleep with meta.end budget and a newborn follows with its own draw", async ({ page }) => {
   test.setTimeout(240_000) // 8 CU and its checkup take about a minute on the CPU
-  // A genome space whose speed cap is 300 steps a second (a fixed gene), so a half-width CPU life lives 8 CU in seconds
-  // under a genome that runs as it says (a speed knob would contradict the genome, and such a life has no block).
-  const space = JSON.parse(JSON.stringify(SPACE_JSON)) as { genes: { name: string; min?: number; max?: number; centre: number | string }[] }
-  for (const g of space.genes) if (g.name === "maxStepsPerSec") Object.assign(g, { min: 300, max: 300, centre: 300 })
-  const genome = JSON.parse(JSON.stringify(GENOME_JSON)) as { values: Record<string, number> }
-  genome.values.maxStepsPerSec = 300
-  const { errors } = await serve(page, { "genome-space.json": space, "genome.json": genome })
+  // A genome that runs as it says (a speed knob would contradict the genome, and such a life has no block).
+  const { errors } = await serve(page, fastGenomeFiles())
   await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testBudgetCU=8")
   const id = await learnerIdOf(page)
   await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
@@ -244,6 +239,93 @@ test("with a test budget of 8 CU: switching short lives on past it asks first; o
   const born = (await filesOf(page, next))[0]!.meta!
   expect(born.evalPanel).toBe(birthDraw({ learnerId: next, space: SPACE, centre: CENTRE, centreSha: CENTRE_SHA, widthsClass: "cpu", posterior: null, posteriorSha: null }).evalPanel)
   await expect(box).toBeChecked()
+  expect(errors).toEqual([])
+})
+
+/** A genome space whose speed cap is 300 steps a second (a fixed gene), so a half-width CPU life lives 8 CU in about a minute. */
+function fastGenomeFiles() {
+  const space = JSON.parse(JSON.stringify(SPACE_JSON)) as { genes: { name: string; min?: number; max?: number; centre: number | string }[] }
+  for (const g of space.genes) if (g.name === "maxStepsPerSec") Object.assign(g, { min: 300, max: 300, centre: 300 })
+  const genome = JSON.parse(JSON.stringify(GENOME_JSON)) as { values: Record<string, number> }
+  genome.values.maxStepsPerSec = 300
+  return { "genome-space.json": space, "genome.json": genome }
+}
+
+/** Leaves only learner `id`'s newest outbox file, without its checkups: as if the files that held them were sent and pruned. */
+const pruneOutbox = (page: Page, id: string) => page.evaluate(i => new Promise<void>((res, rej) => {
+  const req = indexedDB.open("blanktab")
+  req.onerror = () => rej(req.error)
+  req.onsuccess = () => {
+    const tx = req.result.transaction("outbox", "readwrite")
+    const store = tx.objectStore("outbox")
+    const all = store.getAll()
+    all.onsuccess = () => {
+      const rows = (all.result as { learnerId: string; seq: number; file: Record<string, unknown> }[]).filter(r => r.learnerId === i).sort((a, b) => a.seq - b.seq)
+      const newest = rows.pop()!
+      for (const r of rows) store.delete([r.learnerId, r.seq])
+      store.put({ ...newest, file: { ...newest.file, checkups: [] } })
+    }
+    tx.oncomplete = () => { req.result.close(); res() }
+    tx.onerror = () => rej(tx.error)
+  }
+}), id)
+
+test("final review: a life resumed past its budget with the switch stored on ends only after a confirm for that learner, stored across reloads; a pruned outbox still asks", async ({ page }) => {
+  test.setTimeout(480_000) // the 8 CU checkup, then the 16 CU one (its learning paused for a while) on the CPU
+  const { errors } = await serve(page, fastGenomeFiles())
+  const asked: string[] = []
+  let answer: "accept" | "dismiss" = "dismiss"
+  page.on("dialog", d => { asked.push(d.message()); void (answer === "accept" ? d.accept() : d.dismiss()) })
+  const question = "This learner has had its 8 CU checkup, so it will end at its next sleep and a newborn will start. Go on?"
+  const steps = async () => Number(await page.getByTestId("steps").textContent())
+  /** More than 110 more steps (at least two clean sleeps at 50 steps each), and the life is still this one, not final. */
+  const livesOn = async (id: string) => {
+    const from = await steps()
+    await expect.poll(steps, { timeout: 120_000 }).toBeGreaterThan(from + 110) // a checkup may pause it meanwhile
+    await expect(page.getByTestId("learner-id")).toHaveText(id)
+    expect((await filesOf(page, id)).some(f => f.final)).toBe(false)
+  }
+  const resumed = async (id: string) => {
+    await expect(page.getByTestId("learner-id")).toHaveText(id)
+    await expect(page.getByTestId("status")).toContainText("resumed from its checkpoint", { timeout: 30_000 })
+  }
+  await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testBudgetCU=8")
+  const id = await learnerIdOf(page)
+  await expect.poll(async () => (await filesOf(page, id)).some(f => (f.checkups ?? []).some(c => c.level === 8)), { timeout: 90_000 }).toBe(true)
+  await expect.poll(() => cuLived(page), { timeout: 30_000 }).toBeGreaterThan(9)
+
+  // The switch is stored on (another tab, or a code-update reload): the resumed life is asked about once; no ends nothing.
+  await page.evaluate(() => localStorage.setItem("blanktab:shortLives", "1"))
+  await page.reload()
+  await resumed(id)
+  await expect.poll(() => asked.length).toBe(1)
+  expect(asked).toEqual([question])
+  expect(await page.evaluate(i => localStorage.getItem(`blanktab:shortLivesConsent:${i}`), id)).toBe("0")
+  await expect(page.getByTestId("short-lives")).toBeChecked()
+  await livesOn(id)
+  // The answer survives a reload: not asked again, and still not ended.
+  await page.reload()
+  await resumed(id)
+  await livesOn(id)
+  expect(asked).toHaveLength(1)
+
+  // The outbox pruned (the files with its checkups gone) and the switch off: switching it on still asks (the session's
+  // own last level, not the outbox's), and a yes ends it at its next clean sleep.
+  await page.evaluate(() => localStorage.removeItem("blanktab:shortLives"))
+  await pruneOutbox(page, id)
+  await page.reload()
+  await resumed(id)
+  await livesOn(id)
+  expect((await filesOf(page, id)).flatMap(f => f.checkups ?? []).filter(c => c.level >= 8)).toEqual([])
+  answer = "accept"
+  await page.getByTestId("short-lives").click()
+  await expect.poll(() => asked.length).toBe(2)
+  expect(asked[1]).toBe(question)
+  await expect(page.getByTestId("life")).toContainText(`This learner's life is complete (${id}): short lives are on`, { timeout: 30_000 })
+  const last = (await filesOf(page, id)).at(-1)!
+  expect(last.final).toBe(true)
+  expect(last.meta).toMatchObject({ end: "budget" })
+  expect(await page.evaluate(i => localStorage.getItem(`blanktab:shortLivesConsent:${i}`), id)).toBeNull()
   expect(errors).toEqual([])
 })
 

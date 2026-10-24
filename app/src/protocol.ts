@@ -22,6 +22,11 @@ export interface StartMessage {
   ownCap?: boolean
   /** The short-lives switch as the page has it now (then ShortLivesMessage on each change; decisions 0019, 0022). */
   shortLives: boolean
+  /**
+   * This learner's end at its budget was confirmed in this browser (stored per learnerId): without it, a life resumed
+   * past its budget checkup is never ended by the switch (shortlives.ts).
+   */
+  shortLivesConsent?: boolean
   /** Newborn reference mode (?newborns=a-b): runs newborns k = from…to in sequence instead of a life. */
   newborns?: { from: number; to: number }
   /** Test knobs (never set by the production build): skip WebGPU; a newborn's widths. */
@@ -46,8 +51,8 @@ export interface KnowledgeMessage { type: "knowledge"; manifest: Manifest }
  * learner stops right after the save, so the reload loses no step.
  */
 export interface CheckpointNowMessage { type: "checkpointNow"; id: number; halt: boolean }
-/** The short-lives switch changed (read by the session at clean sleeps only). */
-export interface ShortLivesMessage { type: "shortLives"; on: boolean }
+/** The short-lives switch changed (read by the session at clean sleeps only). `consent`: the page confirmed this learner's end. */
+export interface ShortLivesMessage { type: "shortLives"; on: boolean; consent?: boolean }
 export type ToWorker = StartMessage | VisibilityMessage | KnowledgeMessage | CheckpointNowMessage | ShortLivesMessage
 
 export type FromWorker =
@@ -69,8 +74,12 @@ export type FromWorker =
   | { type: "queued"; seq: number; steps: number; cu: number; final: boolean }
   /** The life's end. `ended: "budget"`: the short-lives switch ended it at its budget checkup. */
   | { type: "final"; steps: number; cu: number; ended?: "budget" }
-  /** The life's meta block (its genome and how it was drawn), as the session logs it: once per run. */
-  | { type: "meta"; meta: MetaBlock }
+  /**
+   * The life's meta block (its genome and how it was drawn), as the session logs it: once per run. `lastLevel`: the
+   * highest checkup level the life had when this run started (the session's, from its checkpoint; 0 for a newborn),
+   * known even when the files that held those checkups are gone from the outbox.
+   */
+  | { type: "meta"; meta: MetaBlock; lastLevel: number }
   /** This life logs no meta block, and why (no genome files, or the session refused every block: a test knob). */
   | { type: "unlabelled"; reason: string }
   /**
