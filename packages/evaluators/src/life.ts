@@ -1,5 +1,5 @@
 // Shared reading of a life's merged files: which files an evaluation budget covers, and small order-free statistics.
-import type { LogFile, LogFileV2 } from "@blanktab/harness/log"
+import { nextCrossing, type LogFile, type LogFileV2 } from "@blanktab/harness/log"
 import { GPU_WIDTHS_CLASS, type CohortContext, type Evaluator } from "./types.ts"
 
 export const isV2 = (f: LogFile): f is LogFileV2 => f.schemaVersion === 2
@@ -13,15 +13,18 @@ export const bySeq = (files: readonly LogFile[]): LogFile[] => [...files].sort((
 
 /**
  * The files an evaluation budget of `budget` CU reads, in seq order: every file up to and including the first that holds
- * the checkup at level `budget`, or else the first whose cu passes `budget` (the checkup runs at the first sleep after
- * crossing it, so it lands in that file or not at all), or else all files. Files after that are never read, so a life's
- * later files cannot change its score.
+ * a checkup at a level ≥ `budget`, or else the first whose cu reaches the log crossing after `budget`
+ * (nextCrossing(budget)), or else all files. The session writes the file that crosses `budget` at whatever step crosses
+ * it (its cu a fraction over), and runs the budget checkup at the next sleep, so the checkup lands in a later file: the
+ * next crossing's, a reload's, or the final one. Readers filter what they read by cu (curve points ≤ `budget`) and by
+ * checkup level, so the window's last file, which may run past `budget`, cannot change a score either.
  */
 export function budgetWindow(files: readonly LogFile[], budget: number): LogFile[] {
   const out: LogFile[] = []
+  const bound = nextCrossing(budget)
   for (const f of bySeq(files)) {
     out.push(f)
-    if (isV2(f) && ((f.checkups ?? []).some(c => c.level === budget) || f.cu > budget)) break
+    if (isV2(f) && ((f.checkups ?? []).some(c => c.level >= budget) || f.cu >= bound)) break
   }
   return out
 }

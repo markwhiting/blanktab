@@ -5,7 +5,7 @@ import { normInv } from "@blanktab/detmath"
 import {
   REGISTRY, getEvaluator, parseNewbornReference, rankAverage, searchComposite, type EvalOutput, type LifeInput, type NewbornReference,
 } from "@blanktab/evaluators"
-import { checkup, CPU, file, lid, meta, point, typicalLife } from "./fixtures/build"
+import { checkup, CPU, crossed, file, lid, meta, point, typicalLife } from "./fixtures/build"
 
 const HAND_BYTES = readFileSync(new URL("./fixtures/hand-life.json", import.meta.url), "utf8")
 const REF_BYTES = readFileSync(new URL("./fixtures/reference.json", import.meta.url), "utf8")
@@ -89,19 +89,22 @@ describe("search-composite@1 (spec §2.4)", () => {
     expect(score(lifeOf(id, typicalLife(id, { meta: meta({ budget: { budgetCU: 2048, levels: [512, 1024, 2048] } }) }))).eligible).toBe(true)
     const cases: [string, LogFile[], object?][] = [
       ["not a search life", typicalLife(id, { meta: meta({ role: "legacy", method: "legacy", evalPanel: null, drawSeed: null, posteriorSha: null }) })],
-      ["no meta block before the checkup", [file({ learnerId: id, seq: 0, cu: 512, meta: null, checkups: [checkup(512, {})] }), ...typical.slice(1)]],
+      ["no meta block before the checkup", [file({ learnerId: id, seq: 0, cu: crossed(512), meta: null }), ...typical.slice(1)]],
       ["not gpu widths", typicalLife(id, { widths: CPU })],
       ["different evaluation budget", typicalLife(id, { meta: meta({ budget: { budgetCU: 4096, levels: [1024, 2048, 4096] } }) })],
       ["no newborn reference", typical, {}],
-      ["no 2048 checkup", [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: 3072, curve: [point(3000, 0.9)] })]],
+      ["no 2048 checkup", [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: crossed(3072), curve: [point(3000, 0.9)] })]],
+      // Read only up to the next crossing after 2048: a 2048 checkup in a file after the 3072 one is never read.
+      ["no 2048 checkup", [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: crossed(3072) }), { ...typical[3]!, seq: 4, cu: 3500 }]],
       ["fewer than 2 of 3 levels", [
-        file({ learnerId: id, seq: 0, cu: 512, curve: [point(512, 0.99)] }),
-        file({ learnerId: id, seq: 1, cu: 1024 }),
-        ...typical.slice(2),
+        typical[0]!,
+        file({ learnerId: id, seq: 1, cu: crossed(1024), curve: [point(1024, 0.97)] }),
+        { ...typical[2]!, checkups: undefined, milestoneSuiteVersion: undefined },
+        typical[3]!,
       ]],
       ["fewer than 3 held-out points in (1024, 2048]", [
         ...typical.slice(0, 2),
-        file({ learnerId: id, seq: 2, cu: 2048, curve: [point(1200, 0.95), point(1600), point(2048, 0.93)] }),
+        { ...typical[2]!, curve: [point(1200, 0.95), point(1600), point(2048, 0.93), point(crossed(2048), 0.5)] },
         typical[3]!,
       ]],
       ["abandoned", [...typical.slice(0, 2), file({ learnerId: id, seq: 2, cu: 1500, final: true, meta: meta({ end: "orphan" }) })]],
@@ -152,6 +155,19 @@ describe("search-composite@1 (spec §2.4)", () => {
     // A failed end after the budget does not undo a scored life either.
     const c = score({ learnerId: id, files: [...base.files, ...parsed([file({ learnerId: id, seq: 4, cu: 4096, final: true, meta: meta({ end: "failed" }) })])] })
     expect(JSON.stringify(c)).toBe(JSON.stringify(a))
+  })
+
+  it("real log layout: the 2048 checkup lands in a file after the fractional crossing file, through a reload or at the 3072 crossing", () => {
+    const id = lid(0xc1)
+    const typical = typicalLife(id)
+    // The crossing file is a fraction over 2048 and holds no 2048 checkup; the checkup is in the 3072 file.
+    expect(typical[2]!.cu).toBeGreaterThan(2048)
+    expect(score(lifeOf(id, typical))).toMatchObject({ eligible: true, diagnostics: { levels: [512, 1024, 2048], heldOutPoints: 3 } })
+    // A reload between the crossing and the checkup: the halt file (no checkup) is read through.
+    const reloaded = [...typical.slice(0, 3), file({ learnerId: id, seq: 3, cu: 2050, curve: [point(2049, 0.1)] }), { ...typical[3]!, seq: 4 }]
+    const a = score(lifeOf(id, typical)), b = score(lifeOf(id, reloaded))
+    expect(b.eligible).toBe(true)
+    expect(b.score).toBe(a.score) // the point past 2048 is not read
   })
 
   it("targets: ties get mid-ranks; output equals normInv((rank−0.5)/n) of the re-ranked average", () => {

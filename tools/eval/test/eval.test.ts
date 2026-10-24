@@ -10,6 +10,7 @@ import { parseNewbornReference } from "@blanktab/evaluators"
 import { scoredLife, lid } from "../../../packages/evaluators/test/fixtures/build.ts"
 import { loadEvalConfig, loadReferences } from "../config.ts"
 import { collectLives } from "../lives.ts"
+import { budgetWindow } from "../../../packages/evaluators/src/life.ts"
 import { rescore } from "../rescore.ts"
 import { newbornReference } from "../newborn-reference.ts"
 import { rangeOf, writeCollected } from "../collect-newborns.ts"
@@ -217,5 +218,27 @@ describe("collect-newborns (controller ruling B: the outbox's newborn files, che
   it("rangeOf reads a-b within the reference's 64 newborns", () => {
     expect(rangeOf("0-63")).toEqual({ from: 0, to: 63 })
     for (const s of ["5-4", "0-64", "x", "1"]) expect(() => rangeOf(s), s).toThrow(/--newborns/)
+  })
+})
+
+describe("the committed lives in data/runs (final review: real log layout)", () => {
+  it("every checkup a real life logged is inside budgetWindow at its level, though its crossing file is a fraction over it", () => {
+    const lives = collectLives(join(REPO, "data/runs"))
+    let checked = 0, later = 0
+    for (const life of lives) {
+      for (const f of life.files) {
+        if (f.schemaVersion !== 2) continue
+        for (const c of f.checkups ?? []) {
+          const window = budgetWindow(life.files, c.level)
+          expect(window.some(w => w.seq === f.seq), `${life.learnerId} level ${c.level}`).toBe(true)
+          checked++
+          const crossing = life.files.find(x => x.schemaVersion === 2 && x.cu >= c.level)!
+          if (crossing.seq < f.seq) later++
+        }
+      }
+    }
+    // The committed data has such lives (a checkup in a file after its crossing file): the guard is not vacuous.
+    expect(checked).toBeGreaterThan(0)
+    expect(later).toBeGreaterThan(0)
   })
 })
