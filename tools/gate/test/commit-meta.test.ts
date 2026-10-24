@@ -1,7 +1,7 @@
 // The gate's direct commit of data/meta/** (decision 0019; invariant 7): only the gate's own files, never forced.
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
@@ -45,8 +45,12 @@ function setup() {
   }
   // git in the bare "origin": what main really is after a push.
   const origin = (...args: string[]) => execFileSync("git", ["--git-dir", join(work, "../origin.git"), ...args], { encoding: "utf8", env: ENV }).trim()
+  // The lockfile npm ci "installed" from: main's, as the workflow's LOCK_BLOB records it.
+  fx.commitMain({ "package-lock.json": "{\"lockfileVersion\":3}\n" })
+  const installedLock = git(["rev-parse", "HEAD:package-lock.json"]).trim()
+  calls.length = 0
   const logs: string[] = []
-  return { fx, work, git, calls, write, origin, logs, log: (m: string) => { logs.push(m) } }
+  return { fx, work, git, calls, write, origin, logs, installedLock, log: (m: string) => { logs.push(m) } }
 }
 
 describe("metaPathErrors", () => {
@@ -67,7 +71,7 @@ describe("commitMeta", () => {
     const before = t.origin("rev-parse", "main")
     t.write({ ...META("a"), "data/meta/posterior-index.jsonl": `{"i":1}\n` })
     const rebuild = async () => { throw new Error("no rebuild without a rejected push") }
-    expect(await commitMeta({ git: t.git, rebuild, log: t.log })).toBe("committed")
+    expect(await commitMeta({ git: t.git, installedLock: t.installedLock, rebuild, log: t.log })).toBe("committed")
     const head = t.origin("rev-parse", "main")
     expect(head).not.toBe(before)
     expect(t.origin("rev-parse", "main^")).toBe(before)
@@ -85,7 +89,7 @@ describe("commitMeta", () => {
       const localBefore = t.git(["rev-parse", "HEAD"]).trim()
       t.write({ ...META("a"), [other]: "{}\n" })
       t.git(["add", "--", other])
-      await expect(commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).rejects.toThrow(other)
+      await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(other)
       expect(t.origin("rev-parse", "main")).toBe(before)
       expect(t.git(["rev-parse", "HEAD"]).trim()).toBe(localBefore)
       expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
@@ -96,7 +100,7 @@ describe("commitMeta", () => {
     const t = setup()
     const before = t.origin("rev-parse", "main")
     t.write({ ...META("a"), "README.md": "changed by npm ci\n" })
-    await expect(commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).rejects.toThrow("README.md")
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow("README.md")
     expect(t.origin("rev-parse", "main")).toBe(before)
     expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
   })
@@ -104,7 +108,7 @@ describe("commitMeta", () => {
   it("an untracked file outside data/meta → throws", async () => {
     const t = setup()
     t.write({ ...META("a"), "stray.txt": "x\n" })
-    await expect(commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).rejects.toThrow("stray.txt")
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow("stray.txt")
     expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
   })
 
@@ -114,7 +118,7 @@ describe("commitMeta", () => {
     t.write({ "README.md": "local\n" })
     t.git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "local"])
     t.write(META("a"))
-    await expect(commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).rejects.toThrow(/origin\/main/)
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(/origin\/main/)
     expect(t.origin("rev-parse", "main")).toBe(before)
     expect(t.calls.some(a => a[0] === "push")).toBe(false)
   })
@@ -133,7 +137,7 @@ describe("commitMeta", () => {
       t.write(META("fresh"))
       return true
     }
-    expect(await commitMeta({ git: t.git, rebuild, log: t.log })).toBe("committed")
+    expect(await commitMeta({ git: t.git, installedLock: t.installedLock, rebuild, log: t.log })).toBe("committed")
     expect(rebuilds).toBe(1)
     expect(t.origin("rev-parse", "main^")).toBe(moved)
     expect(t.origin("show", "main:data/meta/calibration.json")).toBe(`{"c":"fresh"}`)
@@ -158,7 +162,7 @@ describe("commitMeta", () => {
       before = t.origin("rev-parse", "main")
       return true
     }
-    await expect(commitMeta({ git: t.git, rebuild, log: t.log })).rejects.toThrow(/3 tries/)
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild, log: t.log })).rejects.toThrow(/3 tries/)
     expect(t.calls.filter(a => a[0] === "push")).toHaveLength(3)
     expect(n).toBe(2)
     expect(t.origin("log", "--format=%s", "main").split("\n").some(s => s.startsWith("meta:"))).toBe(false)
@@ -170,7 +174,7 @@ describe("commitMeta", () => {
     const t = setup()
     t.write(META("a"))
     execFileSync("git", ["-C", t.work, "remote", "set-url", "--push", "origin", join(t.work, "../nowhere.git")], { env: ENV })
-    await expect(commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).rejects.toThrow(/push/)
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(/push/)
     expect(t.calls.filter(a => a[0] === "push")).toHaveLength(1)
   })
 
@@ -178,16 +182,65 @@ describe("commitMeta", () => {
     const t = setup()
     t.write(META("a"))
     t.fx.commitMain(META("a"), [], false) // someone else already committed the same files
-    expect(await commitMeta({ git: t.git, rebuild: async () => false, log: t.log })).toBe("unchanged")
+    expect(await commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => false, log: t.log })).toBe("unchanged")
     expect(t.origin("log", "-1", "--format=%s", "main")).toBe("c")
   })
+
+  it("main's package-lock.json changed since npm ci (pulled in before the build) → throws, nothing committed", async () => {
+    const t = setup()
+    t.fx.commitMain({ "package-lock.json": "{\"lockfileVersion\":3,\"new\":1}\n" }) // the workflow's git pull brought it
+    const before = t.origin("rev-parse", "main")
+    t.write(META("a"))
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(/package-lock\.json/)
+    expect(t.origin("rev-parse", "main")).toBe(before)
+    expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
+  })
+
+  it("main's package-lock.json changed by the commit that rejected the push → throws before the rebuild, nothing pushed", async () => {
+    const t = setup()
+    t.write(META("a"))
+    const moved = t.fx.commitMain({ "package-lock.json": "{\"lockfileVersion\":3,\"new\":1}\n" }, [], false)
+    let rebuilds = 0
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => { rebuilds++; return true }, log: t.log })).rejects.toThrow(/package-lock\.json/)
+    expect(rebuilds).toBe(0)
+    expect(t.origin("rev-parse", "main")).toBe(moved)
+    expect(t.calls.filter(a => a[0] === "push")).toHaveLength(1)
+  })
+
+  it("a tracked data/meta file deleted → throws, nothing committed", async () => {
+    const t = setup()
+    t.fx.commitMain(META("a"))
+    const before = t.origin("rev-parse", "main")
+    t.write({ "data/meta/calibration.json": `{"c":"b"}\n` })
+    rmSync(join(t.work, "data/meta/diagnostics.json"))
+    await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(/diagnostics\.json" is D/)
+    expect(t.origin("rev-parse", "main")).toBe(before)
+    expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
+  })
+
+  for (const [what, make] of [
+    ["a tracked data/meta file turned into a symlink", (w: string) => { rmSync(join(w, "data/meta/posterior.json")); symlinkSync("../../README.md", join(w, "data/meta/posterior.json")) }],
+    ["a new data/meta file that is a symlink", (w: string) => { symlinkSync("../../README.md", join(w, "data/meta/posterior-index.jsonl")) }],
+    ["a data/meta file made executable", (w: string) => { chmodSync(join(w, "data/meta/calibration.json"), 0o755) }],
+  ] as const) {
+    it(`${what} → throws, nothing committed`, async () => {
+      const t = setup()
+      t.fx.commitMain(META("a"))
+      const before = t.origin("rev-parse", "main")
+      t.git(["config", "core.fileMode", "true"])
+      make(t.work)
+      await expect(commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).rejects.toThrow(/not a regular file added or modified/)
+      expect(t.origin("rev-parse", "main")).toBe(before)
+      expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
+    })
+  }
 
   it("nothing changed → unchanged, no commit", async () => {
     const t = setup()
     t.fx.commitMain(META("a"))
     const before = t.origin("rev-parse", "main")
     t.write(META("a"))
-    expect(await commitMeta({ git: t.git, rebuild: async () => true, log: t.log })).toBe("unchanged")
+    expect(await commitMeta({ git: t.git, installedLock: t.installedLock, rebuild: async () => true, log: t.log })).toBe("unchanged")
     expect(t.origin("rev-parse", "main")).toBe(before)
     expect(t.calls.some(a => a[0] === "commit" || a[0] === "push")).toBe(false)
   })
@@ -197,13 +250,15 @@ describe("workflows", () => {
   const gate = readFileSync(join(REPO, ".github/workflows/gate.yml"), "utf8")
   const deploy = readFileSync(join(REPO, ".github/workflows/deploy.yml"), "utf8")
   it("gate.yml's deploy condition includes meta == 'committed'; deploy.yml copies data/meta/posterior.json", () => {
-    expect(gate).toMatch(/if: \$\{\{[^\n]*needs\.gate\.outputs\.meta == 'committed'[^\n]*\}\}/)
+    const deployJob = gate.slice(gate.indexOf("\n  deploy:\n"))
+    expect(deployJob).toMatch(/^ {4}needs: gate\n {4}if: \$\{\{ !cancelled\(\) && \(\(needs\.gate\.outputs\.merged != '' && needs\.gate\.outputs\.merged != '0'\) \|\| needs\.gate\.outputs\.meta == 'committed'\) \}\}\n {4}uses: \.\/\.github\/workflows\/deploy\.yml$/m)
     expect(gate).toMatch(/meta: \$\{\{ steps\.meta\.outputs\.meta \}\}/)
     expect(deploy).toContain("if [ -f data/meta/posterior.json ]; then cp data/meta/posterior.json app/dist/knowledge/posterior.json; fi")
   })
   it("gate.yml pulls main, builds data/meta and commits it after the gate step, with only contents and pull-requests write", () => {
     const at = (s: string) => { const i = gate.indexOf(s); expect(i, s).toBeGreaterThan(-1); return i }
-    const order = [at("npx tsx tools/gate/gate.ts"), at("git pull --ff-only origin main"), at("npx tsx tools/gate/meta-cli.ts"), at("npx tsx tools/gate/commit-meta.ts")]
+    const order = [at("run: npm ci"), at(`LOCK_BLOB=$(git hash-object package-lock.json)`), at("npx tsx tools/gate/gate.ts"), at("git pull --ff-only origin main"),
+      at(`"$(git rev-parse HEAD:package-lock.json)" = "$LOCK_BLOB"`), at("npx tsx tools/gate/meta-cli.ts"), at("npx tsx tools/gate/commit-meta.ts")]
     expect([...order].sort((a, b) => a - b)).toEqual(order)
     const gateJob = gate.slice(gate.indexOf("  gate:"), gate.indexOf("  deploy:"))
     expect(gateJob).toMatch(/permissions:\n\s+contents: write\n\s+pull-requests: write\n\s+outputs:/)

@@ -31,6 +31,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # What was installed: commit-meta.ts refuses to commit if main's lockfile has moved past it (meta-cli would have
+      # run main's new code on this older install).
+      - run: echo "LOCK_BLOB=$(git hash-object package-lock.json)" >> "$GITHUB_ENV"
       - id: gate
         run: npx tsx tools/gate/gate.ts data/runs
         env:
@@ -38,6 +41,8 @@ jobs:
           REPO: ${{ github.repository }}
       # data/meta/** is built from main as it now is: the gate's merges, and the code, config and logs they brought.
       - run: git pull --ff-only origin main
+      # Fail before running main's new code on an older install (commit-meta.ts checks again before every commit).
+      - run: '[ "$(git rev-parse HEAD:package-lock.json)" = "$LOCK_BLOB" ] || { echo "::error::main changed package-lock.json since npm ci; the next run reinstalls"; exit 1; }'
       - run: npx tsx tools/gate/meta-cli.ts
       # The one direct commit to main (decision 0019): only the files meta-cli.ts computed, never forced; on a push that
       # main moved past, it resets to the new main and rebuilds.
