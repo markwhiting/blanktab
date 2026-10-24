@@ -1,0 +1,275 @@
+// Plan 05a Task 12: the page's birth draw, its recipe and meta-learner lines, the short-lives switch and newborn mode.
+import { test, expect, type Page } from "@playwright/test"
+import { createHash } from "node:crypto"
+import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
+import { DEFAULT_SETTINGS } from "@blanktab/learner"
+import { birthDraw, parsePosterior } from "@blanktab/meta"
+import { NEWBORN_SEED_BASE } from "@blanktab/harness/newborn"
+import { parseLogFile } from "@blanktab/harness/log"
+import { validateSessionPr } from "../../tools/gate/validate"
+import { CENTRE, CENTRE_SHA, GENOME_JSON, SPACE, SPACE_JSON, posteriorText } from "../../app/test/posteriors"
+import { fmt } from "../../app/src/site"
+
+const ID_RE = /lrn_[0-9a-f]{16}/
+const sha = (s: string) => createHash("sha256").update(s).digest("hex")
+type File = Record<string, unknown> & { seq: number; final: boolean; cu: number; settings: Record<string, number>; meta?: Record<string, unknown> & { genome: Record<string, number | string> }; checkups?: { level: number }[] }
+
+/** Serves knowledge/*.json: the manifest and summary as the loop does, the genome files and posterior as given (strings as raw bytes; undefined: 404). */
+async function serve(page: Page, files: Record<string, unknown>) {
+  const all: Record<string, unknown> = {
+    "summary.json": { schemaVersion: 1, sessions: [] },
+    "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
+    "genome-space.json": SPACE_JSON, "genome.json": GENOME_JSON, ...files,
+  }
+  await page.route("**/knowledge/*.json", route => {
+    const body = all[new URL(route.request().url()).pathname.split("/").pop()!]
+    if (body === undefined) return route.fulfill({ status: 404 })
+    return typeof body === "string" ? route.fulfill({ body, contentType: "application/json" }) : route.fulfill({ json: body })
+  })
+  await page.route("https://api.github.com/**", route => route.abort())
+  const errors: string[] = []
+  page.on("console", m => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(m.text()) })
+  page.on("pageerror", e => errors.push(e.message))
+  return { errors, files: all }
+}
+
+/** The outbox's files, oldest first (of learner `id`, or every learner's). */
+const outbox = (page: Page, id?: string) => page.evaluate(i => new Promise<{ learnerId: string; file: unknown }[]>((res, rej) => {
+  const req = indexedDB.open("blanktab")
+  req.onerror = () => rej(req.error)
+  req.onsuccess = () => {
+    const all = req.result.transaction("outbox").objectStore("outbox").getAll()
+    all.onsuccess = () => {
+      req.result.close()
+      const rows = all.result as { learnerId: string; seq: number; file: unknown }[]
+      res(rows.filter(r => i === undefined || r.learnerId === i).sort((a, b) => a.seq - b.seq).map(r => ({ learnerId: r.learnerId, file: r.file })))
+    }
+    all.onerror = () => rej(all.error)
+  }
+}), id)
+const filesOf = async (page: Page, id: string) => (await outbox(page, id)).map(r => r.file as File)
+const learnerIdOf = async (page: Page) => {
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  return (await page.getByTestId("learner-id").textContent())!.match(ID_RE)![0]
+}
+const cuLived = async (page: Page) => Number((await page.getByTestId("cu").textContent())?.match(/^([\d.]+) (?:of |CU)/)?.[1] ?? NaN)
+/** The full genome as the page's toggle lists it. */
+const fmtGenome = (g: Record<string, number | string>) => Object.entries(g).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ")
+
+test("a calibrate posterior: the page shows 'a calibration life' and 'Calibrating: …'; the outbox's first file has meta.method calibrate and the genome the page shows", async ({ page }) => {
+  const text = posteriorText("calibrate", { calibrationLives: 18, calibrationTarget: 30 })
+  const { errors } = await serve(page, { "posterior.json": text })
+  // The GPU widths on the CPU: a "gpu" widths class draw (calibration lives are GPU-width only), in a life of a few steps.
+  await page.goto("/learner/?testBackend=cpu&testWidths=gpu&testLifetimeCU=0.2&testSleepInterval=2")
+  const id = await learnerIdOf(page)
+  await expect(page.getByTestId("meta-state")).toHaveText("Calibrating: 18 of 30 lives measured, to learn whether the score can tell recipes apart.")
+  await expect(page.getByTestId("recipe-text")).toHaveText(/^a calibration life \(recipe \d+ of 10\)$/, { timeout: 30_000 })
+  const shown = await page.getByTestId("genome-list").textContent()
+  const shas = await page.getByTestId("genome-shas").textContent()
+  await expect.poll(async () => (await filesOf(page, id)).length, { timeout: 60_000 }).toBeGreaterThan(0)
+  const first = (await filesOf(page, id))[0]!
+  expect(first.meta).toMatchObject({ role: "search", method: "calibrate", posteriorSha: sha(text) })
+  expect(fmtGenome(first.meta!.genome)).toBe(shown)
+  expect(shas).toBe(`genomeSha ${(first.meta!.genomeSha as string).slice(0, 8)} · posteriorSha ${sha(text).slice(0, 8)}`)
+  const recipe = Number((await page.getByTestId("recipe-text").textContent())!.match(/recipe (\d+)/)![1])
+  expect(parsePosterior(text)!.calibration.genomes[recipe - 1]!.genomeSha).toBe(first.meta!.genomeSha)
+  expect(errors).toEqual([])
+})
+
+test("the draw in the page equals birthDraw in Node for the same learnerId and posterior bytes", async ({ context }) => {
+  // Paused: CPU-class tabs draw centre or uniform (1 in 5). The bytes carry odd spacing: the sha is of the bytes.
+  const text = posteriorText("paused", { calibrationLives: 34, calibrationTarget: 45, looks: 1 }).replace("{\n", "{  \n")
+  const posterior = parsePosterior(text)!
+  // learnerIds of both kinds, pinned through sessionStorage (this tab's learner), so the uniform branch is checked too.
+  const ids = Array.from({ length: 400 }, (_, i) => `lrn_${(0xabc000 + i).toString(16).padStart(16, "0")}`)
+  const drawOf = (learnerId: string) => birthDraw({ learnerId, space: SPACE, centre: CENTRE, centreSha: CENTRE_SHA, widthsClass: "cpu", posterior, posteriorSha: sha(text) })
+  const picks = [ids.find(i => drawOf(i).method === "uniform")!, ids.find(i => drawOf(i).method === "centre")!]
+  for (const learnerId of picks) {
+    const page = await context.newPage()
+    const { errors } = await serve(page, { "posterior.json": text })
+    await page.addInitScript(i => { if (!sessionStorage.getItem("blanktab:learnerId")) sessionStorage.setItem("blanktab:learnerId", i) }, learnerId)
+    await page.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=0.05&testSleepInterval=5")
+    await expect(page.getByTestId("learner-id")).toHaveText(learnerId)
+    await expect(page.getByTestId("meta-state")).toHaveText("Paused: the score can't yet tell recipes apart; measuring more (34 of 45).")
+    await expect.poll(async () => (await filesOf(page, learnerId)).length, { timeout: 30_000 }).toBeGreaterThan(0)
+    const meta = (await filesOf(page, learnerId))[0]!.meta!
+    const d = drawOf(learnerId)
+    expect({ method: meta.method, drawSeed: meta.drawSeed, posteriorSha: meta.posteriorSha, evalPanel: meta.evalPanel, genome: meta.genome })
+      .toEqual({ method: d.method, drawSeed: d.drawSeed, posteriorSha: d.posteriorSha, evalPanel: d.evalPanel, genome: d.genome })
+    await expect(page.getByTestId("recipe-text")).toHaveText(d.method === "uniform" ? "one of the 1-in-5 random explorers" : "the current recipe")
+    if (d.method === "uniform") await expect(page.getByTestId("recipe-genes")).toHaveText(/^ · [a-z ]+ ×[\d.]+, [a-z ]+ ×[\d.]+, [a-z ]+ ×[\d.]+$/)
+    expect(errors).toEqual([])
+    await page.close()
+  }
+})
+
+test("posterior.json 404 → 'the current recipe', posteriorSha null; genome-space.json garbage → no meta, DEFAULT_SETTINGS", async ({ page, context }) => {
+  const { errors } = await serve(page, {})
+  await page.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=0.05&testSleepInterval=5")
+  const id = await learnerIdOf(page)
+  await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
+  await expect(page.getByTestId("meta-state")).toHaveText("Not reachable: this learner runs the current recipe.")
+  await expect(page.getByTestId("genome-shas")).toHaveText(`genomeSha ${CENTRE_SHA.slice(0, 8)} · posteriorSha none`)
+  await expect.poll(async () => (await filesOf(page, id)).length, { timeout: 30_000 }).toBeGreaterThan(0)
+  expect((await filesOf(page, id))[0]!.meta).toMatchObject({ method: "centre", posteriorSha: null, drawSeed: null, genome: CENTRE })
+  expect(errors).toEqual([])
+
+  const other = await context.newPage()
+  const o = await serve(other, { "genome-space.json": "<html>garbage", "posterior.json": posteriorText("calibrate") })
+  await other.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=0.05&testSleepInterval=5")
+  const id2 = await learnerIdOf(other)
+  await expect(other.getByTestId("recipe-text")).toHaveText(/^the default settings, not counted/)
+  await expect(other.getByTestId("meta-state")).toHaveText("Not reachable: the genome files could not be read, so this learner runs the default settings and is not counted.")
+  await expect(other.getByTestId("knowledge")).toHaveText(/^loaded/) // never offline for it
+  await expect.poll(async () => (await filesOf(other, id2)).length, { timeout: 30_000 }).toBeGreaterThan(0)
+  const f = (await filesOf(other, id2))[0]!
+  expect(f.meta).toBeUndefined()
+  expect(f.settings).toMatchObject({ ...DEFAULT_SETTINGS })
+  expect(o.errors).toEqual([])
+})
+
+test("a life born without a block (before 05a) resumes as legacy: the recipe says so and names the genes its settings did not record", async ({ page }) => {
+  const { errors, files } = await serve(page, { "genome-space.json": undefined, "genome.json": undefined })
+  await page.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=2&testSleepInterval=5")
+  const id = await learnerIdOf(page)
+  await expect(page.getByTestId("recipe-text")).toHaveText("the default settings, not counted (no genome files)")
+  await expect.poll(async () => Number(await page.getByTestId("steps").textContent()), { timeout: 30_000 }).toBeGreaterThan(20)
+  // The genome files are published; the reload resumes the same life from its checkpoint, which has no block.
+  files["genome-space.json"] = SPACE_JSON
+  files["genome.json"] = GENOME_JSON
+  await page.reload()
+  await expect(page.getByTestId("learner-id")).toHaveText(id)
+  await expect(page.getByTestId("status")).toContainText("resumed from its checkpoint")
+  await expect(page.getByTestId("recipe-text")).toHaveText("born before the meta-learner (its old settings)")
+  await expect(page.getByTestId("recipe-genes")).toHaveText(" · some settings not recorded: sleepInterval")
+  await expect.poll(async () => (await filesOf(page, id)).some(f => f.final), { timeout: 60_000 }).toBe(true)
+  const files_ = await filesOf(page, id)
+  const last = files_[files_.length - 1]!
+  expect(last.meta).toMatchObject({ role: "legacy", method: "legacy", evalPanel: null, missing: ["sleepInterval"] })
+  const v = await validateSessionPr(files_.map(f => ({ path: `data/runs/${id}/${f.seq}.json`, content: JSON.stringify(f, null, 2) })), [], { space: SPACE })
+  expect(v.errors).toEqual([])
+  expect(errors).toEqual([])
+})
+
+test("'Score' appears once the summary row for this learner has its pinned evaluator's score", async ({ page }) => {
+  const id = "lrn_5c0e5c0e5c0e5c0e"
+  const row = (evals?: unknown) => ({
+    learnerId: id, settings: {}, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 }, stepsTotal: 3000, final: false,
+    codeSha: "a".repeat(40), knowledgeSha: "b".repeat(64), sessionsSeenAtBirth: 0, ...(evals ? { evals } : {}),
+  })
+  const { errors, files } = await serve(page, { "summary.json": { schemaVersion: 1, sessions: [row()] } })
+  await page.addInitScript(i => { if (!sessionStorage.getItem("blanktab:learnerId")) sessionStorage.setItem("blanktab:learnerId", i) }, id)
+  await page.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=50&testSleepInterval=5")
+  await expect(page.getByTestId("learner-id")).toHaveText(id)
+  await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
+  await expect(page.getByTestId("score")).toBeHidden()
+  files["summary.json"] = { schemaVersion: 1, sessions: [row({ "search-composite@1": { eligible: true, score: 0.4123, C: 0.5, H: 0.3 } })] }
+  await page.reload()
+  await expect(page.getByTestId("score")).toHaveText("0.41 (search-composite@1)")
+  await expect(page.getByTestId("score-label")).toBeVisible()
+  expect(errors).toEqual([])
+})
+
+test("the short-lives switch: off by default; checking it stores blanktab:shortLives = 1, survives a reload, and posts shortLives to the worker", async ({ page }) => {
+  const { errors } = await serve(page, {})
+  // Every message the page posts to its worker, by type (and the switch's value).
+  await page.addInitScript(() => {
+    const sent: unknown[] = ((globalThis as { sent?: unknown[] }).sent = [])
+    const post = Worker.prototype.postMessage
+    Worker.prototype.postMessage = function (this: Worker, m: { type: string; on?: boolean; shortLives?: boolean }, ...rest: unknown[]) {
+      sent.push(m.type === "start" ? { type: "start", shortLives: m.shortLives } : m.type === "shortLives" ? { type: "shortLives", on: m.on } : { type: m.type })
+      return (post as (...a: unknown[]) => void).call(this, m, ...rest)
+    } as Worker["postMessage"]
+  })
+  const sent = () => page.evaluate(() => ((globalThis as { sent?: { type: string }[] }).sent ?? []).filter(m => m.type === "start" || m.type === "shortLives"))
+  await page.goto("/learner/?testBackend=cpu&testWidths=tiny&testLifetimeCU=50&testSleepInterval=5")
+  const box = page.getByTestId("short-lives")
+  await expect(page.getByText("Short lives")).toBeVisible()
+  await expect(page.getByText("End each life at its 2,048 CU checkup and start a newborn (about every 30 minutes). The meta-learner only gets results at a useful rate from tabs with this on.")).toBeVisible()
+  await expect(box).not.toBeChecked()
+  expect(await page.evaluate(() => localStorage.getItem("blanktab:shortLives"))).toBeNull()
+  await expect.poll(sent).toEqual([{ type: "start", shortLives: false }])
+  await box.check()
+  expect(await page.evaluate(() => localStorage.getItem("blanktab:shortLives"))).toBe("1")
+  await expect.poll(sent).toEqual([{ type: "start", shortLives: false }, { type: "shortLives", on: true }])
+  await page.reload()
+  await expect(box).toBeChecked()
+  await expect.poll(sent).toEqual([{ type: "start", shortLives: true }])
+  await box.uncheck()
+  expect(await page.evaluate(() => localStorage.getItem("blanktab:shortLives"))).toBeNull()
+  await expect.poll(sent).toEqual([{ type: "start", shortLives: true }, { type: "shortLives", on: false }])
+  expect(errors).toEqual([])
+})
+
+test("with a test budget of 8 CU: switching short lives on past it asks first; once on, the life ends at a clean sleep with meta.end budget and a newborn follows with its own draw", async ({ page }) => {
+  test.setTimeout(240_000) // 8 CU and its checkup take about a minute on the CPU
+  // A genome space whose speed cap is 300 steps a second (a fixed gene), so a half-width CPU life lives 8 CU in seconds
+  // under a genome that runs as it says (a speed knob would contradict the genome, and such a life has no block).
+  const space = JSON.parse(JSON.stringify(SPACE_JSON)) as { genes: { name: string; min?: number; max?: number; centre: number | string }[] }
+  for (const g of space.genes) if (g.name === "maxStepsPerSec") Object.assign(g, { min: 300, max: 300, centre: 300 })
+  const genome = JSON.parse(JSON.stringify(GENOME_JSON)) as { values: Record<string, number> }
+  genome.values.maxStepsPerSec = 300
+  const { errors } = await serve(page, { "genome-space.json": space, "genome.json": genome })
+  await page.goto("/learner/?testBackend=cpu&testSleepInterval=50&testBudgetCU=8")
+  const id = await learnerIdOf(page)
+  await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
+  // Its budget checkup (8 CU) is logged, and with the switch off it lives on past it.
+  await expect.poll(async () => (await filesOf(page, id)).some(f => (f.checkups ?? []).some(c => c.level === 8)), { timeout: 90_000 }).toBe(true)
+  await expect.poll(() => cuLived(page), { timeout: 30_000 }).toBeGreaterThan(9)
+  expect((await filesOf(page, id)).some(f => f.final)).toBe(false)
+
+  const box = page.getByTestId("short-lives")
+  const asked: string[] = []
+  page.once("dialog", d => { asked.push(d.message()); void d.dismiss() })
+  await box.click()
+  await expect(box).not.toBeChecked() // dismissed: nothing changes
+  expect(await page.evaluate(() => localStorage.getItem("blanktab:shortLives"))).toBeNull()
+  expect(asked).toEqual(["This learner is past its 8 CU budget, so it will end at its next sleep and a newborn will start. Go on?"])
+  page.once("dialog", d => { asked.push(d.message()); void d.accept() })
+  await box.click()
+  await expect(box).toBeChecked()
+  expect(asked).toHaveLength(2)
+  await expect(page.getByTestId("life")).toContainText(`This learner's life is complete (${id}): short lives are on`, { timeout: 30_000 })
+  const files = await filesOf(page, id)
+  const last = files[files.length - 1]!
+  expect(last.final).toBe(true)
+  expect(last.meta).toMatchObject({ end: "budget", budget: { budgetCU: 8, levels: [8] } })
+  expect(files.filter(f => f.final)).toHaveLength(1)
+  // The newborn: another learner, its own draw (its learnerId's panel), short lives still on.
+  await expect(page.getByTestId("learner-id")).not.toHaveText(id, { timeout: 10_000 })
+  const next = await learnerIdOf(page)
+  await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
+  await expect.poll(async () => (await filesOf(page, next)).length, { timeout: 60_000 }).toBeGreaterThan(0)
+  const born = (await filesOf(page, next))[0]!.meta!
+  expect(born.evalPanel).toBe(birthDraw({ learnerId: next, space: SPACE, centre: CENTRE, centreSha: CENTRE_SHA, widthsClass: "cpu", posterior: null, posteriorSha: null }).evalPanel)
+  await expect(box).toBeChecked()
+  expect(errors).toEqual([])
+})
+
+test("?newborns=0-0 writes one newborn file that parses and validates", async ({ page }) => {
+  const { errors } = await serve(page, { "posterior.json": posteriorText("calibrate") })
+  await page.addInitScript(() => localStorage.setItem("blanktab:githubToken", "test-token")) // even with a token, nothing is sent
+  const github: string[] = []
+  page.on("request", r => { if (r.url().startsWith("https://api.github.com")) github.push(r.url()) })
+  await page.goto("/learner/?newborns=0-0&testBackend=cpu&testWidths=tiny")
+  await expect(page.getByTestId("life")).toContainText("Newborn reference 0 of 0–0")
+  await expect(page.getByTestId("recipe-text")).toHaveText("a newborn reference (panel 1)")
+  await expect(page.getByTestId("life")).toContainText("Newborn references 0–0 are done", { timeout: 80_000 })
+  const rows = await outbox(page)
+  expect(rows).toHaveLength(1)
+  const { learnerId, file } = rows[0]!
+  const f = file as File
+  expect(parseLogFile(JSON.parse(JSON.stringify(f))).ok).toBe(true)
+  expect(f).toMatchObject({ seq: 0, final: true, cu: 0, stepsTotal: 0, settings: { seed: NEWBORN_SEED_BASE } })
+  expect(f.meta).toMatchObject({ role: "newborn", method: "newborn", evalPanel: 1, genomeSha: CENTRE_SHA, genome: CENTRE })
+  const v = await validateSessionPr([{ path: `data/runs/${learnerId}/0.json`, content: JSON.stringify(f, null, 2) }], [], { space: SPACE })
+  expect(v.errors).toEqual([])
+  // Kept in this browser for the collector: marked local-only, never sent.
+  const local = await page.evaluate(() => new Promise<unknown[]>(res => {
+    const req = indexedDB.open("blanktab")
+    req.onsuccess = () => { const g = req.result.transaction("contribution").objectStore("contribution").getAll(); g.onsuccess = () => res(g.result) }
+  }))
+  expect(local).toEqual([{ learnerId, lastPr: 0, closedInARow: 0, localOnly: true }])
+  expect(github.filter(u => !u.endsWith("/user"))).toEqual([])
+  expect(errors).toEqual([])
+})

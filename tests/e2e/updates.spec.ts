@@ -3,11 +3,6 @@ import { test, expect, type Page, type Request } from "@playwright/test"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
 
 const ID_RE = /lrn_[0-9a-f]{16}/
-const SPACE = [
-  { name: "lr", min: 1e-3, max: 1e-3 }, { name: "entropyWeight", min: 0.01, max: 0.01 }, { name: "curiosityWeight", min: 1, max: 1 },
-  { name: "bufferSize", min: 500, max: 500 }, { name: "replayPerSleep", min: 16, max: 16 }, { name: "headLrScale", min: 0.1, max: 0.1 },
-  { name: "maxStepsPerSec", min: 30, max: 30 },
-]
 const row = (id: string) => ({
   learnerId: id, settings: {}, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
   stepsTotal: 3000, final: true, codeSha: "a".repeat(40), knowledgeSha: "b".repeat(64), sessionsSeenAtBirth: 0,
@@ -22,7 +17,6 @@ async function setup(page: Page) {
     "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), row("lrn_bbbbbbbbbbbbbbbb")] },
     // The e2e build is code "dev" with this checkout's LEARNER_STATE_VERSION: at first, nothing new is deployed.
     "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
-    "settings-space.json": { schemaVersion: 1, settings: SPACE },
   }
   const all: Request[] = []
   page.context().on("request", r => all.push(r))

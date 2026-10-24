@@ -1,9 +1,8 @@
-// What a tab reads before its learner starts, and again while it lives: the published summary, the manifest, and the settings space.
+// What a tab reads before its learner starts, and again while it lives: the published summary, the manifest, the
+// caregiver prior and the meta-learner's files (the genome space, the promoted genome and the gate's posterior).
 // Browser-safe. Unreachable or malformed knowledge never stops the learner: it falls back to an empty, offline view.
 import { CAREGIVER_DEFAULTS, CAREGIVER_RANGES, type CaregiverSettings } from "./caregiver"
-import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, SETTING_KEY_RE, parseSessionRow, type SessionRow, type Summary } from "./log"
-
-export interface SettingRange { name: string; min: number; max: number }
+import { CODE_SHA_RE, KNOWLEDGE_SHA_RE, parseSessionRow, type SessionRow, type Summary } from "./log"
 
 /** knowledge/manifest.json, as the deploy writes it (tools/gate/manifest.ts). */
 export interface Manifest {
@@ -21,9 +20,16 @@ export interface Knowledge {
   offline: boolean
   summary: Summary
   manifest: Manifest
-  settingsSpace: { settings: SettingRange[] }
   /** knowledge/caregiver-prior.json; CAREGIVER_DEFAULTS when absent or malformed (that alone does not make the knowledge offline). */
   caregiverPrior: CaregiverSettings
+  /**
+   * The meta-learner's files (Plan 05a), raw: this package does not read genomes, the page parses them (@blanktab/meta).
+   * `genomeSpace` and `genome` are knowledge/genome-space.json and knowledge/genome.json as JSON; null when either
+   * cannot be fetched or is not JSON. `posteriorText` is knowledge/posterior.json (the deploy copies the gate's
+   * data/meta/posterior.json there) as its exact UTF-8 text, so its sha is of the bytes the gate wrote; null when
+   * it cannot be fetched or is not UTF-8. None of this makes the knowledge offline. Offline knowledge has null.
+   */
+  meta: { genomeSpace: unknown; genome: unknown; posteriorText: string | null } | null
 }
 
 /** knowledgeSha recorded by a learner born without knowledge. */
@@ -33,8 +39,8 @@ export const offlineKnowledge = (): Knowledge => ({
   offline: true,
   summary: { schemaVersion: 1, sessions: [] },
   manifest: { knowledgeSha: OFFLINE_KNOWLEDGE_SHA, codeSha: "dev" },
-  settingsSpace: { settings: [] },
   caregiverPrior: { ...CAREGIVER_DEFAULTS },
+  meta: null,
 })
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -52,16 +58,6 @@ function asManifest(v: unknown): Manifest {
   if (version !== undefined && !(Number.isInteger(version) && (version as number) >= 1)) throw new Error("bad manifest.json learnerStateVersion")
   return { knowledgeSha: v.knowledgeSha, codeSha: v.codeSha, ...(version !== undefined ? { learnerStateVersion: version as number } : {}) }
 }
-function asSettingsSpace(v: unknown): Knowledge["settingsSpace"] {
-  if (!isObj(v) || !Array.isArray(v.settings)) throw new Error("bad settings-space.json")
-  const settings = v.settings.map((s: unknown): SettingRange => {
-    if (!isObj(s) || typeof s.name !== "string" || !SETTING_KEY_RE.test(s.name) || !isNum(s.min) || !isNum(s.max) || s.min > s.max)
-      throw new Error("bad settings-space.json entry")
-    return { name: s.name, min: s.min, max: s.max }
-  })
-  return { settings }
-}
-
 const INTEGER_KEYS: ReadonlySet<string> = new Set(["caregiverPeriod", "caregiverStuckSteps"])
 
 /** Strict: every caregiver setting present, finite and inside its range (counts integral), else the whole prior is malformed. */
@@ -77,20 +73,42 @@ function asCaregiverPrior(v: unknown): CaregiverSettings {
   return out
 }
 
-/** One knowledge file, revalidated with the server (a polling tab must see a new deploy). Throws on any failure. */
-async function getJson(baseUrl: string, fetchFn: typeof fetch, name: string): Promise<unknown> {
+/** One knowledge file's response, revalidated with the server (a polling tab must see a new deploy). Throws unless 2xx. */
+async function getFile(baseUrl: string, fetchFn: typeof fetch, name: string): Promise<Response> {
   const res = await fetchFn(`${baseUrl}knowledge/${name}`, { cache: "no-cache" })
   if (!res.ok) throw new Error(`${name}: ${res.status}`)
-  return res.json()
+  return res
+}
+/**
+ * One knowledge file's exact text: strict UTF-8 (invalid bytes throw) with a byte-order mark kept, so encoding the
+ * text again gives back the bytes served (Response.text() would drop a BOM and replace invalid bytes).
+ */
+async function getText(baseUrl: string, fetchFn: typeof fetch, name: string): Promise<string> {
+  const bytes = await (await getFile(baseUrl, fetchFn, name)).arrayBuffer()
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+}
+
+/** The meta-learner's files (Knowledge.meta): null without the space or the genome; posteriorText null without it. */
+async function loadMeta(get: (name: string) => Promise<unknown>, text: (name: string) => Promise<string>): Promise<Knowledge["meta"]> {
+  const posterior = text("posterior.json").catch(() => null)
+  try {
+    const [genomeSpace, genome] = await Promise.all([get("genome-space.json"), get("genome.json")])
+    return { genomeSpace, genome, posteriorText: await posterior }
+  } catch {
+    return null
+  }
 }
 
 export async function loadKnowledge(baseUrl: string, fetchFn: typeof fetch): Promise<Knowledge> {
-  const get = (name: string) => getJson(baseUrl, fetchFn, name)
+  const get = async (name: string): Promise<unknown> => (await getFile(baseUrl, fetchFn, name)).json()
+  const text = (name: string) => getText(baseUrl, fetchFn, name)
   try {
-    // The caregiver prior is optional: a tab born before it was published still runs, on the defaults.
+    // The caregiver prior is optional: a tab born before it was published still runs, on the defaults. So are the
+    // meta-learner's files: without them a learner runs DEFAULT_SETTINGS (the page says so).
     const prior = get("caregiver-prior.json").then(asCaregiverPrior).catch(() => ({ ...CAREGIVER_DEFAULTS }))
-    const [summary, manifest, settingsSpace, caregiverPrior] = await Promise.all([get("summary.json"), get("manifest.json"), get("settings-space.json"), prior])
-    return { offline: false, summary: asSummary(summary), manifest: asManifest(manifest), settingsSpace: asSettingsSpace(settingsSpace), caregiverPrior }
+    const meta = loadMeta(get, text)
+    const [summary, manifest, caregiverPrior] = await Promise.all([get("summary.json"), get("manifest.json"), prior])
+    return { offline: false, summary: asSummary(summary), manifest: asManifest(manifest), caregiverPrior, meta: await meta }
   } catch {
     return offlineKnowledge()
   }
@@ -99,15 +117,8 @@ export async function loadKnowledge(baseUrl: string, fetchFn: typeof fetch): Pro
 /** Just the deployed manifest (what a running tab polls for new code), or null if it is unreachable or malformed. */
 export async function loadManifest(baseUrl: string, fetchFn: typeof fetch): Promise<Manifest | null> {
   try {
-    return asManifest(await getJson(baseUrl, fetchFn, "manifest.json"))
+    return asManifest(await (await getFile(baseUrl, fetchFn, "manifest.json")).json())
   } catch {
     return null
   }
-}
-
-/** Placeholder policy: each setting uniform within its range. */
-export function chooseSettings(k: Knowledge, rng: () => number): Record<string, number> {
-  const out: Record<string, number> = {}
-  for (const { name, min, max } of k.settingsSpace.settings) out[name] = Math.min(max, min + rng() * (max - min))
-  return out
 }

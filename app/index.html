@@ -115,7 +115,7 @@
     .swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--curve-pred); }
     .swatch.base { border-top: 2px dashed var(--curve-base); }
     .axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 2px; }
-    dl.stats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-family: var(--mono); font-size: 12px; }
+    dl.stats { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; font-family: var(--mono); font-size: 12px; }
     dl.stats dt { color: var(--muted); font-weight: 500; }
     dl.stats dd { margin: 0; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
     .life { margin: 0; padding: 10px 14px; border-left: 3px solid var(--accent-green); border-radius: 0 10px 10px 0; background: var(--surface); }
@@ -143,6 +143,14 @@
       color: var(--accent-link); cursor: pointer;
     }
     button.link:hover { text-decoration: underline; }
+    /* The short-lives switch, one line and its help under the stats. */
+    .switch { display: flex; gap: 4px 12px; align-items: baseline; flex-wrap: wrap; font-size: 12px; }
+    .switch label { font-weight: 650; white-space: nowrap; cursor: pointer; }
+    .switch input { margin: 0 4px 0 0; vertical-align: -2px; }
+    .switch .muted { flex: 1 1 260px; font-size: 11px; }
+    details.genome { display: inline; font-weight: 500; }
+    details.genome summary { display: inline; cursor: pointer; color: var(--accent-link); font-family: var(--sans); font-size: 11px; margin-left: 6px; }
+    details.genome[open] { display: block; margin-top: 4px; }
     /* The token form, folded into one line under the stats. */
     .share { border-top: 1px solid var(--hairline); padding-top: 10px; }
     .share[hidden] { display: none; }
@@ -281,10 +289,23 @@
             <dt>Status</dt><dd data-testid="status">…</dd>
             <dt>Caregiver</dt><dd data-testid="caregiver">…</dd>
             <dt>Sessions</dt><dd data-testid="sessions">loading…</dd>
-            <dt>Setting</dt><dd data-testid="setting">…</dd>
+            <!-- How the genome was drawn; what the learner runs, and its genome, behind the toggle (spec §6). -->
+            <dt>Recipe</dt><dd><span data-testid="recipe-text">…</span><span data-testid="recipe-genes"></span>
+              <details class="genome" data-testid="genome"><summary>settings</summary>
+                <span class="muted">runs:</span> <span data-testid="setting">…</span>
+                <span data-testid="genome-box" hidden><br><span class="muted">genome:</span> <span data-testid="genome-list"></span>
+                  <br><span class="muted" data-testid="genome-shas"></span></span></details></dd>
+            <dt>Meta-learner</dt><dd data-testid="meta-state">…</dd>
+            <dt data-testid="score-label" hidden>Score</dt><dd data-testid="score" hidden></dd>
             <dt>Knowledge</dt><dd data-testid="knowledge">loading…</dd>
             <dt>Contribution</dt><dd><span data-testid="contribution">…</span> <button type="button" class="link" data-testid="change-token" hidden>change token</button></dd>
           </dl>
+
+          <!-- The short-lives switch (decisions 0019, 0022): this browser's, off by default. -->
+          <div class="switch">
+            <label><input type="checkbox" data-testid="short-lives" aria-describedby="short-lives-help"> Short lives</label>
+            <span class="muted" id="short-lives-help">End each life at its 2,048 CU checkup and start a newborn (about every 30 minutes). The meta-learner only gets results at a useful rate from tabs with this on.</span>
+          </div>
 
           <!-- The token form, folded to one line until it is opened: the learner runs either way. -->
           <details class="share" data-testid="token-panel" hidden>

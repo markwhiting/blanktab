@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest"
 import committedPrior from "../../../knowledge/caregiver-prior.json"
-import committedSpace from "../../../knowledge/settings-space.json"
+import committedGenomeSpace from "../../../knowledge/genome-space.json"
+import committedGenome from "../../../knowledge/genome.json"
 import { CAREGIVER_DEFAULTS, CAREGIVER_RANGES } from "../src/caregiver"
-import { loadKnowledge, loadManifest, chooseSettings, OFFLINE_KNOWLEDGE_SHA, type Knowledge } from "../src/knowledge"
+import { loadKnowledge, loadManifest, OFFLINE_KNOWLEDGE_SHA, type Knowledge } from "../src/knowledge"
 
 const row = (id: string) => ({
   learnerId: id, settings: { moveProbability: 0.5 }, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
@@ -11,8 +12,12 @@ const row = (id: string) => ({
 const FILES: Record<string, unknown> = {
   "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), row("lrn_bbbbbbbbbbbbbbbb")] },
   "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev" },
-  "settings-space.json": { schemaVersion: 1, settings: [{ name: "moveProbability", min: 0.1, max: 1 }, { name: "other", min: -2, max: -1 }] },
+  "genome-space.json": committedGenomeSpace,
+  "genome.json": committedGenome,
 }
+/** A file served as these exact bytes (not as JSON). */
+const raw = (bytes: string | Uint8Array) => ({ [RAW]: bytes })
+const RAW = Symbol("raw")
 
 function fakeFetch(files: Record<string, unknown>, opts: { status?: number; throws?: boolean } = {}) {
   const urls: string[] = []
@@ -22,20 +27,44 @@ function fakeFetch(files: Record<string, unknown>, opts: { status?: number; thro
     if (opts.throws) throw new TypeError("Failed to fetch")
     const name = url.split("/").pop()!
     if (!(name in files)) return new Response("not found", { status: 404 })
-    return new Response(JSON.stringify(files[name]), { status: opts.status ?? 200 })
+    const f = files[name] as { [RAW]?: string | Uint8Array }
+    const body = typeof f === "object" && f !== null && RAW in f ? f[RAW]! : JSON.stringify(files[name])
+    return new Response(body as BodyInit, { status: opts.status ?? 200 })
   }) as typeof fetch
   return { fn, urls }
 }
 
 describe("loadKnowledge", () => {
-  it("fetches the four files under <base>knowledge/ and returns them", async () => {
-    const f = fakeFetch(FILES)
+  it("fetches its six files under <base>knowledge/ and returns them; the meta-learner's raw (the page parses them)", async () => {
+    const f = fakeFetch({ ...FILES, "posterior.json": raw('{"x": 1}\n') })
     const k = await loadKnowledge("/learner/", f.fn)
-    expect([...f.urls].sort()).toEqual(["/learner/knowledge/caregiver-prior.json", "/learner/knowledge/manifest.json", "/learner/knowledge/settings-space.json", "/learner/knowledge/summary.json"])
+    expect([...f.urls].sort()).toEqual(["caregiver-prior", "genome-space", "genome", "manifest", "posterior", "summary"].map(n => `/learner/knowledge/${n}.json`))
     expect(k.offline).toBe(false)
     expect(k.summary.sessions).toHaveLength(2)
     expect(k.manifest.knowledgeSha).toBe("c".repeat(64))
-    expect(k.settingsSpace.settings.map(s => s.name)).toEqual(["moveProbability", "other"])
+    expect(k.meta).toEqual({ genomeSpace: committedGenomeSpace, genome: committedGenome, posteriorText: '{"x": 1}\n' })
+    expect(k).not.toHaveProperty("settingsSpace")
+  })
+  it("posterior.json is its exact text: a BOM is kept, invalid UTF-8 is no posterior, a 404 is no posterior", async () => {
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, 0x7b, 0x7d])
+    expect((await loadKnowledge("/", fakeFetch({ ...FILES, "posterior.json": raw(bom) }).fn)).meta!.posteriorText).toBe("\ufeff{}")
+    const bad = new Uint8Array([0x7b, 0xff, 0x7d])
+    expect((await loadKnowledge("/", fakeFetch({ ...FILES, "posterior.json": raw(bad) }).fn)).meta!.posteriorText).toBeNull()
+    const k = await loadKnowledge("/", fakeFetch(FILES).fn)
+    expect(k.offline).toBe(false)
+    expect(k.meta).toEqual({ genomeSpace: committedGenomeSpace, genome: committedGenome, posteriorText: null })
+  })
+  it("without genome-space.json or genome.json (absent or not JSON) meta is null, and the knowledge is not offline", async () => {
+    for (const name of ["genome-space.json", "genome.json"]) {
+      const gone = { ...FILES }
+      delete gone[name]
+      for (const files of [gone, { ...FILES, [name]: raw("<html>") }]) {
+        const k = await loadKnowledge("/", fakeFetch({ ...files, "posterior.json": raw("{}") }).fn)
+        expect(k.offline, name).toBe(false)
+        expect(k.meta, name).toBeNull()
+        expect(k.manifest.knowledgeSha).toBe("c".repeat(64))
+      }
+    }
   })
 
   const offline = (k: Knowledge) => {
@@ -43,7 +72,7 @@ describe("loadKnowledge", () => {
     expect(k.summary).toEqual({ schemaVersion: 1, sessions: [] })
     expect(k.manifest.knowledgeSha).toBe(OFFLINE_KNOWLEDGE_SHA)
     expect(OFFLINE_KNOWLEDGE_SHA).toBe("0".repeat(64))
-    expect(k.settingsSpace.settings).toEqual([])
+    expect(k.meta).toBeNull()
   }
   it("falls back to an empty, offline knowledge when the network fails", async () => {
     offline(await loadKnowledge("/learner/", fakeFetch(FILES, { throws: true }).fn))
@@ -78,8 +107,6 @@ describe("loadKnowledge", () => {
   it("falls back when a file is malformed", async () => {
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": { schemaVersion: 2, sessions: [] } }).fn))
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "manifest.json": { knowledgeSha: "nope", codeSha: "dev" } }).fn))
-    offline(await loadKnowledge("/", fakeFetch({ ...FILES, "settings-space.json": { settings: [{ name: "x", min: 2, max: 1 }] } }).fn))
-    offline(await loadKnowledge("/", fakeFetch({ ...FILES, "settings-space.json": { settings: [{ name: "bad key", min: 0, max: 1 }] } }).fn))
     offline(await loadKnowledge("/", fakeFetch({ ...FILES, "summary.json": "<html>" }).fn))
   })
 })
@@ -110,18 +137,13 @@ describe("caregiver prior", () => {
     const k = await loadKnowledge("/", fakeFetch(FILES, { throws: true }).fn)
     expect(k.caregiverPrior).toEqual(CAREGIVER_DEFAULTS)
   })
-  it("the committed prior lies inside the settings-space ranges", () => {
+  it("the committed prior is the caregiver's defaults, inside its ranges (the genome's ranges: tools/genome-centre.test.ts)", () => {
     const file = committedPrior
     expect(file).toEqual({ schemaVersion: 1, settings: CAREGIVER_DEFAULTS })
-    const space: { name: string; min: number; max: number }[] = committedSpace.settings
     for (const [name, value] of Object.entries(file.settings as Record<string, number>)) {
-      const row = space.find(s => s.name === name)
-      expect(row, name).toBeDefined()
-      expect(value, name).toBeGreaterThanOrEqual(row!.min)
-      expect(value, name).toBeLessThanOrEqual(row!.max)
       const [lo, hi] = CAREGIVER_RANGES[name as keyof typeof CAREGIVER_RANGES]
-      expect(row!.min, name).toBeGreaterThanOrEqual(lo)
-      expect(row!.max, name).toBeLessThanOrEqual(hi)
+      expect(value, name).toBeGreaterThanOrEqual(lo)
+      expect(value, name).toBeLessThanOrEqual(hi)
     }
   })
 })
@@ -150,30 +172,5 @@ describe("loadManifest", () => {
     expect(await loadManifest("/", fakeFetch(FILES, { throws: true }).fn)).toBeNull()
     expect(await loadManifest("/", fakeFetch({}).fn)).toBeNull()
     expect(await loadManifest("/", fakeFetch({ "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "nope" } }).fn)).toBeNull()
-  })
-})
-
-describe("chooseSettings", () => {
-  const k = (settings: { name: string; min: number; max: number }[]): Knowledge => ({
-    offline: false, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha: "c".repeat(64), codeSha: "dev" }, settingsSpace: { settings },
-    caregiverPrior: { ...CAREGIVER_DEFAULTS },
-  })
-  it("draws each setting uniformly within its range", () => {
-    const space = k([{ name: "moveProbability", min: 0.1, max: 1 }, { name: "other", min: -2, max: -1 }])
-    expect(chooseSettings(space, () => 0)).toEqual({ moveProbability: 0.1, other: -2 })
-    expect(chooseSettings(space, () => 0.5)).toEqual({ moveProbability: 0.55, other: -1.5 })
-    let seed = 1
-    const rng = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
-    for (let i = 0; i < 1000; i++) {
-      const s = chooseSettings(space, rng)
-      expect(s.moveProbability).toBeGreaterThanOrEqual(0.1)
-      expect(s.moveProbability).toBeLessThanOrEqual(1)
-      expect(s.other).toBeGreaterThanOrEqual(-2)
-      expect(s.other).toBeLessThanOrEqual(-1)
-    }
-  })
-  it("a degenerate range gives its single value; an empty space gives no settings", () => {
-    expect(chooseSettings(k([{ name: "a", min: 3, max: 3 }]), () => 0.7)).toEqual({ a: 3 })
-    expect(chooseSettings(k([]), () => 0.7)).toEqual({})
   })
 })

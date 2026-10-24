@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest"
+import { GPU_WIDTHS } from "@blanktab/learner"
 import { TEST_KNOBS, TINY_WIDTHS, readTestParams } from "../src/params"
 
 describe("readTestParams", () => {
@@ -19,7 +20,13 @@ describe("readTestParams", () => {
     expect(readTestParams("?testPollMs=500&testReloadJitterMs=200")).toEqual({ pollMs: 500, reloadJitterMs: 200 })
     for (const v of ["0", "-1", "2.5", "abc", "86400001"]) expect(readTestParams(`?testPollMs=${v}&testReloadJitterMs=${v}`)).toEqual({})
   })
+  it("reads testWidths=gpu (the GPU widths on either backend) and testBudgetCU (a log-schedule level)", () => {
+    expect(readTestParams("?testWidths=gpu")).toEqual({ widths: GPU_WIDTHS })
+    expect(readTestParams("?testBudgetCU=8")).toEqual({ budgetCU: 8 })
+    expect(readTestParams("?testBudgetCU=2048")).toEqual({ budgetCU: 2048 })
+    for (const v of ["0", "7", "12", "8.5", "1536", "abc"]) expect(readTestParams(`?testBudgetCU=${v}`), v).toEqual({})
+  })
   it("names every knob it reads (the production build test checks none of them survive)", () => {
-    expect([...TEST_KNOBS].sort()).toEqual(["testBackend", "testLifetimeCU", "testPollMs", "testReloadJitterMs", "testSleepInterval", "testStepsPerSecond", "testWidths"])
+    expect([...TEST_KNOBS].sort()).toEqual(["testBackend", "testBudgetCU", "testLifetimeCU", "testPollMs", "testReloadJitterMs", "testSleepInterval", "testStepsPerSecond", "testWidths"])
   })
 })

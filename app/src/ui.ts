@@ -1,8 +1,11 @@
 // Plain DOM rendering. No framework: three tabs, a handful of labelled fields, four canvases and a table.
 import { FOVEA, PERIPHERY } from "@blanktab/interface"
-import { REPO, type CheckupResult, type ContributorStatus, type CurvePoint, type Knowledge } from "@blanktab/harness"
+import { REPO, type CheckupResult, type ContributorStatus, type CurvePoint, type Knowledge, type MetaBlock } from "@blanktab/harness"
+import evaluation from "../../config/evaluation.json" with { type: "json" }
+import type { DrawContext } from "./birth"
 import { appendPoints, fitCanvas, ownStreamText, ratioText, sparkline } from "./curve"
 import { appendCheckups, milestoneBars, milestoneText } from "./milestones"
+import { genomeHighlights, metaLineOf, missingText, recipeText, scoreText, unlabelledText } from "./recipe"
 import { HISTORY_COLUMNS, buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
@@ -155,6 +158,12 @@ function renderHistory(k: Knowledge): void {
   box.querySelector<HTMLElement>(".empty")!.hidden = rows.length > 0
 }
 
+/** What the recipe line shows: a life's block (with the knowledge's draw context, if readable), none, or a newborn reference. */
+export type RecipeView = { meta: MetaBlock; ctx: DrawContext | null } | { unlabelled: string } | { newborn: string }
+
+/** The pinned search evaluator (config/evaluation.json): the life's own score is shown under it (spec §6). */
+const SEARCH_EVALUATOR = evaluation.search
+
 export interface Ui {
   knowledge(k: Knowledge): void
   learner(o: { id: string; sessionsBefore: number; lifetimeCU?: number }): void
@@ -176,7 +185,14 @@ export interface Ui {
   /** About this page's code (a newer version that cannot resume this learner): kept apart from the life notices, which replace each other. */
   update(message: string): void
   contribution(s: ContributorStatus): void
-  lifeComplete(id: string): void
+  /** `ended: "budget"`: the short-lives switch ended it at its budget checkup. */
+  lifeComplete(id: string, ended?: "budget"): void
+  /** The recipe line: how this life's genome was drawn, its furthest genes; its settings and full genome behind a toggle. */
+  recipe(r: RecipeView): void
+  /** The short-lives switch as stored. */
+  shortLives(on: boolean): void
+  /** The handler returns false to refuse the change (the box goes back). */
+  onShortLives(handler: (on: boolean) => boolean): void
   error(message: string): void
   tokenPanel(visible: boolean): void
   /** The small "change token" control, shown whenever a token is stored. */
@@ -194,6 +210,15 @@ export function createUi(): Ui {
   const curveCanvas = byTest("curve") as HTMLCanvasElement
   const milestonesCanvas = byTest("milestones") as HTMLCanvasElement
   let lifetime: number | undefined
+  /** The learner shown, and the latest knowledge: its score is its summary row's (once there is one). */
+  let shownId: string | null = null
+  let summary: Knowledge["summary"] = { schemaVersion: 1, sessions: [] }
+  const showScore = () => {
+    const text = scoreText(summary.sessions.find(r => r.learnerId === shownId), SEARCH_EVALUATOR)
+    byTest("score").textContent = text ?? ""
+    byTest("score").hidden = byTest("score-label").hidden = text === null
+  }
+  const shortLivesBox = byTest("short-lives") as HTMLInputElement
   let curve: CurvePoint[] = []
   let checkups: CheckupResult[] = []
   // Charts are not drawn while their tab is hidden (they have no size then): drawn again when it is shown.
@@ -217,10 +242,15 @@ export function createUi(): Ui {
       byTest("knowledge").textContent = k.offline
         ? "offline: the shared knowledge could not be loaded, so this learner starts from nothing."
         : `loaded (knowledgeSha ${k.manifest.knowledgeSha.slice(0, 12)}…)`
+      byTest("meta-state").textContent = metaLineOf(k)
+      summary = k.summary
+      showScore()
       renderHistory(k)
     },
     learner({ id, sessionsBefore, lifetimeCU }) {
       lifetime = lifetimeCU
+      shownId = id
+      showScore()
       byTest("learner-id").textContent = id
       byTest("sessions").textContent = `${sessionsBefore} session${sessionsBefore === 1 ? "" : "s"} before this one`
       byTest("setting").textContent = "…"
@@ -228,6 +258,9 @@ export function createUi(): Ui {
       byTest("rate").textContent = "…"
       byTest("status").textContent = "newborn"
       byTest("caregiver").textContent = "…"
+      byTest("recipe-text").textContent = "drawing…"
+      byTest("recipe-genes").textContent = ""
+      byTest("genome-box").hidden = true
       this.progress(0, 0)
       this.curve([], true)
       this.checkups([], true)
@@ -279,10 +312,41 @@ export function createUi(): Ui {
       const waiting = s.pending > 0 ? ` (${s.pending} log${s.pending === 1 ? "" : "s"} waiting in this browser)` : ""
       byTest("contribution").textContent = s.message + waiting
     },
-    lifeComplete(id) {
+    lifeComplete(id, ended) {
       life.hidden = false
       life.classList.remove("error")
-      life.textContent = `This learner's life is complete (${id}). A newborn takes its place.`
+      life.textContent = ended === "budget"
+        ? `This learner's life is complete (${id}): short lives are on, so it ended at its budget checkup. A newborn takes its place.`
+        : `This learner's life is complete (${id}). A newborn takes its place.`
+    },
+    recipe(r) {
+      const genes = byTest("recipe-genes"), box = byTest("genome-box")
+      box.hidden = true
+      genes.textContent = ""
+      if ("unlabelled" in r) { byTest("recipe-text").textContent = unlabelledText(r.unlabelled); return }
+      if ("newborn" in r) { byTest("recipe-text").textContent = r.newborn; return }
+      const { meta, ctx } = r
+      byTest("recipe-text").textContent = recipeText(meta, ctx?.posterior ?? null)
+      // The highlights need the genome in the page's space (a legacy genome of an older schema has none).
+      let highlights: string[] = []
+      try {
+        if (ctx && meta.genomeSchema === ctx.space.schemaVersion) highlights = genomeHighlights(meta.genome, ctx.centre, ctx.space)
+      } catch {
+        highlights = []
+      }
+      const missing = missingText(meta.missing ?? [])
+      genes.textContent = [highlights.join(", "), missing].filter(Boolean).map(t => ` · ${t}`).join("")
+      byTest("genome-list").textContent = Object.entries(meta.genome).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ")
+      byTest("genome-shas").textContent = `genomeSha ${meta.genomeSha.slice(0, 8)} · posteriorSha ${meta.posteriorSha === null ? "none" : meta.posteriorSha.slice(0, 8)}`
+      box.hidden = false
+    },
+    shortLives(on) {
+      shortLivesBox.checked = on
+    },
+    onShortLives(handler) {
+      shortLivesBox.addEventListener("change", () => {
+        if (!handler(shortLivesBox.checked)) shortLivesBox.checked = !shortLivesBox.checked
+      })
     },
     error(message) {
       life.hidden = false

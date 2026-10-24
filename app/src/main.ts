@@ -1,17 +1,21 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken, chooseSettings, clampCaregiverSettings, clearToken,
-  createContributor, getToken, hasCheckpoint, loadKnowledge, loadManifest, newLearnerId, openQueue, setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
+  DB_BLOCKED_MESSAGE, DEFAULT_MAX_STEPS_PER_SEC, LOCAL_ONLY_MESSAGE, MAX_EVAL_PANEL, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken,
+  clampCaregiverSettings, clearToken, createContributor, getToken, hasCheckpoint, lifeBudget, loadKnowledge, loadManifest, newLearnerId, openQueue,
+  setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
 } from "@blanktab/harness"
+import { DEFAULT_SETTINGS } from "@blanktab/learner"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
+import { NEWBORN_SEED_BASE } from "@blanktab/harness/newborn"
+import { drawContextOf } from "./birth"
 import { seedsOf, type LifeConfig } from "./life"
 import { caregiverText } from "./milestones"
-import type { FromWorker, ToWorker } from "./protocol"
+import { newbornText, readNewborns } from "./newborns"
+import type { FromWorker, StartMessage, ToWorker } from "./protocol"
 import { readTestParams, type TestParams } from "./params"
 import { flushPolicy } from "./schedule"
-import { birthSettings } from "./settings"
 import { buffersOf } from "./transfer"
 import { createUi, type Ui } from "./ui"
 import { WORKER_LOAD_MESSAGE, onWorkerLoadFailure, startUpdates } from "./updates"
@@ -27,6 +31,19 @@ const CHECKPOINT_WAIT_MS = 60_000
 // Test-only overrides. In the production build MODE is the literal "production" and this is dropped.
 const test: TestParams = import.meta.env.MODE !== "production" ? readTestParams(location.search) : {}
 const lifetimeCU = test.lifetimeCU // undefined: the learner lives as long as its tab
+/** Test knobs the worker applies after the birth draw (the genome sets these otherwise). */
+const overrides: NonNullable<StartMessage["overrides"]> = {
+  ...(test.stepsPerSecond !== undefined ? { maxStepsPerSec: test.stepsPerSecond } : {}),
+  ...(test.sleepInterval !== undefined ? { sleepInterval: test.sleepInterval } : {}),
+  ...(test.budgetCU !== undefined ? { budgetCU: test.budgetCU } : {}),
+}
+
+/** The short-lives switch (decisions 0019, 0022): this browser's, off unless stored as "1". */
+const SHORT_LIVES_KEY = "blanktab:shortLives"
+const shortLivesOn = () => localStorage.getItem(SHORT_LIVES_KEY) === "1"
+/** Asked before switching short lives on for a life already past its budget (ruling A, decision 0022). */
+const pastBudgetQuestion = (budgetCU: number) =>
+  `This learner is past its ${budgetCU.toLocaleString("en-US")} CU budget, so it will end at its next sleep and a newborn will start. Go on?`
 
 const fetchFn: typeof fetch = (input, init) => fetch(input, init)
 
@@ -59,20 +76,21 @@ async function hostSig(): Promise<LifeConfig["hostSig"]> {
 
 /**
  * Birth facts are fixed for a learner's whole life. A resumed learner's seed, widths, learner settings, knowledgeSha
- * and sessionsSeenAtBirth come from its checkpoint (the session prefers them to these); its speed cap from its latest log.
- * The caregiver's settings are the knowledge's prior (clamped); a resumed life keeps its checkpoint's caregiver.
+ * and sessionsSeenAtBirth come from its checkpoint (the session prefers them to these); its speed cap from its latest
+ * log (`ownCap`). A newborn's genome is drawn in the worker (birth.ts): these settings (DEFAULT_SETTINGS, the
+ * knowledge's caregiver prior, clamped, and the default cap) are only what a tab without genome files runs.
  */
-function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConfig, "knowledgeSha" | "sessionsSeenAtBirth" | "learnerSettings" | "maxStepsPerSec" | "caregiver"> {
-  const fresh = birthSettings(chooseSettings(knowledge, Math.random))
-  const caregiver = clampCaregiverSettings(knowledge.caregiverPrior)
-  if (!latest) return { ...fresh, caregiver, knowledgeSha: knowledge.manifest.knowledgeSha, sessionsSeenAtBirth: knowledge.summary.sessions.length }
+function birth(latest: LogFile | undefined, knowledge: Knowledge): Pick<LifeConfig, "knowledgeSha" | "sessionsSeenAtBirth" | "learnerSettings" | "maxStepsPerSec" | "caregiver"> & { ownCap: boolean } {
+  const fallback = { learnerSettings: { ...DEFAULT_SETTINGS }, caregiver: clampCaregiverSettings(knowledge.caregiverPrior), maxStepsPerSec: DEFAULT_MAX_STEPS_PER_SEC }
+  if (!latest) return { ...fallback, ownCap: false, knowledgeSha: knowledge.manifest.knowledgeSha, sessionsSeenAtBirth: knowledge.summary.sessions.length }
   const cap = latest.settings.maxStepsPerSec
-  return {
-    learnerSettings: fresh.learnerSettings, caregiver,
-    maxStepsPerSec: typeof cap === "number" && cap > 0 ? cap : fresh.maxStepsPerSec,
-    knowledgeSha: latest.knowledgeSha, sessionsSeenAtBirth: latest.sessionsSeenAtBirth,
-  }
+  const own = typeof cap === "number" && cap > 0
+  return { ...fallback, ownCap: own, ...(own ? { maxStepsPerSec: cap } : {}), knowledgeSha: latest.knowledgeSha, sessionsSeenAtBirth: latest.sessionsSeenAtBirth }
 }
+
+/** The page's meta-learner files as the worker takes them (raw: it parses and draws). */
+const drawOf = (k: Knowledge): StartMessage["draw"] =>
+  k.meta ? { spaceJson: k.meta.genomeSpace, genomeJson: k.meta.genome, posteriorText: k.meta.posteriorText } : undefined
 
 /**
  * One tab per learner. Chrome's "Duplicate tab" copies sessionStorage, so two tabs can start with the same
@@ -107,6 +125,10 @@ interface Life {
   checkpoint(halt: boolean): Promise<boolean>
   /** Stops the learner where it is (before a reload onto the checkpoint just saved). */
   halt(): void
+  /** The short-lives switch changed. */
+  shortLives(on: boolean): void
+  /** Whether switching short lives on would end it at its next sleep: it has a meta block and has lived its budget. */
+  pastBudget(): number | null
 }
 
 /**
@@ -134,12 +156,10 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     ui.notice(`Learner ${id} has logs but no checkpoint, so its life cannot be resumed. A newborn takes its place.`)
     return newborn(ctx)
   }
-  const b = birth(latest, knowledge)
+  const { ownCap, ...b } = birth(latest, knowledge)
   const cfg: LifeConfig = {
     learnerId: id, codeSha: __CODE_SHA__, ...b, hostSig: await hostSig(), seed: seedsOf(id).learner,
     ...(lifetimeCU !== undefined ? { lifetimeCU } : {}),
-    ...(test.stepsPerSecond !== undefined ? { maxStepsPerSec: test.stepsPerSecond } : {}),
-    ...(test.sleepInterval !== undefined ? { sleepInterval: test.sleepInterval } : {}),
   }
   ui.learner({ id, sessionsBefore: cfg.sessionsSeenAtBirth, ...(lifetimeCU !== undefined ? { lifetimeCU } : {}) })
 
@@ -148,6 +168,9 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   const visibility = () => worker.postMessage({ type: "visibility", hidden: document.hidden } satisfies ToWorker)
   document.addEventListener("visibilitychange", visibility)
   let over = false
+  /** What the switch's question needs: the CU lived (latest report) and the life's budget, once its meta block is known. */
+  let cuNow = 0
+  let budgetCU: number | null = null
   let nextCheckpoint = 0
   const waiting = new Map<number, (saved: boolean) => void>()
   const life: Life = {
@@ -161,6 +184,8 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
       worker.postMessage({ type: "checkpointNow", id, halt } satisfies ToWorker)
     }),
     halt: () => worker.terminate(),
+    shortLives: on => worker.postMessage({ type: "shortLives", on } satisfies ToWorker),
+    pastBudget: () => (budgetCU !== null && cuNow >= budgetCU ? budgetCU : null),
   }
   ctx.life = life
   // Its logs were rejected too often (decision 0014): it lives on here, but no longer contributes.
@@ -186,14 +211,21 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   worker.onmessage = (e: MessageEvent<FromWorker>) => {
     heard = true
     const m = e.data
-    if (m.type === "frame") ui.frame(m)
+    if (m.type === "frame") { cuNow = m.cu; ui.frame(m) }
     else if (m.type === "backend") ui.backend(m.label)
     else if (m.type === "learner") ui.settings(m.settings)
     else if (m.type === "curve") ui.curve(m.points, m.reset)
     else if (m.type === "status") ui.status(m.message)
     else if (m.type === "checkups") ui.checkups(m.results, m.reset)
     else if (m.type === "carried") ui.caregiver(caregiverText(m))
+    else if (m.type === "meta") {
+      budgetCU = lifeBudget(m.meta).budgetCU
+      const meta = m.meta
+      void drawContextOf(ctx.knowledge).then(dc => { if (ctx.life === life) ui.recipe({ meta, ctx: dc }) })
+    }
+    else if (m.type === "unlabelled") ui.recipe({ unlabelled: m.reason })
     else if (m.type === "queued") {
+      cuNow = m.cu
       ui.progress(m.steps, m.cu)
       // Without a token (or for a local-only learner) nothing is ever sent: keep each learner's unsent files bounded.
       void queue.capUnsent(MAX_UNSENT).catch(() => {}).then(() => queued(m.final))
@@ -202,7 +234,7 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     else if (m.type === "halted") ctx.halted()
     else if (m.type === "checkpointed") waiting.get(m.id)?.(m.saved)
     else if (m.type === "error") end(() => (m.olderVersion ? ui.notice(OLDER_VERSION_MESSAGE) : ui.error(`${m.message}. A newborn takes its place.`)))
-    else if (m.type === "final") end(() => ui.lifeComplete(id))
+    else if (m.type === "final") end(() => ui.lifeComplete(id, m.ended))
   }
   worker.onerror = e => {
     const failed = () => end(() => ui.error(`${e.message || "worker failed"}. A newborn takes its place.`))
@@ -216,9 +248,12 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
       else end(() => (r === "gave-up" ? ui.notice(WORKER_LOAD_MESSAGE) : undefined), "stop")
     })
   }
+  const draw = drawOf(knowledge)
   const start: ToWorker = {
     type: "start", cfg, hidden: document.hidden, ...(record !== undefined ? { checkpointRecord: record } : {}),
+    ...(draw ? { draw } : {}), ownCap, shortLives: shortLivesOn(),
     ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}),
+    ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
   }
   worker.postMessage(start, buffersOf(record)) // moved, not copied
   // The knowledge in force from now on, for a resumed learner too (it was saved with what it had then).
@@ -226,9 +261,11 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
 }
 
 async function main(ui: Ui): Promise<void> {
+  // Newborn reference mode: no life of this tab's (its learner, if it has one, is left for another tab to adopt).
+  const newbornRange = readNewborns(location.search)
   // Before anything else (anything awaited): this tab's own learner, if it has one, is asked for at once, so no other
   // tab's startup sweep takes its checkpoint for an orphan while this page loads.
-  const own = storedLearnerId(sessionStorage)
+  const own = newbornRange ? null : storedLearnerId(sessionStorage)
   const ownLock = own === null ? Promise.resolve(null) : lockOwn(own)
   answerPresence()
   const sig = hostSig() // for the sweep's final logs: counting tabs takes a moment, so it starts now
@@ -272,7 +309,18 @@ async function main(ui: Ui): Promise<void> {
 
   const ctx: Ctx = { ui, queue, knowledge, queued: policy.queued, life: null, halted: () => {} }
   current = ctx
+  if (newbornRange) return runNewborns(ctx, newbornRange)
   ctx.halted = watchForUpdates(ctx).halted
+  // The short-lives switch: read by each life at its start, and handed to the running one on each change.
+  ui.shortLives(shortLivesOn())
+  ui.onShortLives(on => {
+    const past = on ? ctx.life?.pastBudget() ?? null : null
+    if (past !== null && !confirm(pastBudgetQuestion(past))) return false
+    if (on) localStorage.setItem(SHORT_LIVES_KEY, "1")
+    else localStorage.removeItem(SHORT_LIVES_KEY)
+    ctx.life?.shortLives(on)
+    return true
+  })
   const release = await ownLock
   if (own !== null && release !== null) {
     await sweep(false, sig, own)
@@ -287,6 +335,41 @@ async function main(ui: Ui): Promise<void> {
     return live(adopted.learnerId, ctx, adopted.release, adopted.record)
   }
   return newborn(ctx)
+}
+
+/**
+ * Newborn reference mode (?newborns=a-b; spec §2.3): the worker runs newborns k = a…b of the centre genome, one after
+ * another, and queues each one's file in the outbox, marked local-only, for tools/eval/collect-newborns.ts (controller
+ * ruling B: collected from this browser, not sent as PRs). No life runs in this tab meanwhile, and none after.
+ */
+async function runNewborns(ctx: Ctx, range: { from: number; to: number }): Promise<void> {
+  const { ui, knowledge } = ctx
+  const draw = drawOf(knowledge)
+  if (!draw) return ui.error("newborn reference mode needs the genome files (knowledge/genome-space.json, knowledge/genome.json), and they could not be loaded")
+  const cfg: LifeConfig = {
+    learnerId: "lrn_0000000000000000", codeSha: __CODE_SHA__, knowledgeSha: knowledge.manifest.knowledgeSha, sessionsSeenAtBirth: 0,
+    hostSig: await hostSig(), seed: 0, learnerSettings: { ...DEFAULT_SETTINGS },
+  }
+  const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
+  ui.notice(newbornText(range.from, range))
+  let backend: string | null = null // shown again for each newborn (ui.learner resets the line)
+  worker.onmessage = (e: MessageEvent<FromWorker>) => {
+    const m = e.data
+    if (m.type === "backend") { backend = m.label; ui.backend(m.label) }
+    else if (m.type === "newborn" && !m.done) {
+      ui.learner({ id: m.learnerId, sessionsBefore: 0 })
+      if (backend !== null) ui.backend(backend)
+      ui.recipe({ newborn: `a newborn reference (panel ${1 + (m.k % MAX_EVAL_PANEL)})` })
+      ui.status(`checking newborn ${m.k} (seed ${NEWBORN_SEED_BASE + m.k}) on its panel`)
+      ui.notice(newbornText(m.k, range))
+    } else if (m.type === "newborn") ui.status(`newborn ${m.k}'s file is in this browser's outbox`)
+    else if (m.type === "newbornsDone") {
+      worker.terminate()
+      ui.notice(`Newborn references ${range.from}–${range.to} are done. Their files stay in this browser, for tools/eval/collect-newborns.ts.`)
+    } else if (m.type === "error") { worker.terminate(); ui.error(m.message) }
+  }
+  worker.onerror = e => { worker.terminate(); ui.error(e.message || "the newborn worker failed") }
+  worker.postMessage({ type: "start", cfg, hidden: document.hidden, draw, shortLives: false, newborns: range, ...(test.backend ? { backend: test.backend } : {}), ...(test.widths ? { widths: test.widths } : {}) } satisfies ToWorker)
 }
 
 /**

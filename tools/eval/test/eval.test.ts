@@ -12,6 +12,7 @@ import { loadEvalConfig, loadReferences } from "../config.ts"
 import { collectLives } from "../lives.ts"
 import { rescore } from "../rescore.ts"
 import { newbornReference } from "../newborn-reference.ts"
+import { rangeOf, writeCollected } from "../collect-newborns.ts"
 
 const REPO = fileURLToPath(new URL("../../..", import.meta.url))
 const SPACE = parseGenomeSpace(JSON.parse(readFileSync(join(REPO, "knowledge/genome-space.json"), "utf8")))
@@ -184,5 +185,37 @@ describe("newborn-reference (spec §2.3; controller ruling B)", () => {
     const broken = await newbornReference({ root, runsDir: src, ...W })
     expect(broken.ok).toBe(false)
     expect(broken.messages.join("\n")).toMatch(/^error: config\/evaluation.json/)
+  })
+})
+
+describe("collect-newborns (controller ruling B: the outbox's newborn files, checked as the gate would)", () => {
+  it("writes each newborn file once as <learnerId>/<seq>.json, skips other learners', leaves identical bytes and refuses to overwrite", async () => {
+    const out = join(root, "newborns")
+    const nb = await newbornFile(3, 1)
+    const life = scoredLife(lid(9), { ms: {}, ratio: 1 })[0]!
+    const rows = [{ learnerId: nb.learnerId, seq: 0, file: nb }, { learnerId: life.learnerId, seq: life.seq, file: life }]
+    const first = await writeCollected(rows, out, SPACE)
+    expect(first).toEqual({ written: [`${nb.learnerId}/0.json`], same: [], skipped: 1, errors: [] })
+    const path = join(out, nb.learnerId, "0.json")
+    expect(readFileSync(path, "utf8")).toBe(JSON.stringify(nb, null, 2) + "\n")
+    expect((await writeCollected(rows, out, SPACE)).same).toEqual([`${nb.learnerId}/0.json`])
+    // The collected files are what newborn-reference reads.
+    expect(collectLives(out).map(l => l.learnerId)).toEqual([nb.learnerId])
+    writeFileSync(path, "{}\n")
+    const again = await writeCollected(rows, out, SPACE)
+    expect(again.errors).toEqual([expect.stringMatching(/already exists with other bytes/)])
+    expect(readFileSync(path, "utf8")).toBe("{}\n")
+  })
+  it("refuses a file the gate would refuse (its genome outside the space), and writes nothing for it", async () => {
+    const nb = await newbornFile(4, 1)
+    const bad = { ...nb, meta: { ...nb.meta!, genome: { ...nb.meta!.genome, lr: 1 } } }
+    const r = await writeCollected([{ learnerId: nb.learnerId, seq: 0, file: bad }], join(root, "newborns"), SPACE)
+    expect(r.written).toEqual([])
+    expect(r.errors.length).toBeGreaterThan(0)
+    expect(existsSync(join(root, "newborns", nb.learnerId))).toBe(false)
+  })
+  it("rangeOf reads a-b within the reference's 64 newborns", () => {
+    expect(rangeOf("0-63")).toEqual({ from: 0, to: 63 })
+    for (const s of ["5-4", "0-64", "x", "1"]) expect(() => rangeOf(s), s).toThrow(/--newborns/)
   })
 })

@@ -178,8 +178,8 @@ describe("createPoller", () => {
 
 const SHA = "a".repeat(40), NEW = "b".repeat(40)
 const knowledge = (knowledgeSha: string, offline = false): Knowledge => ({
-  offline, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha, codeSha: SHA, learnerStateVersion: 1 }, settingsSpace: { settings: [] },
-  caregiverPrior: { ...CAREGIVER_DEFAULTS },
+  offline, summary: { schemaVersion: 1, sessions: [] }, manifest: { knowledgeSha, codeSha: SHA, learnerStateVersion: 1 },
+  caregiverPrior: { ...CAREGIVER_DEFAULTS }, meta: null,
 })
 
 describe("startUpdates", () => {
@@ -214,9 +214,9 @@ describe("startUpdates", () => {
     expect(s.given).toEqual(["e"])
     k = knowledge("0".repeat(64), true)
     await s.clock.advance(15 * MIN)
-    k = { ...knowledge("e".repeat(64)), summary: { schemaVersion: 1, sessions: [] }, settingsSpace: { settings: [{ name: "lr", min: 0, max: 1 }] } }
+    k = { ...knowledge("e".repeat(64)), meta: { genomeSpace: {}, genome: {}, posteriorText: '{"mode": "calibrate"}' } }
     await s.clock.advance(15 * MIN)
-    expect(s.given).toEqual(["e", "e"]) // offline skipped; a new settings space is new knowledge
+    expect(s.given).toEqual(["e", "e"]) // offline skipped; a new posterior is new knowledge
   })
 
   it("the same codeSha: nothing happens", async () => {

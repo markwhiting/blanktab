@@ -15,6 +15,7 @@
     "@blanktab/harness": "*",
     "@blanktab/interface": "*",
     "@blanktab/learner": "*",
+    "@blanktab/meta": "*",
     "@blanktab/world": "*"
   },
   "devDependencies": {

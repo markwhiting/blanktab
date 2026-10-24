@@ -1,15 +1,19 @@
 import { test, expect, type Page, type Request } from "@playwright/test"
 import { fakeGithub } from "../../packages/harness/test/fakeGithub"
 import { LEARNER_STATE_VERSION } from "@blanktab/learner/version"
+import { createHash } from "node:crypto"
+import { birthDraw, genomeSha, parsePosterior } from "@blanktab/meta"
 import { validateSessionPr } from "../../tools/gate/validate"
 import { GENOME_SPACE } from "../../packages/harness/test/helpers"
+import { CENTRE, GENOME_JSON, SPACE_JSON, posteriorText } from "../../app/test/posteriors"
 
 const TOKEN = "test-token"
 const UP = "markwhiting/learner"
 /** The real learner on the CPU at tiny widths: a 0.05 CU life is a few dozen steps, with a sleep (a curve point) every 5. */
 const KNOBS = "testBackend=cpu&testWidths=tiny&testSleepInterval=5"
-const LIFETIME_CU = 0.05
-const PAGE = `/learner/?${KNOBS}&testLifetimeCU=${LIFETIME_CU}&testStepsPerSecond=10`
+const LIFETIME_CU = 0.15
+/** No speed knob: the genome's cap (30 steps a second), so the life runs the genome it logs. */
+const PAGE = `/learner/?${KNOBS}&testLifetimeCU=${LIFETIME_CU}`
 /** A life that outlasts the test. */
 const LONG = `/learner/?${KNOBS}&testLifetimeCU=50&testStepsPerSecond=20`
 const TINY = { conv1: 1, conv2: 1, enc: 2, hidden: 2 }
@@ -19,17 +23,26 @@ const row = (id: string) => ({
   learnerId: id, settings: { moveProbability: 0.5 }, hostSig: { cores: 4, deviceMemoryGb: null, webgpu: false, tabsOnMachine: 1 },
   stepsTotal: 3000, final: true, codeSha: "a".repeat(40), knowledgeSha: "b".repeat(64), sessionsSeenAtBirth: 0,
 })
-/** The settings space the e2e learners are born from: fixed values, so a life's length in steps is predictable. */
-const SPACE = [
-  { name: "lr", min: 1e-3, max: 1e-3 }, { name: "entropyWeight", min: 0.01, max: 0.01 }, { name: "curiosityWeight", min: 1, max: 1 },
-  { name: "bufferSize", min: 500, max: 500 }, { name: "replayPerSleep", min: 16, max: 16 }, { name: "headLrScale", min: 0.1, max: 0.1 },
-  { name: "maxStepsPerSec", min: 30, max: 30 }, { name: "moveProbability", min: 0.1, max: 1 },
-]
+/**
+ * The genome e2e learners are born from: the repo's space, with a centre of the repo's but a small memory and replay
+ * (16 replays a sleep, a 500-frame buffer), so a life's length in steps is predictable.
+ */
+const GENOME = { ...(GENOME_JSON as object), values: { ...CENTRE, replayPerSleep: 16, bufferSize: 500 } }
+const GENOME_SHA = await genomeSha(GENOME_SPACE.schemaVersion, GENOME.values)
+/** A paused posterior built for that centre (CPU-class draws: the centre, or 1 in 5 uniform). */
+const POSTERIOR = posteriorText("paused", { calibrationLives: 34, calibrationTarget: 45, looks: 1 }, undefined, { genomeSha: GENOME_SHA, values: GENOME.values })
+const POSTERIOR_SHA = createHash("sha256").update(POSTERIOR).digest("hex")
+/** A learnerId whose draw under POSTERIOR is the centre: the loop's learner is pinned to it, so its settings are known. */
+const CENTRE_ID = Array.from({ length: 50 }, (_, i) => `lrn_${(0xc0de00 + i).toString(16).padStart(16, "0")}`).find(learnerId =>
+  birthDraw({ learnerId, space: GENOME_SPACE, centre: GENOME.values, centreSha: GENOME_SHA, widthsClass: "cpu", posterior: parsePosterior(POSTERIOR), posteriorSha: POSTERIOR_SHA }).method === "centre")!
 const KNOWLEDGE: Record<string, unknown> = {
   "summary.json": { schemaVersion: 1, sessions: [row("lrn_aaaaaaaaaaaaaaaa"), { ...row("lrn_bbbbbbbbbbbbbbbb"), cu: 1024.5, lossRatio: 0.9123, heldOutRatio: 1.0456 }] },
   // The e2e build's own code ("dev") and checkpoint format: no test here sees new code (tests/e2e/updates.spec.ts does).
   "manifest.json": { knowledgeSha: "c".repeat(64), codeSha: "dev", learnerStateVersion: LEARNER_STATE_VERSION },
-  "settings-space.json": { schemaVersion: 1, settings: SPACE },
+  "genome-space.json": SPACE_JSON,
+  "genome.json": GENOME,
+  // Served as its bytes (a string), as deploy copies data/meta/posterior.json.
+  "posterior.json": POSTERIOR,
   // As deployed (knowledge/caregiver-prior.json): the caregiver's settings for newborns.
   "caregiver-prior.json": { schemaVersion: 1, settings: { caregiverPeriod: 500, caregiverTau: 0.05, caregiverEpsilon: 0.1, caregiverThreshold: 0.01, caregiverStuckSteps: 2000 } },
 }
@@ -49,7 +62,8 @@ async function setup(page: Page, opts: { knowledge: "ok" | "unreachable"; token?
     if (opts.knowledge === "unreachable") return route.abort("internetdisconnected")
     const name = new URL(route.request().url()).pathname.split("/").pop()!
     const body = KNOWLEDGE[name]
-    return body === undefined ? route.fulfill({ status: 404 }) : route.fulfill({ json: body })
+    if (body === undefined) return route.fulfill({ status: 404 })
+    return typeof body === "string" ? route.fulfill({ body, contentType: "application/json" }) : route.fulfill({ json: body })
   })
   await page.route("https://api.github.com/**", async route => {
     const req = route.request()
@@ -101,6 +115,7 @@ async function seedDb(page: Page, rows: { outbox?: unknown[]; checkpoints?: unkn
 
 test("the loop: knowledge in, the real learner lives its life in CU, its v2 log goes to GitHub as one PR, a newborn follows", async ({ page, baseURL }) => {
   const { gh, all, githubCalls } = await setup(page, { knowledge: "ok" })
+  await page.addInitScript(i => { if (!sessionStorage.getItem("blanktab:learnerId")) sessionStorage.setItem("blanktab:learnerId", i) }, CENTRE_ID)
   await page.goto(PAGE)
 
   // Sessions before this one: the visible proof that the loop is closed.
@@ -111,10 +126,14 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
   await expect(learner).toHaveText(/lrn_[0-9a-f]{16}/)
   const id = (await learner.textContent())!.match(/lrn_[0-9a-f]{16}/)![0]
   expect(await page.evaluate(() => sessionStorage.getItem("blanktab:learnerId"))).toBe(id)
-  // The settings it was born with, as the learner uses them (moveProbability is not one of them).
+  expect(id).toBe(CENTRE_ID)
+  // The settings it was born with: the genome's (its draw under the posterior is the centre), as the learner uses them.
   await expect(page.getByTestId("setting")).toContainText("replayPerSleep = 16")
-  await expect(page.getByTestId("setting")).toContainText("maxStepsPerSec = 10") // the speed knob is the cap it lives at
+  await expect(page.getByTestId("setting")).toContainText("bufferSize = 500")
+  await expect(page.getByTestId("setting")).toContainText("maxStepsPerSec = 30") // the genome's cap is the cap it lives at
   await expect(page.getByTestId("setting")).not.toContainText("moveProbability")
+  await expect(page.getByTestId("recipe-text")).toHaveText("the current recipe")
+  await expect(page.getByTestId("meta-state")).toHaveText("Paused: the score can't yet tell recipes apart; measuring more (34 of 45).")
   await expect(page.getByTestId("backend")).toHaveText(/^CPU/)
 
   // Steps, compute and the loss curve all move.
@@ -173,8 +192,12 @@ test("the loop: knowledge in, the real learner lives its life in CU, its v2 log 
     else expect(p.heldOut).toBeUndefined()
   }
   expect(final.evalCU).toBeGreaterThan(0)
-  expect(final.settings).toMatchObject({ replayPerSleep: 16, bufferSize: 500, maxStepsPerSec: 10 })
+  expect(final.settings).toMatchObject({ replayPerSleep: 16, bufferSize: 500, maxStepsPerSec: 30 })
   expect(final.settings).not.toHaveProperty("moveProbability")
+  // Its genome block: the centre drawn under the posterior's bytes; the gate accepts the file as the learner's first PR.
+  expect(final.meta).toMatchObject({ role: "search", method: "centre", posteriorSha: POSTERIOR_SHA, genome: GENOME.values, genomeSha: GENOME_SHA })
+  const v = await validateSessionPr([{ path: `data/runs/${id}/0.json`, content: JSON.stringify(final, null, 2) }], [], { space: GENOME_SPACE })
+  expect(v.errors).toEqual([])
 
   // A newborn with a new learnerId takes its place.
   await expect(learner).not.toHaveText(id)

@@ -1,16 +1,38 @@
 // Messages between the page (main thread) and the learner's worker. The token never crosses this boundary.
 import type { Manifest } from "@blanktab/harness/knowledge"
-import type { CheckupResult, CurvePoint } from "@blanktab/harness/log"
+import type { CheckupResult, CurvePoint, MetaBlock } from "@blanktab/harness/log"
 import type { Widths } from "@blanktab/learner"
 import type { BackendKind } from "./backend"
 import type { LifeConfig } from "./life"
 
 export interface StartMessage {
   type: "start"
+  /**
+   * The life's config. Its learnerSettings, caregiver, maxStepsPerSec and sleepInterval are the fallback for a tab
+   * without a genome space or centre (DEFAULT_SETTINGS, the caregiver prior, the default cap): with `draw`, the worker's
+   * birth draw replaces them (but not the cap of a resumed life: `ownCap`).
+   */
   cfg: LifeConfig
+  /**
+   * The meta-learner's files as the page loaded them (Knowledge.meta, raw): the worker draws the birth genome from them
+   * at the first run, once the backend (and so the widths class) is known. Absent: no genome files, so no meta block.
+   */
+  draw?: { spaceJson: unknown; genomeJson: unknown; posteriorText: string | null }
+  /** cfg.maxStepsPerSec is the life's own (from its latest log file, a resumed life): the draw does not replace it. */
+  ownCap?: boolean
+  /** The short-lives switch as the page has it now (then ShortLivesMessage on each change; decisions 0019, 0022). */
+  shortLives: boolean
+  /** Newborn reference mode (?newborns=a-b): runs newborns k = from…to in sequence instead of a life. */
+  newborns?: { from: number; to: number }
   /** Test knobs (never set by the production build): skip WebGPU; a newborn's widths. */
   backend?: "cpu"
   widths?: Widths
+  /**
+   * Test knobs applied after the draw (never set by the production build): the speed cap, the steps between sleeps,
+   * and a newborn's evaluation budget (its budget checkup, where a short life ends). A life whose genome a knob
+   * contradicts is not born with a meta block (the session refuses it); these lives are dev builds, never rows.
+   */
+  overrides?: { maxStepsPerSec?: number; sleepInterval?: number; budgetCU?: number }
   /** document.hidden when the life starts (then VisibilityMessage on each change): no frames are posted while hidden. */
   hidden?: boolean
   /** The learner's checkpoint record, already read by the startup sweep that adopted it (its buffers transferred). */
@@ -24,7 +46,9 @@ export interface KnowledgeMessage { type: "knowledge"; manifest: Manifest }
  * learner stops right after the save, so the reload loses no step.
  */
 export interface CheckpointNowMessage { type: "checkpointNow"; id: number; halt: boolean }
-export type ToWorker = StartMessage | VisibilityMessage | KnowledgeMessage | CheckpointNowMessage
+/** The short-lives switch changed (read by the session at clean sleeps only). */
+export interface ShortLivesMessage { type: "shortLives"; on: boolean }
+export type ToWorker = StartMessage | VisibilityMessage | KnowledgeMessage | CheckpointNowMessage | ShortLivesMessage
 
 export type FromWorker =
   | { type: "backend"; kind: BackendKind; label: string }
@@ -43,7 +67,16 @@ export type FromWorker =
    */
   | { type: "carried"; to: string | null; carries: number; safetyNet: boolean }
   | { type: "queued"; seq: number; steps: number; cu: number; final: boolean }
-  | { type: "final"; steps: number; cu: number }
+  /** The life's end. `ended: "budget"`: the short-lives switch ended it at its budget checkup. */
+  | { type: "final"; steps: number; cu: number; ended?: "budget" }
+  /** The life's meta block (its genome and how it was drawn), as the session logs it: once per run. */
+  | { type: "meta"; meta: MetaBlock }
+  /** This life logs no meta block, and why (no genome files, or the session refused every block: a test knob). */
+  | { type: "unlabelled"; reason: string }
+  /** Newborn reference mode: newborn `k` (learner `learnerId`) has started, or its file is in the outbox (`done`). */
+  | { type: "newborn"; k: number; learnerId: string; done: boolean }
+  /** Newborn reference mode: every newborn asked for is done. */
+  | { type: "newbornsDone" }
   /** The life stopped at a forced save asked with `halt`: its checkpoint is current; the page reloads onto it. */
   | { type: "halted" }
   /** The answer to CheckpointNowMessage `id`: saved, or not (skipped updates outstanding, or the life ended): ask again later. */

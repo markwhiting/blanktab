@@ -17,8 +17,9 @@ function codeSha(): string {
 
 /**
  * Dev server only: serves /learner/knowledge/*.json the way the deploy workflow assembles it
- * (summary from data/runs, scored as deploy scores it: pinnedScoring; manifest with codeSha "dev", the rest from
- * knowledge/). Never part of a build.
+ * (summary from data/runs, scored as deploy scores it: pinnedScoring; manifest with codeSha "dev"; posterior.json
+ * as data/meta/posterior.json's exact bytes, as deploy copies it, so a dev tab's posteriorSha is the gate's; the rest
+ * from knowledge/). Never part of a build.
  */
 function devKnowledge(): Plugin {
   return {
@@ -28,6 +29,13 @@ function devKnowledge(): Plugin {
       server.middlewares.use(`${BASE}knowledge`, (req, res, next) => {
         const name = (req.url ?? "").split("?")[0]!.replace(/^\//, "")
         let body: unknown
+        if (name === "posterior.json") {
+          const file = join(REPO_ROOT, "data/meta/posterior.json")
+          if (!existsSync(file)) { res.statusCode = 404; return res.end() } // no gate run yet: tabs draw the centre
+          res.setHeader("content-type", "application/json")
+          res.setHeader("cache-control", "no-store")
+          return res.end(readFileSync(file))
+        }
         if (name === "summary.json") body = buildSummary(join(REPO_ROOT, "data/runs"), pinnedScoring(REPO_ROOT))
         else if (name === "manifest.json") body = buildManifest(join(REPO_ROOT, "knowledge"), "dev")
         else if (/^[a-z0-9-]+\.json$/.test(name) && existsSync(join(REPO_ROOT, "knowledge", name))) body = JSON.parse(readFileSync(join(REPO_ROOT, "knowledge", name), "utf8"))

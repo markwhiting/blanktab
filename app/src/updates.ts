@@ -136,8 +136,8 @@ export interface UpdatesDeps {
   retryMs?: number
 }
 
-/** What makes knowledge new: its sha and its content (a new summary is new knowledge even with the same priors). */
-const fingerprint = (k: Knowledge) => JSON.stringify([k.manifest.knowledgeSha, k.summary, k.settingsSpace])
+/** What makes knowledge new: its sha and its content (a new summary or posterior is new knowledge even with the same priors). */
+const fingerprint = (k: Knowledge) => JSON.stringify([k.manifest.knowledgeSha, k.summary, k.meta])
 
 /**
  * Starts both pollers (knowledge, manifest); see UpdatesDeps. `halted()`: the learner stopped at a forced save (the
