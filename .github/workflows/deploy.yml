@@ -44,6 +44,8 @@ jobs:
         run: |
           mkdir -p app/dist/knowledge
           cp knowledge/*.json app/dist/knowledge/
+          # The gate's posterior (decision 0019), which tabs draw from; not a prior file, so knowledgeSha is unchanged.
+          if [ -f data/meta/posterior.json ]; then cp data/meta/posterior.json app/dist/knowledge/posterior.json; fi
           npx tsx tools/gate/summary-cli.ts data/runs app/dist/knowledge/summary.json
           npx tsx tools/gate/manifest.ts knowledge app/dist/knowledge/manifest.json
         env:

@@ -19,6 +19,7 @@ jobs:
       pull-requests: write
     outputs:
       merged: ${{ steps.gate.outputs.merged }}
+      meta: ${{ steps.meta.outputs.meta }}
     steps:
       # Full history: a learner belongs to the author of the PR that first put its logs on main (github.ts boundAuthor).
       - uses: actions/checkout@v4
@@ -35,10 +36,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-  # Merges made with GITHUB_TOKEN do not trigger other workflows, so the gate calls deploy itself.
+      # data/meta/** is built from main as it now is: the gate's merges, and the code, config and logs they brought.
+      - run: git pull --ff-only origin main
+      - run: npx tsx tools/gate/meta-cli.ts
+      # The one direct commit to main (decision 0019): only the files meta-cli.ts computed, never forced; on a push that
+      # main moved past, it resets to the new main and rebuilds.
+      - id: meta
+        run: npx tsx tools/gate/commit-meta.ts
+  # Merges and pushes made with GITHUB_TOKEN do not trigger other workflows, so the gate calls deploy itself: after a
+  # merge, or after a data/meta commit (decision 0019).
   deploy:
     needs: gate
-    if: ${{ !cancelled() && needs.gate.outputs.merged != '' && needs.gate.outputs.merged != '0' }}
+    if: ${{ !cancelled() && ((needs.gate.outputs.merged != '' && needs.gate.outputs.merged != '0') || needs.gate.outputs.meta == 'committed') }}
     uses: ./.github/workflows/deploy.yml
     permissions:
       contents: read
