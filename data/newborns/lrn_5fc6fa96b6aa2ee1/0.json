@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 2,
+  "learnerId": "lrn_5fc6fa96b6aa2ee1",
+  "seq": 0,
+  "codeSha": "f5f260c29f2b8decb310e93d4d02d4edb3b6834c",
+  "knowledgeSha": "9be1e3689ccbe5aa29dbf7af720c12bbca06bc367b7ca8d1c9d7749e4d277236",
+  "writtenAt": "2026-10-24T05:21:29.338Z",
+  "stepsTotal": 0,
+  "settings": {
+    "lr": 0.0005,
+    "entropyWeight": 0.01,
+    "curiosityWeight": 1,
+    "bufferSize": 2000,
+    "replayPerSleep": 64,
+    "headLrScale": 0.1,
+    "exploreEpsilon": 0.1,
+    "residualDecay": 0.001,
+    "gamma": 0.9,
+    "maxStepsPerSec": 30,
+    "seed": 1052,
+    "caregiverPeriod": 500,
+    "caregiverTau": 0.05,
+    "caregiverEpsilon": 0.1,
+    "caregiverThreshold": 0.01,
+    "caregiverStuckSteps": 2000
+  },
+  "hostSig": {
+    "cores": 10,
+    "deviceMemoryGb": 32,
+    "tabsOnMachine": 1,
+    "webgpu": true
+  },
+  "sessionsSeenAtBirth": 0,
+  "final": true,
+  "cu": 0,
+  "condition": "A",
+  "widths": {
+    "conv1": 16,
+    "conv2": 32,
+    "enc": 128,
+    "hidden": 256
+  },
+  "curve": [],
+  "skippedUpdates": 0,
+  "restores": 0,
+  "lostCU": 0,
+  "evalCU": 66.36960258099738,
+  "checkups": [
+    {
+      "level": 512,
+      "steps": 0,
+      "passed": [],
+      "measures": {
+        "M1": 1,
+        "M2": 1.6055592206535707,
+        "M3": 0.3224408097906895,
+        "M4": 0.35000000000000003,
+        "M5": 1.032258064516129,
+        "M6": 1
+      },
+      "evalCU": 21.90595768199911
+    },
+    {
+      "level": 1024,
+      "steps": 0,
+      "passed": [
+        "M3"
+      ],
+      "measures": {
+        "M1": 1,
+        "M2": 0.8388181326039242,
+        "M3": 2.3280488405297715,
+        "M4": 0.4583333333333333,
+        "M5": 1.1428571428571428,
+        "M6": 0
+      },
+      "evalCU": 21.905957681998725
+    },
+    {
+      "level": 2048,
+      "steps": 0,
+      "passed": [],
+      "measures": {
+        "M1": 1,
+        "M2": 0.5917276865228559,
+        "M3": 1.295671019831077,
+        "M4": 0.22727272727272727,
+        "M5": 1.3333333333333333,
+        "M6": 0
+      },
+      "evalCU": 21.905957681999546
+    }
+  ],
+  "milestoneSuiteVersion": 1,
+  "meta": {
+    "v": 1,
+    "role": "newborn",
+    "method": "newborn",
+    "genomeSchema": 1,
+    "genome": {
+      "lr": 0.0005,
+      "headLrScale": 0.1,
+      "residualDecay": 0.001,
+      "entropyWeight": 0.01,
+      "curiosityWeight": 1,
+      "exploreEpsilon": 0.1,
+      "bufferSize": 2000,
+      "replayPerSleep": 64,
+      "gamma": 0.9,
+      "caregiverPeriod": 500,
+      "caregiverTau": 0.05,
+      "caregiverEpsilon": 0.1,
+      "caregiverThreshold": 0.01,
+      "caregiverStuckSteps": 2000,
+      "maxStepsPerSec": 30,
+      "sleepInterval": 250,
+      "latentWeight": 0,
+      "ctrlWeight": 0,
+      "noveltyWeight": 0,
+      "targetTau": 0.995,
+      "gaeLambda": 0.9,
+      "replayBeta": 0,
+      "plasticAlpha": 0,
+      "plasticEta": 0.1,
+      "lrClockSlope": 0,
+      "creditMode": "off",
+      "sleepSeqLen": "1",
+      "modulator": "none",
+      "ctrlGate": "gated"
+    },
+    "genomeSha": "d22c1c55b2066763c30014b91ef80f9d30206186ada7bf5ddd27e6ad13280148",
+    "drawSeed": null,
+    "posteriorSha": null,
+    "evalPanel": 5,
+    "evalSeed": null,
+    "confirmation": null,
+    "inheritance": {
+      "filters": "none"
+    },
+    "budget": {
+      "budgetCU": 2048,
+      "levels": [
+        512,
+        1024,
+        2048
+      ]
+    },
+    "heldOut": {
+      "loss": 0.0031862871255725622,
+      "baseline": 0.0031862868747697583
+    }
+  }
+}

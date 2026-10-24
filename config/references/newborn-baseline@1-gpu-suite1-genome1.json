@@ -1,0 +1,111 @@
+{
+  "evaluator": "newborn-baseline@1",
+  "suiteVersion": 1,
+  "genomeSchema": 1,
+  "widthsClass": "gpu",
+  "learnerIds": [
+    "lrn_047390199f490e7b",
+    "lrn_0bb8f1cb0c6945c2",
+    "lrn_1263c4c33c308ad1",
+    "lrn_12733ae9db921ce5",
+    "lrn_14d551191ffdc5b4",
+    "lrn_1f7ddc4259d8a447",
+    "lrn_2106a5991e8dd7ab",
+    "lrn_387f2757c37848a8",
+    "lrn_3f5cdd9f00f719f2",
+    "lrn_4141d47415fe4948",
+    "lrn_4258f91fb83d18b2",
+    "lrn_4a621c6ab116023b",
+    "lrn_4d2b3826cb4ce9b6",
+    "lrn_50a52beef9030e75",
+    "lrn_52c0f45b4ad7ddb6",
+    "lrn_539f3690e3977e3f",
+    "lrn_56f3630872482bc4",
+    "lrn_5938bb56f2238c61",
+    "lrn_594427c9bfa58720",
+    "lrn_5c1c34a60e7a41a2",
+    "lrn_5fa5bb57b6cca6ab",
+    "lrn_5fc6fa96b6aa2ee1",
+    "lrn_5ffe636028ab43c6",
+    "lrn_6196234a09b60e60",
+    "lrn_61be79537b05eac7",
+    "lrn_689075368dc30231",
+    "lrn_709003b09f3119bf",
+    "lrn_7c807f711e9f31ea",
+    "lrn_7da8e373514e6fa0",
+    "lrn_7ddc28816119d8bc",
+    "lrn_8014315b9b40c006",
+    "lrn_8083e75b57955fbd",
+    "lrn_82e88353fd3bcc19",
+    "lrn_830759a65fc7d9f5",
+    "lrn_891d5417bc523218",
+    "lrn_9233d49fb3d9d237",
+    "lrn_94a4ee668b354baf",
+    "lrn_985d23a3f0306323",
+    "lrn_98f23f6ea40b9f4a",
+    "lrn_998ce8eb668eb288",
+    "lrn_9c24899c141e8e2c",
+    "lrn_9ffd8f8b073ea94c",
+    "lrn_ad15e54836f4858a",
+    "lrn_ade58ee715f0f9bd",
+    "lrn_ae2274c91392d996",
+    "lrn_aea0e071caa44d07",
+    "lrn_b9abbed5952b7b31",
+    "lrn_be5556a918523370",
+    "lrn_c70bfc4c02c716c4",
+    "lrn_c81a1851d74ff102",
+    "lrn_c933763b3bb59c0e",
+    "lrn_ce76b080a248c00b",
+    "lrn_d162f08070c5e55c",
+    "lrn_d20d873cc856ed6c",
+    "lrn_dd64f6025468c06b",
+    "lrn_e3ba696faae32b9c",
+    "lrn_ee53a576b10bfbae",
+    "lrn_eee350935f91410a",
+    "lrn_f22203a2c3a16cee",
+    "lrn_f6bf55eb74114bac",
+    "lrn_f889b2f756b04c0f",
+    "lrn_f8d7e00840b017ff",
+    "lrn_fadeb9b9b2425e33",
+    "lrn_fc86a8e98300369c"
+  ],
+  "milestones": {
+    "M1": {
+      "median": 1,
+      "passRate": 0,
+      "sustainedPassRate": 0
+    },
+    "M2": {
+      "median": 0.8983686844177501,
+      "passRate": 0.041666666666666664,
+      "sustainedPassRate": 0
+    },
+    "M3": {
+      "median": 0.8570539379500566,
+      "passRate": 0.21875,
+      "sustainedPassRate": 0.109375
+    },
+    "M4": {
+      "median": 0.35599078341013823,
+      "passRate": 0.1875,
+      "sustainedPassRate": 0.140625
+    },
+    "M5": {
+      "median": 0.8888888888888888,
+      "passRate": 0.09895833333333333,
+      "sustainedPassRate": 0.03125
+    },
+    "M6": {
+      "median": 0,
+      "passRate": 0.03125,
+      "sustainedPassRate": 0
+    }
+  },
+  "heldOutMedian": 1.0000000514493994,
+  "provenance": {
+    "codeSha": "f5f260c29f2b8decb310e93d4d02d4edb3b6834c",
+    "browser": "Chromium (Playwright), WebGPU apple metal-3",
+    "machine": "Apple M4 Mac",
+    "date": "2026-10-24"
+  }
+}
