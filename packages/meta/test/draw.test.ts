@@ -45,7 +45,7 @@ const CALIB_NONCENTRE_ID = "lrn_fixture_calib_0"
 const ids = (k: number, tag: string) => Array.from({ length: k }, (_, i) => `lrn_${tag}_${i.toString(36)}`)
 
 describe("birthDraw", () => {
-  it("birthDraw is a pure function: the same input gives a deep-equal Draw; 20 draws equal fixtures/draws.json", () => {
+  it("birthDraw is a pure function: the same input gives a deep-equal Draw; 22 draws equal fixtures/draws.json", () => {
     const cases: DrawInput[] = []
     const modes: (Mode | null)[] = [null, "calibrate", "search", "paused", "flat"]
     for (let i = 0; i < 20; i++) {

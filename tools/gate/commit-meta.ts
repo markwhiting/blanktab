@@ -20,9 +20,9 @@ export function metaPathErrors(staged: string[]): string[] {
 }
 
 const lines = (s: string, sep = "\n") => s.split(sep).filter(l => l !== "")
-/** A push git refused because origin's main is ahead of it (not a protection rule, an auth failure or a network error). */
 /** The lockfile npm ci installed from: main's must still be it, or meta-cli ran main's new code on an old install. */
 const LOCKFILE = "package-lock.json"
+/** A push git refused because origin's main is ahead of it (not a protection rule, an auth failure or a network error). */
 const isBehind = (e: unknown) => /\[rejected\][^\n]*\((fetch first|non-fast-forward)\)/.test(e instanceof Error ? e.message : String(e))
 
 /**

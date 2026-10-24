@@ -7,6 +7,7 @@ import { buildManifest } from "../tools/gate/manifest.ts"
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
 const BASE = "/learner/"
+const APP_DIR = fileURLToPath(new URL(".", import.meta.url))
 
 /** The code the page is built from (deploy sets CODE_SHA: tools/gate/manifest.ts codeShaOf), or "dev". Anything else is a build error. */
 function codeSha(): string {
@@ -53,5 +54,9 @@ export default defineConfig(({ mode }) => ({
   define: { __CODE_SHA__: JSON.stringify(codeSha()), __BUILD_TIME__: JSON.stringify(new Date().toISOString()) },
   plugins: [devKnowledge()],
   worker: { format: "es" },
-  build: { outDir: mode === "e2e" ? "dist-e2e" : "dist", emptyOutDir: true, target: "es2022" },
+  build: {
+    outDir: mode === "e2e" ? "dist-e2e" : "dist", emptyOutDir: true, target: "es2022",
+    // The e2e build also has the detmath probe page (tests/e2e/detmath.spec.ts); the deploy build never does.
+    ...(mode === "e2e" ? { rollupOptions: { input: { main: join(APP_DIR, "index.html"), detmath: join(APP_DIR, "detmath-probe.html") } } } : {}),
+  },
 }))

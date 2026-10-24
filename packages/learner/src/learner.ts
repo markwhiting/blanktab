@@ -233,8 +233,10 @@ export function clampSettings(s: LearnerSettings): LearnerSettings {
   if (!Number.isFinite(s.headLrScale)) throw new RangeError(`headLrScale must be finite, got ${s.headLrScale}`)
   if (!Number.isFinite(s.exploreEpsilon)) throw new RangeError(`exploreEpsilon must be finite, got ${s.exploreEpsilon}`)
   if (!Number.isFinite(s.residualDecay)) throw new RangeError(`residualDecay must be finite, got ${s.residualDecay}`)
-  const gamma = (s as { gamma?: number }).gamma ?? GAMMA
-  if (!Number.isFinite(gamma)) throw new RangeError(`gamma must be finite, got ${gamma}`)
+  // Only an absent gamma (a state saved before Plan 05a) means the old constant; null or any non-number is refused.
+  const given: unknown = (s as { gamma?: unknown }).gamma
+  const gamma = given === undefined ? GAMMA : given
+  if (typeof gamma !== "number" || !Number.isFinite(gamma)) throw new RangeError(`gamma must be a finite number, got ${String(gamma)}`)
   const clamp = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v))
   return {
     ...s, lr: clamp(s.lr, LR_RANGE), headLrScale: clamp(s.headLrScale, HEAD_LR_SCALE_RANGE),

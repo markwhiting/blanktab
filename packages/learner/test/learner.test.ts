@@ -1305,7 +1305,7 @@ describe("gamma setting (Plan 05a)", { timeout: 60_000 }, () => {
     expect(Object.keys(DEFAULT_SETTINGS).at(-1)).toBe("gamma")
   })
 
-  it("clampSettings: gamma absent → 0.9; 1.2 → 0.999; −1 → 0; NaN → RangeError", () => {
+  it("clampSettings: gamma absent → 0.9; 1.2 → 0.999; −1 → 0; NaN, null or a string → RangeError", () => {
     const { gamma: _g, ...older } = DEFAULT_SETTINGS
     void _g
     expect(clampSettings(older as LearnerSettings).gamma).toBe(0.9)
@@ -1314,6 +1314,10 @@ describe("gamma setting (Plan 05a)", { timeout: 60_000 }, () => {
     expect(clampSettings({ ...DEFAULT_SETTINGS, gamma: 0.6 }).gamma).toBe(0.6)
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       expect(() => clampSettings({ ...DEFAULT_SETTINGS, gamma: bad }), String(bad)).toThrow(RangeError)
+    }
+    // Only undefined means absent (final review): null (e.g. a JSON round trip of NaN) is not the old constant.
+    for (const bad of [null, "0.9"]) {
+      expect(() => clampSettings({ ...DEFAULT_SETTINGS, gamma: bad as unknown as number }), String(bad)).toThrow(RangeError)
     }
   })
 

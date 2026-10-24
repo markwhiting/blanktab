@@ -13,8 +13,8 @@ describe("the files the hygiene tests scan", () => {
     const all = execFileSync("git", ["ls-files"], { encoding: "utf8", cwd: REPO_ROOT }).split("\n").filter(Boolean)
     expect(all.some(f => f.startsWith("data/runs/"))).toBe(true) // there are some to leave out
     const scanned = trackedFiles()
-    expect(scanned.some(f => f.startsWith("data/runs/"))).toBe(false)
-    expect(scanned).toEqual(all.filter(f => !f.startsWith("data/runs/")))
+    expect(scanned.some(f => f.startsWith("data/runs/") || f.startsWith("data/newborns/"))).toBe(false)
+    expect(scanned).toEqual(all.filter(hygieneScans))
   })
 
   it("paths are read from the repo root; a missing file reads as undefined, other errors throw", () => {
