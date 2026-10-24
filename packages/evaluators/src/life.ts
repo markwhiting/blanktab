@@ -1,6 +1,6 @@
 // Shared reading of a life's merged files: which files an evaluation budget covers, and small order-free statistics.
 import type { LogFile, LogFileV2 } from "@blanktab/harness/log"
-import { GPU_WIDTHS_CLASS, type CohortContext, type Evaluator } from "./types"
+import { GPU_WIDTHS_CLASS, type CohortContext, type Evaluator } from "./types.ts"
 
 export const isV2 = (f: LogFile): f is LogFileV2 => f.schemaVersion === 2
 

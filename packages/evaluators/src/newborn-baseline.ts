@@ -1,9 +1,9 @@
 // newborn-baseline@1 (spec §2.3): the newborn reference, computed from newborn lives (untrained learners of the centre
 // genome, frozen checkups at 512, 1,024 and 2,048 on the panels search lives meet, and one held-out score each).
 import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
-import { isGpuWidths, isV2, median } from "./life"
-import { REFERENCE_MILESTONES } from "./reference"
-import type { EvalOutput, Evaluator, LifeInput, NewbornReference } from "./types"
+import { isGpuWidths, isV2, median } from "./life.ts"
+import { REFERENCE_MILESTONES } from "./reference.ts"
+import type { EvalOutput, Evaluator, LifeInput, NewbornReference } from "./types.ts"
 
 const ID = "newborn-baseline"
 const VERSION = 1

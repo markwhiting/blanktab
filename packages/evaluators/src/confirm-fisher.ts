@@ -2,9 +2,9 @@
 // milestone more often than newborns of the same genome do by luck, and (2) it beats the centre on the search score's
 // rank average. Changing anything here means a new version (decision 0020).
 import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
-import { budgetWindow, isGpuWidths, isV2, searchOf } from "./life"
-import { fisherOneSided, holm, mannWhitneyOneSided } from "./stats"
-import type { CohortContext, EvalOutput, Evaluator, LifeInput, MilestoneKey, References } from "./types"
+import { budgetWindow, isGpuWidths, isV2, searchOf } from "./life.ts"
+import { fisherOneSided, holm, mannWhitneyOneSided } from "./stats.ts"
+import type { CohortContext, EvalOutput, Evaluator, LifeInput, MilestoneKey, References } from "./types.ts"
 
 const ID = "confirm-fisher"
 const VERSION = 1

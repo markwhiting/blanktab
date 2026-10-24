@@ -2,9 +2,9 @@
 // H (the held-out ratio), from its first 2,048 CU only. Changing anything here means a new version (decision 0020).
 import { dlog, normInv } from "@blanktab/detmath"
 import { lifeBudget, sameBudget, type LogFileV2 } from "@blanktab/harness/log"
-import { budgetWindow, clip, isGpuWidths, isV2, median } from "./life"
-import { midRanks } from "./stats"
-import type { EvalOutput, Evaluator, LifeInput, LifeOptions, MilestoneKey, References } from "./types"
+import { budgetWindow, clip, isGpuWidths, isV2, median } from "./life.ts"
+import { midRanks } from "./stats.ts"
+import type { EvalOutput, Evaluator, LifeInput, LifeOptions, MilestoneKey, References } from "./types.ts"
 
 /** This version's own budget and levels, published as `searchComposite.budget` (config/evaluation.json must agree). */
 const SEARCH_BUDGET_CU = 2048

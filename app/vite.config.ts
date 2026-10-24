@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { defineConfig, type Plugin } from "vite"
-import { buildSummary } from "../tools/gate/summary.ts"
+import { buildSummary, pinnedScoring } from "../tools/gate/summary.ts"
 import { buildManifest } from "../tools/gate/manifest.ts"
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
@@ -17,7 +17,8 @@ function codeSha(): string {
 
 /**
  * Dev server only: serves /learner/knowledge/*.json the way the deploy workflow assembles it
- * (summary from data/runs, manifest with codeSha "dev", the rest from knowledge/). Never part of a build.
+ * (summary from data/runs, scored as deploy scores it: pinnedScoring; manifest with codeSha "dev", the rest from
+ * knowledge/). Never part of a build.
  */
 function devKnowledge(): Plugin {
   return {
@@ -27,7 +28,7 @@ function devKnowledge(): Plugin {
       server.middlewares.use(`${BASE}knowledge`, (req, res, next) => {
         const name = (req.url ?? "").split("?")[0]!.replace(/^\//, "")
         let body: unknown
-        if (name === "summary.json") body = buildSummary(join(REPO_ROOT, "data/runs"))
+        if (name === "summary.json") body = buildSummary(join(REPO_ROOT, "data/runs"), pinnedScoring(REPO_ROOT))
         else if (name === "manifest.json") body = buildManifest(join(REPO_ROOT, "knowledge"), "dev")
         else if (/^[a-z0-9-]+\.json$/.test(name) && existsSync(join(REPO_ROOT, "knowledge", name))) body = JSON.parse(readFileSync(join(REPO_ROOT, "knowledge", name), "utf8"))
         else return next()

@@ -1,6 +1,6 @@
 // The newborn reference file (spec §2.3), strictly parsed: a person pins it, and the search score reads it.
 import { LEARNER_ID_RE } from "@blanktab/harness/log"
-import type { MilestoneKey, NewbornProvenance, NewbornReference, ReferenceParser } from "./types"
+import type { MilestoneKey, NewbornProvenance, NewbornReference, ReferenceParser } from "./types.ts"
 
 export const REFERENCE_MILESTONES: readonly MilestoneKey[] = ["M1", "M2", "M3", "M4", "M5", "M6"]
 const KEYS = ["evaluator", "genomeSchema", "heldOutMedian", "learnerIds", "milestones", "suiteVersion", "widthsClass"]

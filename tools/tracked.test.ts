@@ -6,6 +6,7 @@ describe("the files the hygiene tests scan", () => {
   it("a contributed log under data/runs/ is not scanned; other tracked files are", () => {
     expect(hygieneScans("data/runs/lrn_0123456789abcdef/0.json")).toBe(false)
     expect(hygieneScans("data/runs/.gitkeep")).toBe(false)
+    expect(hygieneScans("data/newborns/lrn_0123456789abcdef/0.json")).toBe(false)
     expect(hygieneScans("data/other.json")).toBe(true)
     expect(hygieneScans("tools/tracked.ts")).toBe(true)
     expect(hygieneScans("")).toBe(false)

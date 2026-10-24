@@ -1,22 +1,22 @@
 // @blanktab/evaluators: swappable, versioned evaluators (spec §2; decision 0020). Every evaluator is pure and
 // deterministic. REGISTRY keys are "id@version"; old versions stay forever, so any merged life can be rescored under
 // any of them. Which ones count is pinned in config/evaluation.json, which the gate never writes.
-import { confirmFisher } from "./confirm-fisher"
-import { newbornBaseline } from "./newborn-baseline"
-import { searchComposite } from "./search-composite"
-import { signalCheck } from "./signal-check"
-import type { CohortContext, Evaluator } from "./types"
+import { confirmFisher } from "./confirm-fisher.ts"
+import { newbornBaseline } from "./newborn-baseline.ts"
+import { searchComposite } from "./search-composite.ts"
+import { signalCheck } from "./signal-check.ts"
+import type { CohortContext, Evaluator } from "./types.ts"
 
 export type {
   CohortContext, EvalBudget, EvalOutput, Evaluator, LifeInput, LifeOptions, LifeRole, MilestoneKey, NewbornProvenance, NewbornReference, ReferenceParser, References,
-} from "./types"
-export { GPU_WIDTHS_CLASS } from "./types"
-export { parseNewbornReference, PROVENANCE_TEXT_RE, REFERENCE_PARSERS } from "./reference"
-export { rankAverage, searchComposite } from "./search-composite"
-export { newbornBaseline } from "./newborn-baseline"
-export { signalCheck } from "./signal-check"
-export { confirmFisher } from "./confirm-fisher"
-export { ALPHA_LOOK, ICC_MIN, SIGNAL_LOOKS } from "./stats"
+} from "./types.ts"
+export { GPU_WIDTHS_CLASS } from "./types.ts"
+export { parseNewbornReference, PROVENANCE_TEXT_RE, REFERENCE_PARSERS } from "./reference.ts"
+export { rankAverage, searchComposite } from "./search-composite.ts"
+export { newbornBaseline } from "./newborn-baseline.ts"
+export { signalCheck } from "./signal-check.ts"
+export { confirmFisher } from "./confirm-fisher.ts"
+export { ALPHA_LOOK, ICC_MIN, SIGNAL_LOOKS } from "./stats.ts"
 
 export const REGISTRY: Readonly<Record<string, Evaluator>> = Object.freeze({
   "search-composite@1": searchComposite,

@@ -1,4 +1,4 @@
-import { createRng, hashSeed } from "./seed"
+import { createRng, hashSeed } from "./seed.ts"
 
 // Joe & Kuo (2008) direction numbers, file new-joe-kuo-6.21201, dimensions 2..16: [s, a, m_1..m_s].
 // Dimension 1 is the van der Corput sequence (all m = 1).

@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url"
 export const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
 
 /**
- * Whether a hygiene test scans `path` (repo-relative). data/runs/ holds contributed log files: untrusted, and checked by
- * the gate as session logs only, so their text (formatting, a short error reason) must not be able to turn main's CI red.
+ * Whether a hygiene test scans `path` (repo-relative). data/runs/ holds contributed log files, and data/newborns/ the
+ * collected newborn reference files (the same format, checked by tools/eval/newborn-reference.ts): log files written by
+ * tabs, checked as session logs only, so their text (formatting, a short error reason) must not be able to turn main's CI red.
  */
 export function hygieneScans(path: string): boolean {
-  return path !== "" && !path.startsWith("data/runs/")
+  return path !== "" && !path.startsWith("data/runs/") && !path.startsWith("data/newborns/")
 }
 
 /** Tracked files (repo-relative) the hygiene tests scan, in `git ls-files` order. */

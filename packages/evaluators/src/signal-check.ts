@@ -1,9 +1,9 @@
 // signal-check@1 (spec §2.6, §4.6): does the search score have signal? Calibration genomes are each run several times;
 // if the score's differences between genomes stand out from its repeat noise, search can begin. Changing anything here
 // means a new version (decision 0020).
-import { isV2, searchOf } from "./life"
-import { ALPHA_LOOK, ICC_MIN, icc1, kruskalWallis } from "./stats"
-import type { CohortContext, EvalOutput, Evaluator, LifeInput, References } from "./types"
+import { isV2, searchOf } from "./life.ts"
+import { ALPHA_LOOK, ICC_MIN, icc1, kruskalWallis } from "./stats.ts"
+import type { CohortContext, EvalOutput, Evaluator, LifeInput, References } from "./types.ts"
 
 const ID = "signal-check"
 const VERSION = 1

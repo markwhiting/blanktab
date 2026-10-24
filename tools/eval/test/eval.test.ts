@@ -59,6 +59,8 @@ async function newbornFile(k: number, m3: number): Promise<LogFileV2> {
   }
 }
 const PROV = { browser: "Chrome 141", machine: "Apple M2 laptop, 16 GB" }
+/** Writing a reference from fewer than 64 newborns (as every test here does) needs allowMissing. */
+const W = { check: false, allowMissing: true, ...PROV }
 
 describe("collectLives", () => {
   it("every learner dir, its files parsed and sorted by seq; junk skipped", () => {
@@ -108,7 +110,13 @@ describe("newborn-reference (spec §2.3; controller ruling B)", () => {
     // Writing needs the provenance a log cannot give: the browser and the machine.
     expect((await newbornReference({ root, runsDir: src, check: false })).ok).toBe(false)
     expect(existsSync(refPath())).toBe(false)
-    const built = await newbornReference({ root, runsDir: src, check: false, ...PROV })
+    // Fewer than 64 newborns: refused unless allowMissing says so.
+    const short = await newbornReference({ root, runsDir: src, check: false, ...PROV })
+    expect(short.ok).toBe(false)
+    expect(short.messages.join("\n")).toMatch(/60 newborns are missing: pass --allow-missing/)
+    expect(short.messages.join("\n")).toMatch(/missing newborns k = 4, 5, /)
+    expect(existsSync(refPath())).toBe(false)
+    const built = await newbornReference({ root, runsDir: src, ...W })
     expect(built.messages.join("\n")).not.toMatch(/error/i)
     expect(built.ok).toBe(true)
     // The file the config pins: a reference the search score reads, naming its lives, with its provenance.
@@ -133,7 +141,7 @@ describe("newborn-reference (spec §2.3; controller ruling B)", () => {
     const src = join(root, "newborns")
     const good = await newbornFile(0, 1)
     put(src, good)
-    expect((await newbornReference({ root, runsDir: src, check: false, ...PROV })).ok).toBe(true)
+    expect((await newbornReference({ root, runsDir: src, ...W })).ok).toBe(true)
     const cases: [string, (f: LogFileV2) => void, RegExp][] = [
       ["a settings value the genome does not run", f => { f.settings.lr = 1 }, /not what ran/],
       ["a wrong genomeSha", f => { f.meta!.genomeSha = "0".repeat(64) }, /genomeSha/],
@@ -145,16 +153,36 @@ describe("newborn-reference (spec §2.3; controller ruling B)", () => {
       const f = structuredClone(good)
       edit(f)
       put(src, f)
-      const r = await newbornReference({ root, runsDir: src, check: false, ...PROV })
+      const r = await newbornReference({ root, runsDir: src, ...W })
       expect(r.ok, what).toBe(false)
       expect(r.messages.join("\n"), what).toMatch(msg)
     }
     // A duplicate k (two lives on one seed) is refused too.
     put(src, good)
     put(src, { ...structuredClone(good), learnerId: lid(0x2000) })
-    const dup = await newbornReference({ root, runsDir: src, check: false, ...PROV })
+    const dup = await newbornReference({ root, runsDir: src, ...W })
     expect(dup.ok).toBe(false)
     expect(dup.messages.join("\n")).toMatch(/seed 1000/)
     expect(parseNewbornReference(JSON.parse(readFileSync(refPath(), "utf8")))).not.toBeNull() // the last good write stands
+  })
+
+  it("never throws: a stray file named like a learner, a runsDir that is a file, a committed file that is not JSON, a broken config", async () => {
+    const src = join(root, "newborns")
+    put(src, await newbornFile(0, 1))
+    writeFileSync(join(src, lid(0x3000)), "not a dir")
+    const stray = await newbornReference({ root, runsDir: src, ...W })
+    expect(stray.ok).toBe(false)
+    expect(stray.messages.join("\n")).toMatch(/not a directory/)
+    rmSync(join(src, lid(0x3000)))
+    expect((await newbornReference({ root, runsDir: join(src, lid(0x1000), "0.json"), ...W })).messages.join("\n")).toMatch(/no such directory/)
+    expect((await newbornReference({ root, runsDir: src, ...W })).ok).toBe(true)
+    writeFileSync(refPath(), "{ not json")
+    const bad = await newbornReference({ root, runsDir: src, check: true })
+    expect(bad.ok).toBe(false)
+    expect(bad.messages.join("\n")).toMatch(/is not JSON/)
+    writeFileSync(join(root, "config/evaluation.json"), "{}")
+    const broken = await newbornReference({ root, runsDir: src, ...W })
+    expect(broken.ok).toBe(false)
+    expect(broken.messages.join("\n")).toMatch(/^error: config\/evaluation.json/)
   })
 })

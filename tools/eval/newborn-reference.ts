@@ -1,12 +1,12 @@
-// Usage: tsx tools/eval/newborn-reference.ts [runsDir] [--check] [--browser <text>] [--machine <text>]
-//   (run from the repo root; default runsDir .local/newborns)
+// Usage: tsx tools/eval/newborn-reference.ts [runsDir] [--check] [--allow-missing] [--browser <text>] [--machine <text>]
+//   (run from the repo root; default runsDir data/newborns, where the collected files are committed)
 // Builds the newborn reference (spec §2.3) with the pinned baseline evaluator from newborn files collected from the
 // tab's IndexedDB outbox (controller ruling B: newborns are run locally with ?newborns=a-b, not merged through 64 PRs),
 // laid out like data/runs (<learnerId>/<seq>.json). It writes the file config/evaluation.json pins for "newborn"; a
 // person reviews it and commits it under a decision. `--check` exits 1 when the committed file differs from the
 // recomputation. The remeasure path: run ?newborns=0-63 again under new code, rebuild under a new file name, re-pin by
 // decision.
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { LEARNER_ID_RE, MAX_EVAL_PANEL, type LogFileV2 } from "@blanktab/harness/log"
@@ -18,7 +18,8 @@ import { validateSessionPr } from "../gate/validate.ts"
 import { loadEvalConfig } from "./config.ts"
 import { collectLives } from "./lives.ts"
 
-export const DEFAULT_NEWBORNS_DIR = ".local/newborns"
+/** Where the collected newborn files are committed (controller ruling); any other dir, e.g. .local/newborns, by argument. */
+export const DEFAULT_NEWBORNS_DIR = "data/newborns"
 const GENOME_PATH = "knowledge/genome.json"
 
 export interface NewbornReferenceOptions {
@@ -31,6 +32,8 @@ export interface NewbornReferenceOptions {
   /** Required to write (a log cannot say them); with --check, the committed file's are used unless given. */
   browser?: string
   machine?: string
+  /** Write a reference although some k in 0…NEWBORN_COUNT − 1 has no newborn (refused without it). */
+  allowMissing?: boolean
 }
 export interface NewbornReferenceResult { ok: boolean; path: string; messages: string[]; reference?: NewbornReference }
 
@@ -46,12 +49,13 @@ export const referenceBytes = (r: NewbornReference): string => JSON.stringify(r,
  */
 async function checkCollected(root: string, runsDir: string): Promise<string[]> {
   const errors: string[] = []
-  if (!existsSync(runsDir)) return [`${runsDir}: no such directory`]
+  if (!existsSync(runsDir) || !statSync(runsDir).isDirectory()) return [`${runsDir}: no such directory`]
   const space = loadGenomeSpace(root)
   const centre = parseCentre(JSON.parse(readFileSync(join(root, GENOME_PATH), "utf8")), space)
   const centreSha = await genomeSha(space.schemaVersion, centre)
   for (const id of readdirSync(runsDir).sort()) {
     if (!LEARNER_ID_RE.test(id)) continue
+    if (!statSync(join(runsDir, id)).isDirectory()) { errors.push(`${id}: not a directory (a learner's files go in <runsDir>/<learnerId>/<seq>.json)`); continue }
     const names = readdirSync(join(runsDir, id)).filter(n => /^\d+\.json$/.test(n)).sort()
     const files = names.map(n => ({ path: `data/runs/${id}/${n}`, content: readFileSync(join(runsDir, id, n), "utf8") }))
     if (files.length === 0) continue
@@ -76,7 +80,7 @@ async function checkCollected(root: string, runsDir: string): Promise<string[]> 
 }
 
 /** The reference `config.baseline` computes from the collected lives, with its provenance; or the errors. */
-async function build(o: NewbornReferenceOptions, prov: { browser: string; machine: string }): Promise<{ reference?: NewbornReference; messages: string[]; errors: string[] }> {
+async function build(o: NewbornReferenceOptions, prov: { browser: string; machine: string }): Promise<{ reference?: NewbornReference; missing?: number[]; messages: string[]; errors: string[] }> {
   const errors = await checkCollected(o.root, o.runsDir)
   if (errors.length > 0) return { errors, messages: [] }
   const config = loadEvalConfig(o.root)
@@ -102,11 +106,23 @@ async function build(o: NewbornReferenceOptions, prov: { browser: string; machin
   const ks = new Set(used.map(f => (f.settings.seed as number) - NEWBORN_SEED_BASE))
   const missing = Array.from({ length: NEWBORN_COUNT }, (_, k) => k).filter(k => !ks.has(k))
   if (missing.length > 0) messages.push(`missing newborns k = ${missing.join(", ")} (of 0–${NEWBORN_COUNT - 1})`)
-  return { reference, messages, errors: [] }
+  return { reference, missing, messages, errors: [] }
 }
 
-/** Builds (or, with `check`, verifies) the pinned newborn reference. Never throws for bad input: `ok` and `messages` say. */
+/**
+ * Builds (or, with `check`, verifies) the pinned newborn reference. Never throws: any failure (bad input, an unreadable
+ * file, a malformed config or genome file) is `ok: false` with an error message. Writing with newborns missing needs
+ * `allowMissing`; checking a committed file does not (a person accepted it when it was written).
+ */
 export async function newbornReference(o: NewbornReferenceOptions): Promise<NewbornReferenceResult> {
+  try {
+    return await run(o)
+  } catch (e) {
+    return { ok: false, path: "", messages: [`error: ${e instanceof Error ? e.message : String(e)}`] }
+  }
+}
+
+async function run(o: NewbornReferenceOptions): Promise<NewbornReferenceResult> {
   const config = loadEvalConfig(o.root)
   const rel = config.references.newborn
   if (rel === undefined) return { ok: false, path: "", messages: ["error: config/evaluation.json pins no newborn reference"] }
@@ -117,7 +133,9 @@ export async function newbornReference(o: NewbornReferenceOptions): Promise<Newb
   if (o.check) {
     if (!existsSync(path)) return fail([`${rel} does not exist: nothing to check`])
     committedBytes = readFileSync(path, "utf8")
-    committed = parseNewbornReference(JSON.parse(committedBytes))
+    let json: unknown
+    try { json = JSON.parse(committedBytes) } catch { return fail([`${rel} is not JSON`]) }
+    committed = parseNewbornReference(json)
     if (!committed) return fail([`${rel} is not a valid newborn reference`])
   }
   const browser = o.browser ?? committed?.provenance?.browser
@@ -131,6 +149,7 @@ export async function newbornReference(o: NewbornReferenceOptions): Promise<Newb
     if (bytes !== committedBytes) return { ok: false, path, reference: b.reference, messages: [...b.messages, `error: ${rel} differs from the recomputation from ${o.runsDir}`] }
     return { ok: true, path, reference: b.reference, messages: [...b.messages, `${rel} matches the recomputation`] }
   }
+  if (b.missing!.length > 0 && !o.allowMissing) return fail([...b.messages, `${b.missing!.length} newborns are missing: pass --allow-missing to write the reference anyway`])
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, bytes)
   return { ok: true, path, reference: b.reference, messages: [...b.messages, `wrote ${rel}: review it, then commit it under a decision`] }
@@ -147,14 +166,14 @@ async function main(): Promise<void> {
     return v
   }
   const browser = opt("--browser"), machine = opt("--machine")
-  const check = args.includes("--check")
-  const rest = args.filter(a => a !== "--check")
+  const check = args.includes("--check"), allowMissing = args.includes("--allow-missing")
+  const rest = args.filter(a => a !== "--check" && a !== "--allow-missing")
   if (rest.length > 1 || rest.some(a => a.startsWith("--"))) {
-    console.error("usage: newborn-reference.ts [runsDir] [--check] [--browser <text>] [--machine <text>]")
+    console.error("usage: newborn-reference.ts [runsDir] [--check] [--allow-missing] [--browser <text>] [--machine <text>]")
     process.exit(2)
   }
   const r = await newbornReference({
-    root: process.cwd(), runsDir: rest[0] ?? DEFAULT_NEWBORNS_DIR, check,
+    root: process.cwd(), runsDir: rest[0] ?? DEFAULT_NEWBORNS_DIR, check, allowMissing,
     ...(browser !== undefined ? { browser } : {}), ...(machine !== undefined ? { machine } : {}),
   })
   for (const m of r.messages) (m.startsWith("error") ? console.error : console.log)(m)

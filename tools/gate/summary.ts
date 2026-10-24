@@ -2,7 +2,8 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { parseLogFile, LEARNER_ID_RE, type LogFile, type SessionEval, type SessionRow, type Summary } from "@blanktab/harness/log"
-import type { Evaluator, References } from "@blanktab/evaluators"
+import { getEvaluator, type Evaluator, type References } from "@blanktab/evaluators"
+import { loadEvalConfig, loadReferences } from "../eval/config.ts"
 
 export type { SessionRow, Summary }
 
@@ -70,6 +71,16 @@ export function latestCheckup(logs: LogFile[]): { level: number; score: number }
 /** What the summary scores each life with: the pinned search evaluator and the pinned references (summary-cli.ts). */
 export interface SummaryScoring { evaluator: Evaluator; refs: References }
 
+/**
+ * The scoring every summary writer uses (deploy's summary-cli.ts and the dev server, app/vite.config.ts): the search
+ * evaluator config/evaluation.json under `root` pins, with its pinned references (an absent reference: rows not
+ * eligible). Throws on a malformed config, so no writer silently publishes an unscored summary.
+ */
+export function pinnedScoring(root: string): SummaryScoring {
+  const config = loadEvalConfig(root)
+  return { evaluator: getEvaluator(config.search), refs: loadReferences(root, config) }
+}
+
 /** `life` scored by `s.evaluator`, keyed by its id@version (spec §2.2: every score carries its evaluator). */
 function evalsOf(learnerId: string, files: LogFile[], s: SummaryScoring): Record<string, SessionEval> {
   const e = s.evaluator
@@ -81,11 +92,11 @@ function evalsOf(learnerId: string, files: LogFile[], s: SummaryScoring): Record
 }
 
 /**
- * One row per learner, from its highest-seq file. With `scoring`, each row also carries `evals`: the life (all its
- * files) scored by the pinned search evaluator, keyed by id@version; without a reference its rows say not eligible.
- * Without `scoring` there is no `evals` key (summaries as before 05a).
+ * One row per learner, from its highest-seq file. With `scoring` (writers pass pinnedScoring(root)), each row also
+ * carries `evals`: the life (all its files) scored by that evaluator, keyed by id@version; without a reference its rows
+ * say not eligible. `scoring` is required: an explicit null builds rows without `evals` (summaries as before 05a; tests).
  */
-export function buildSummary(runsDir: string, scoring?: SummaryScoring): Summary {
+export function buildSummary(runsDir: string, scoring: SummaryScoring | null): Summary {
   const sessions: SessionRow[] = []
   if (existsSync(runsDir)) {
     for (const id of readdirSync(runsDir).sort()) {

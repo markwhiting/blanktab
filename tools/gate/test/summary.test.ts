@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { buildSummary, readLearnerLogs } from "../summary.ts"
+import { fileURLToPath } from "node:url"
+import { buildSummary, pinnedScoring, readLearnerLogs } from "../summary.ts"
 import { parseNewbornReference, searchComposite } from "@blanktab/evaluators"
 import { scoredLife } from "../../../packages/evaluators/test/fixtures/build.ts"
 import { parseSessionRow, type LogFile, type LogFileV1, type LogFileV2 } from "@blanktab/harness/log"
@@ -29,7 +30,7 @@ describe("buildSummary", () => {
     for (let s = 0; s <= 5; s++) put(log(A, s, { final: s === 5, sessionsSeenAtBirth: 3 }))
     put(log(B, 0)); put(log(B, 1, { settings: { moveProbability: 0.9 } }))
     writeFileSync(join(dir, B, "heartbeat.json"), JSON.stringify({ learnerId: B, writtenAt: "2026-10-19T12:00:00.000Z" }))
-    const s = buildSummary(dir)
+    const s = buildSummary(dir, null)
     expect(s.schemaVersion).toBe(1)
     expect(s.sessions).toHaveLength(2)
     const a = s.sessions.find(r => r.learnerId === A)!
@@ -39,12 +40,12 @@ describe("buildSummary", () => {
   })
   it("records lastWrittenAt from the highest-seq file", () => {
     put(log(A, 0, { writtenAt: "2026-10-19T12:00:00.000Z" })); put(log(A, 1, { writtenAt: "2026-10-19T12:05:00.000Z" }))
-    expect(buildSummary(dir).sessions[0]!.lastWrittenAt).toBe("2026-10-19T12:05:00.000Z")
+    expect(buildSummary(dir, null).sessions[0]!.lastWrittenAt).toBe("2026-10-19T12:05:00.000Z")
   })
   it("sorts numerically (seq 10 beats seq 9) and rows by learnerId", () => {
     for (let s = 0; s <= 10; s++) put(log(B, s))
     put(log(A, 0))
-    const s = buildSummary(dir)
+    const s = buildSummary(dir, null)
     expect(s.sessions.map(r => r.learnerId)).toEqual([A, B])
     expect(s.sessions[1]!.stepsTotal).toBe(1100)
   })
@@ -52,8 +53,8 @@ describe("buildSummary", () => {
     put(log(A, 0))
     mkdirSync(join(dir, "junk")); writeFileSync(join(dir, "junk", "0.json"), "{}")
     mkdirSync(join(dir, B)); writeFileSync(join(dir, B, "0.json"), "not json")
-    expect(buildSummary(dir).sessions.map(r => r.learnerId)).toEqual([A])
-    expect(buildSummary(join(dir, "nope")).sessions).toEqual([])
+    expect(buildSummary(dir, null).sessions.map(r => r.learnerId)).toEqual([A])
+    expect(buildSummary(join(dir, "nope"), null).sessions).toEqual([])
   })
   it("rows gain cu and lossRatio (the last curve point's predLoss / baselineLoss); null for v1 or without a point", () => {
     const v2 = (id: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => ({
@@ -66,7 +67,7 @@ describe("buildSummary", () => {
     put(log(C, 0))
     const D = "lrn_dddddddddddddddd"
     put(v2(D, 0, { curve: [] }))
-    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    const rows = Object.fromEntries(buildSummary(dir, null).sessions.map(r => [r.learnerId, r]))
     expect(rows[A]).toMatchObject({ cu: 2, final: true })
     expect(rows[A]!.lossRatio).toBeCloseTo(0.75, 12)
     expect(rows[B]).toMatchObject({ cu: 2 })
@@ -76,8 +77,8 @@ describe("buildSummary", () => {
   })
   it("a zero baseline gives lossRatio null, not Infinity", () => {
     put({ ...log(A, 0), schemaVersion: 2, cu: 1, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, curve: [{ cu: 1, steps: 100, predLoss: 0.1, baselineLoss: 0 }], skippedUpdates: 0, restores: 0, lostCU: 0 })
-    expect(buildSummary(dir).sessions[0]!.lossRatio).toBeNull()
-    expect(JSON.parse(JSON.stringify(buildSummary(dir))).sessions[0].lossRatio).toBeNull()
+    expect(buildSummary(dir, null).sessions[0]!.lossRatio).toBeNull()
+    expect(JSON.parse(JSON.stringify(buildSummary(dir, null))).sessions[0].lossRatio).toBeNull()
   })
   it("rows gain heldOutRatio: the latest curve point with a held-out score, loss / baseline; null without one", () => {
     const v2 = (id: string, seq: number, over: Partial<LogFileV2> = {}): LogFileV2 => ({
@@ -92,7 +93,7 @@ describe("buildSummary", () => {
     put(v2(C, 0)) // an older v2 learner: no held-out scores at all
     const D = "lrn_dddddddddddddddd"
     put(v2(D, 0, { curve: [p(1, 100, { loss: 0.2, baseline: 0 })] })) // a zero baseline
-    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    const rows = Object.fromEntries(buildSummary(dir, null).sessions.map(r => [r.learnerId, r]))
     expect(rows[A]!.heldOutRatio).toBeCloseTo(0.75, 12)
     expect(rows[A]!.lossRatio).toBeCloseTo(0.25, 12) // the own-stream ratio stays as it was
     expect(rows[B]!.heldOutRatio).toBeCloseTo(0.5, 12)
@@ -108,16 +109,16 @@ describe("buildSummary", () => {
     put(v2(A, 0, { milestoneSuiteVersion: 1, checkups: [ck(64, ["M1"]), ck(128, ["M1", "M2"])], evalCU: 0 })) // checkups are billed inside evalCU
     put(v2(A, 1)) // newest file has none: the latest checkup on record stands
     put(v2(B, 0)); put(log(B, 1))
-    const rows = Object.fromEntries(buildSummary(dir).sessions.map(r => [r.learnerId, r]))
+    const rows = Object.fromEntries(buildSummary(dir, null).sessions.map(r => [r.learnerId, r]))
     expect(rows[A]!.checkupScore).toEqual({ level: 128, score: 2 })
     expect(rows[B]!.checkupScore).toBeNull()
     // What the gate writes, the page keeps (parseSessionRow's bounds: a log level, a score within the suite).
-    for (const r of buildSummary(dir).sessions) expect(parseSessionRow(JSON.parse(JSON.stringify(r)))!.checkupScore).toEqual(rows[r.learnerId]!.checkupScore)
+    for (const r of buildSummary(dir, null).sessions) expect(parseSessionRow(JSON.parse(JSON.stringify(r)))!.checkupScore).toEqual(rows[r.learnerId]!.checkupScore)
   })
   it("a full score at a large level survives the page's parser (score 6 of suite 1, level 3072)", () => {
     const ck = { level: 3072, steps: 1, passed: ["M1", "M2", "M3", "M4", "M5", "M6"], measures: { M1: 1, M2: 1, M3: 1, M4: 1, M5: 1, M6: 1 }, evalCU: 0 }
     put({ ...log(A, 0), schemaVersion: 2, cu: 4000, condition: "A", widths: { conv1: 8, conv2: 16, enc: 64, hidden: 128 }, curve: [], skippedUpdates: 0, restores: 0, lostCU: 0, milestoneSuiteVersion: 1, checkups: [ck], evalCU: 0 })
-    const row = buildSummary(dir).sessions[0]!
+    const row = buildSummary(dir, null).sessions[0]!
     expect(row.checkupScore).toEqual({ level: 3072, score: 6 })
     expect(parseSessionRow(JSON.parse(JSON.stringify(row)))!.checkupScore).toEqual({ level: 3072, score: 6 })
   })
@@ -140,6 +141,16 @@ describe("buildSummary scores (Plan 05a Task 9)", () => {
     for (const r of noRef.sessions) expect(r.evals).toEqual({ "search-composite@1": { eligible: false, score: null, C: null, H: null } })
     for (const r of scored.sessions) expect(parseSessionRow(JSON.parse(JSON.stringify(r)))!.evals).toEqual(r.evals)
     // Without scoring (as before 05a): no evals key at all.
-    for (const r of buildSummary(dir).sessions) expect("evals" in r).toBe(false)
+    for (const r of buildSummary(dir, null).sessions) expect("evals" in r).toBe(false)
+  })
+})
+
+describe("pinnedScoring (every summary writer's scoring)", () => {
+  it("is the search evaluator config/evaluation.json pins, with its pinned references; its rows carry that key", () => {
+    const repo = fileURLToPath(new URL("../../..", import.meta.url))
+    const s = pinnedScoring(repo)
+    expect(`${s.evaluator.id}@${s.evaluator.version}`).toBe(JSON.parse(readFileSync(join(repo, "config/evaluation.json"), "utf8")).search)
+    put(log(A, 0))
+    expect(Object.keys(buildSummary(dir, s).sessions[0]!.evals!)).toEqual(["search-composite@1"])
   })
 })
