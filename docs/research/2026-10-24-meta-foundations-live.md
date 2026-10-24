@@ -22,7 +22,7 @@
 
 ## Not done yet
 - **The gate folding a life in (plan Task 13 Step 5).** This needs a token in the tab, so the life's PR and the next posterior's `diagnostics.perGenome` are still to come.
-- **A pre-05a forever life resuming as `legacy` (Step 3).** No such tab was open. The resume path is covered by session tests.
+- **A pre-05a forever life resuming as `legacy` (Step 3): since verified live.** The user's tab reloaded onto the new code and resumed `lrn_a4c5ddf56297aa1e`, born 2026-10-22, as a legacy life. Files 3–6 carry `meta.role "legacy"`, and the gate merged them through the new git-based reader in PR #27, using 1 gh call for the PR and 4 for the whole run. Legacy lives are never scored.
 - **The newborn reference.** It is not pinned, so no search life is eligible yet. Next:
   1. Run `?newborns=0-63`, about 4.3 h on one machine.
   2. Collect the files with `tools/eval/collect-newborns` into `data/newborns/`.
