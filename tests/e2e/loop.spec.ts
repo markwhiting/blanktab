@@ -732,6 +732,24 @@ test("the fit absorbs taller text (fonts that set 8% larger, as on another platf
   await expectFits(page, [{ width: 1280, height: 800 }, { width: 1440, height: 900 }], 1.08)
 })
 
+test("on a laptop-height window the right column's prose is clamped, and its \"more\" opens it in full", async ({ page }) => {
+  await setup(page, { knowledge: "ok" })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto(LONG)
+  await expect(page.getByTestId("learner-id")).toHaveText(ID_RE)
+  for (const id of ["curve-help", "short-lives-help"]) {
+    const clipped = () => page.locator(`#${id}`).evaluate(e => e.scrollHeight - e.clientHeight)
+    const more = page.locator(`button[aria-controls="${id}"]`)
+    expect(await clipped(), id).toBeGreaterThan(0)
+    await more.click()
+    await expect(more).toHaveAttribute("aria-expanded", "true")
+    expect(await clipped(), id).toBe(0)
+    await more.click()
+    await expect(more).toHaveText("more")
+    expect(await clipped(), id).toBeGreaterThan(0)
+  }
+})
+
 test("on a phone the LEARNER tab is one scrolling column", async ({ page }) => {
   await setup(page, { knowledge: "ok" })
   await page.setViewportSize({ width: 390, height: 844 })

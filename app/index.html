@@ -149,6 +149,9 @@
     .switch label { font-weight: 650; white-space: nowrap; cursor: pointer; }
     .switch input { margin: 0 4px 0 0; vertical-align: -2px; }
     .switch .muted { flex: 1 1 260px; font-size: 11px; }
+    /* Prose that gives way to the charts on a short window (below): clamped to a line or two, its "more" opens it. */
+    button.more { display: none; }
+    .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
     /* The recipe's "settings" toggle: its summary stays on the recipe's line; opened, one box of capped height scrolls.
        On a laptop or desktop window the box floats over the rows below it, so opening it never squeezes the chart or
        makes the column overflow (the layout's fit); on a phone, where the page scrolls, it sits in the flow. */
@@ -210,7 +213,13 @@
         grid-template-columns: minmax(560px, min(calc((100dvh - var(--chrome) - var(--lower) - 40px) * 1.6), 64%)) minmax(380px, 1fr);
       }
       .stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
-      .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow-y: auto; }
+      .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow-y: auto; container: side / inline-size; }
+      /* A wide right column holds the short stats two to a row (each row of the list is a line the chart would pay for). */
+      @container side (min-width: 520px) {
+        dl.stats.paired { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); }
+        dl.stats.paired dt:not(.pair) { grid-column: 1; }
+        dl.stats.paired dd:not(.pair) { grid-column: 2 / -1; }
+      }
       /* The periphery's figure takes the height the lower row leaves; the canvas is as large as its box allows at 8:5. */
       .periphery-fig { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
       .periphery-box { flex: 1 1 0; min-height: 0; container-type: size; }
@@ -228,6 +237,20 @@
       dd.recipe { position: relative; }
       .settings-box { position: absolute; left: 0; right: 0; top: 100%; z-index: 5; background: var(--canvas-bg); box-shadow: var(--shadow-panel); }
       th { position: sticky; top: 0; background: var(--surface-strong); }
+      /* The right column's prose is what the chart's height pays for, and how many lines it sets depends on the
+         platform's fonts (Linux sets wider, so it wraps more): on a window of a laptop's height it is clamped, so the
+         chart keeps its room whatever the fonts; "more" opens it (and the column may then scroll inside). */
+      @media (max-height: 960px) {
+        .clamp:not(.expanded) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+        .switch .clamp:not(.expanded) { -webkit-line-clamp: 1; line-clamp: 1; }
+        button.more { display: inline; flex: none; }
+      }
+      /* And the right column's gaps tighten on the shortest laptop windows. */
+      @media (max-height: 820px) {
+        .side { gap: 8px; }
+        .side .panel { padding: 10px 14px 8px; }
+        .share { padding-top: 6px; }
+      }
       /* ABOUT: the prose at a reading width, its links beside it. */
       .about { flex: 1 1 auto; min-height: 0; overflow-y: auto; max-width: none; display: grid; grid-template-columns: minmax(0, 640px) max-content; column-gap: 64px; align-content: start; }
       .about-links h2 { margin-top: 2px; }
@@ -289,12 +312,13 @@
         </div>
 
         <div class="side">
-          <dl class="stats">
-            <dt>Learner</dt><dd data-testid="learner-id">starting…</dd>
+          <!-- The short values ("pair") sit two to a row when the column is wide enough; the rest take a row each. -->
+          <dl class="stats paired">
+            <dt class="pair">Learner</dt><dd class="pair" data-testid="learner-id">starting…</dd>
+            <dt class="pair">Speed</dt><dd class="pair" data-testid="rate">…</dd>
+            <dt class="pair">Steps lived</dt><dd class="pair" data-testid="steps">0</dd>
+            <dt class="pair">Compute lived</dt><dd class="pair" data-testid="cu">…</dd>
             <dt>Backend</dt><dd data-testid="backend">choosing…</dd>
-            <dt>Steps lived</dt><dd data-testid="steps">0</dd>
-            <dt>Compute lived</dt><dd data-testid="cu">…</dd>
-            <dt>Speed</dt><dd data-testid="rate">…</dd>
             <dt>Status</dt><dd data-testid="status">…</dd>
             <dt>Caregiver</dt><dd data-testid="caregiver">…</dd>
             <dt>Sessions</dt><dd data-testid="sessions">loading…</dd>
@@ -314,7 +338,8 @@
           <!-- The short-lives switch (decisions 0019, 0022): this browser's, off by default. -->
           <div class="switch" data-testid="short-lives-switch">
             <label><input type="checkbox" data-testid="short-lives" aria-describedby="short-lives-help"> Short lives</label>
-            <span class="muted" id="short-lives-help">End each life at its 2,048 CU checkup and start a newborn (about every 30 minutes). The meta-learner only gets results at a useful rate from tabs with this on.</span>
+            <span class="muted clamp" id="short-lives-help">End each life at its 2,048 CU checkup and start a newborn (about every 30 minutes). The meta-learner only gets results at a useful rate from tabs with this on.</span>
+            <button type="button" class="link more" data-more aria-controls="short-lives-help" aria-expanded="false">more</button>
           </div>
 
           <!-- The token form, folded to one line until it is opened: the learner runs either way. -->
@@ -340,8 +365,9 @@
           <p class="life" data-testid="update" role="status" hidden></p>
 
           <section class="panel surface learning" aria-labelledby="learning-title">
-            <h2 id="learning-title">Is it learning?</h2>
-            <p class="muted">At every step it guesses what it will see next. Here those guesses are scored
+            <div class="panel-head"><h2 id="learning-title">Is it learning?</h2>
+              <button type="button" class="link more" data-more aria-controls="curve-help" aria-expanded="false">more</button></div>
+            <p class="muted clamp" id="curve-help">At every step it guesses what it will see next. Here those guesses are scored
               <strong data-testid="heldout-label">on a fixed test it never trains on</strong>: 64 moments of a differently laid-out
               copy of its world, recorded at its birth. The lazy guess is that nothing changes; a learner that learns ends up below it.</p>
             <canvas id="curve" data-testid="curve" data-points="0" width="360" height="96" role="img"

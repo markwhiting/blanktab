@@ -230,6 +230,15 @@ export function createUi(): Ui {
     drawMilestones(milestonesCanvas, checkups)
   }
   setupTabs(redraw)
+  // Clamped prose (shown in full only when asked, on a short window): its "more" button opens and closes it.
+  for (const more of document.querySelectorAll<HTMLButtonElement>("button[data-more]")) {
+    const target = $<HTMLElement>(`#${more.getAttribute("aria-controls")!}`)
+    more.addEventListener("click", () => {
+      const open = target.classList.toggle("expanded")
+      more.setAttribute("aria-expanded", String(open))
+      more.textContent = open ? "less" : "more"
+    })
+  }
   // A resize changes the canvases' CSS boxes: redraw at the new size (coalesced to one frame; a hidden canvas has no size and is skipped).
   let frame = 0
   const ro = new ResizeObserver(() => {
