@@ -13,7 +13,7 @@ World staging (0001) · single repo (0002) · PR flow from day one, built from s
 | Q12 | **What drives the learner to act**: its built-in objectives. | Predict what happens next, plus curiosity (seek situations where prediction is improving). | open |
 | Q13 | **Learner architecture v1**: perception, recurrent state, fast/slow plasticity, action selection. | Small conv encoder → recurrent core → action head; fast weights or adapters as the fast tier. | open |
 | Q4 | **Consolidation mechanism**: the decision it makes, its feedback signal, and the fixed-policy comparison (conditions A/B/C). | | open |
-| Q14 | **What "knowledge" holds and how a session uses it** ("what do I do given what I know"). | One meta-learner over a learning genome (0018). | reshaped by 0018 |
+| Q14 | **What "knowledge" holds and how a session uses it** ("what do I do given what I know"). | One meta-learner over a learning genome (0018); evaluators, genome schema and 05a calls (0020–0022). | reshaped by 0018; 05a live |
 | Q15 | **"From scratch" scope**: our own infra only, or also our own tensor/autodiff and WebGPU code (no ML libraries)? | | open |
 | Q16 | **Observation and action spec**: resolution, frame rate, cursor model, key set. | Low-res color frames (e.g. 64–128 px), relative cursor moves, click, scroll, a small key set; room to grow. | open |
 | Q17 | **Persistence and lifecycle**: saving learner state across closed tabs and restarts. | IndexedDB/OPFS checkpoints; one learner identity per browser profile, resumable. | open |
