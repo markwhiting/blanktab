@@ -20,6 +20,9 @@ import { collectLives } from "../eval/lives.ts"
 export const POSTERIOR_PATH = "data/meta/posterior.json"
 export const CALIBRATION_PATH = "data/meta/calibration.json"
 export const POSTERIOR_INDEX_PATH = "data/meta/posterior-index.jsonl"
+/** Counts that move with every birth (born, checked, flags, reasons): kept out of posterior.json, so its bytes, and
+ * the sha every tab seeds its draw with, change only when the rows, the mode, the looks or the design change. */
+export const DIAGNOSTICS_PATH = "data/meta/diagnostics.json"
 
 /** The calibration design's Sobol seed (spec §4.6). */
 const CALIB_SEED = "calib/1"
@@ -45,10 +48,11 @@ export interface MetaInput {
   /** When this build ran (ISO 8601): written only into the index line. The caller reads the clock; buildMeta never does. */
   builtAt: string
   previous: { calibration: CalibrationState | null; posteriorText: string | null }
-  posteriorsBySha: ReadonlyMap<string, string> // every posterior.json in main's history, by sha256 of its bytes
+  /** posterior.json versions from main's history, by sha256 of their bytes: at least every one a life names. */
+  posteriorsBySha: ReadonlyMap<string, string>
 }
 export interface MetaFiles {
-  "data/meta/posterior.json": string; "data/meta/calibration.json": string
+  "data/meta/posterior.json": string; "data/meta/calibration.json": string; "data/meta/diagnostics.json": string
   /** One JSON line (no newline) for posterior-index.jsonl when the posterior's bytes changed, else null. */
   indexLine: string | null
 }
@@ -101,15 +105,29 @@ export function parseCalibration(text: string): CalibrationState {
 }
 
 /**
- * Every posterior.json main has committed, by the sha256 of its bytes: `git log --format=%H --diff-filter=d -- <path>`
- * (commits that delete the file have no bytes), then `git show <c>:<path>` for each. A tab's posteriorSha names one.
+ * The posterior.json versions main committed whose sha256 is in `wanted`, by sha: `git log --format=%H
+ * --diff-filter=d -- <path>` (commits that delete the file have no bytes), newest first, then `git show <c>:<path>`
+ * until every wanted sha is found or the history ends. A sha never found is absent (its lives are flagged unknown).
  */
-export function posteriorHistory(git: (args: string[]) => string): Map<string, string> {
+export function posteriorHistory(git: (args: string[]) => string, wanted: ReadonlySet<string>): Map<string, string> {
   const out = new Map<string, string>()
+  if (wanted.size === 0) return out
   const commits = git(["log", "--format=%H", "--diff-filter=d", "--", POSTERIOR_PATH]).split("\n").map(s => s.trim()).filter(Boolean)
   for (const c of commits) {
     const text = git(["show", `${c}:${POSTERIOR_PATH}`])
-    out.set(createHash("sha256").update(text, "utf8").digest("hex"), text)
+    const sha = createHash("sha256").update(text, "utf8").digest("hex")
+    if (wanted.has(sha)) out.set(sha, text)
+    if (out.size === wanted.size) break
+  }
+  return out
+}
+
+/** The posteriorShas the lives under `runsDir` were born with (their first meta block's), for posteriorHistory. */
+export function wantedPosteriors(runsDir: string): Set<string> {
+  const out = new Set<string>()
+  for (const life of collectLives(runsDir)) {
+    const sha = birthOf(life.files)?.meta.posteriorSha
+    if (typeof sha === "string") out.add(sha)
   }
   return out
 }
@@ -180,8 +198,10 @@ async function verify(learnerId: string, meta: MetaBlock, widthsClass: "gpu" | "
 /** The lives' rows and counts under the pinned search evaluator, after re-verification. */
 interface Lives {
   rows: { life: LifeInput; meta: MetaBlock; out: EvalOutput }[]
-  checked: number; flagged: { learnerId: string; reason: string }[]; mismatched: string[]
-  perGenome: { genomeSha: string; born: number; rows: number; failed: number; abandoned: number }[]
+  checked: number; flagged: { learnerId: string; reason: string }[]
+  /** Verified lives whose logged genome differs from the recomputed one, and those of them that are rows. */
+  mismatched: string[]; mismatchedRows: string[]
+  perGenome: { genomeSha: string; born: number; rows: number; failed: number; abandoned: number; failedRows: number }[]
   unscored: Record<string, number>
 }
 
@@ -198,8 +218,8 @@ async function readLives(input: MetaInput, calibration: CalibrationState, centre
   const designShas = calibration.genomes.map(g => g.genomeSha)
   const ctx = { space, centre, centreSha, design: new Set(designShas), posteriors }
   const out: Lives = {
-    rows: [], checked: 0, flagged: [], mismatched: [], unscored: {},
-    perGenome: designShas.map(genomeSha => ({ genomeSha, born: 0, rows: 0, failed: 0, abandoned: 0 })),
+    rows: [], checked: 0, flagged: [], mismatched: [], mismatchedRows: [], unscored: {},
+    perGenome: designShas.map(genomeSha => ({ genomeSha, born: 0, rows: 0, failed: 0, abandoned: 0, failedRows: 0 })),
   }
   for (const life of collectLives(input.runsDir)) { // sorted by learnerId
     const birth = birthOf(life.files)
@@ -207,6 +227,8 @@ async function readLives(input: MetaInput, calibration: CalibrationState, centre
     // cannot be recomputed against this space, and are never rows of this fit.
     if (!birth || birth.meta.role !== "search" || birth.meta.genomeSchema !== space.schemaVersion) continue
     const widthsClass = widthsClassOf(birth.file.widths)
+    // TODO(05b): recompute with the centre in force at this birth (the posterior's centre, or genome.json at the
+    // birth's knowledge), not main's current one. Exact in 05a, where no promotion moves the centre.
     const checked = await verify(life.learnerId, birth.meta, widthsClass, ctx)
     out.checked++
     if (checked.reason !== null) { out.flagged.push({ learnerId: life.learnerId, reason: checked.reason }); continue }
@@ -215,8 +237,10 @@ async function readLives(input: MetaInput, calibration: CalibrationState, centre
     const scored: EvalOutput = search.evaluateLife(life, refs)
     const isRow = scored.eligible && typeof scored.score === "number" && widthsClass === "gpu" && ROW_METHODS.includes(birth.meta.method)
       && life.files.every(f => !isV2(f) || !f.meta || f.meta.genomeSchema === space.schemaVersion)
-    if (isRow) out.rows.push({ life, meta: birth.meta, out: scored })
-    else { const why = scored.eligible ? "not a row of this fit" : scored.reason ?? "ineligible"; out.unscored[why] = (out.unscored[why] ?? 0) + 1 }
+    if (isRow) {
+      out.rows.push({ life, meta: birth.meta, out: scored })
+      if (checked.genomeMismatch) out.mismatchedRows.push(life.learnerId)
+    } else { const why = scored.eligible ? "not a row of this fit" : scored.reason ?? "ineligible"; out.unscored[why] = (out.unscored[why] ?? 0) + 1 }
 
     const g = birth.meta.method === "calibrate" ? designShas.indexOf(birth.meta.genomeSha) : -1
     if (g < 0) continue
@@ -228,7 +252,7 @@ async function readLives(input: MetaInput, calibration: CalibrationState, centre
     const pg = out.perGenome[g]!
     pg.born++
     if (isRow) pg.rows++
-    if (end === "failed") pg.failed++
+    if (end === "failed") { pg.failed++; if (isRow) pg.failedRows++ }
     else if (last.final && !reachedBudget) pg.abandoned++
   }
   return out
@@ -245,8 +269,12 @@ function calibrationGroups(rows: Lives["rows"]): Record<string, LifeInput[]> {
 function nextLook(c: CalibrationState, rows: Lives["rows"], input: MetaInput): CalibrationState {
   const n = c.looks.length
   const calib = rows.filter(r => r.meta.method === "calibrate")
+  if (c.outcome !== "pending" || n >= SIGNAL_LOOKS.length) return c
+  // Each look needs its scheduled size, and as many new lives since the last look as the schedule spaces them, so a
+  // burst of merges cannot bring two looks close together (controller ruling).
   const lastLives = n > 0 ? c.looks[n - 1]!.lives : 0
-  if (c.outcome !== "pending" || n >= SIGNAL_LOOKS.length || calib.length < SIGNAL_LOOKS[n]! || calib.length <= lastLives) return c
+  const spacing = SIGNAL_LOOKS[n]! - (n > 0 ? SIGNAL_LOOKS[n - 1]! : 0)
+  if (calib.length < Math.max(SIGNAL_LOOKS[n]!, lastLives + spacing)) return c
   const signal = getEvaluator(input.config.signal)
   if (signal.kind !== "cohort" || !signal.evaluateCohort) throw new Error(`${input.config.signal} is not a cohort evaluator`)
   const output = signal.evaluateCohort(calibrationGroups(rows), input.refs, cohortContext(input.config))
@@ -260,9 +288,14 @@ function nextLook(c: CalibrationState, rows: Lives["rows"], input: MetaInput): C
   return { ...c, looks, repeats: REPEATS_MORE } // paused, on the page; births keep calibrating (plan conflict 2)
 }
 
+const mismatch = (learnerIds: string[], of: number) => ({ count: learnerIds.length, rate: of > 0 ? learnerIds.length / of : 0, learnerIds })
+
 const modeOf = (c: CalibrationState): Mode => (c.outcome === "signal" ? "search" : c.outcome === "flat" ? "flat" : "calibrate")
 
-/** data/meta/posterior.json and calibration.json from main's merged logs, and the index line when the posterior changed. */
+/**
+ * data/meta/posterior.json, calibration.json and diagnostics.json from main's merged logs, and the index line when the
+ * posterior changed. The posterior holds only what follows from the rows (and the mode, looks and design).
+ */
 export async function buildMeta(input: MetaInput): Promise<MetaFiles> {
   const { space, centre, config } = input
   const centreSha = await genomeSha(space.schemaVersion, centre)
@@ -281,12 +314,9 @@ export async function buildMeta(input: MetaInput): Promise<MetaFiles> {
     calibration: { genomes: calibration.genomes, need: lives.perGenome.map(g => Math.max(0, calibration.repeats - g.rows)) },
     models: {}, incumbent: null, confirmation: null,
     diagnostics: {
-      perGenome: lives.perGenome,
-      verify: {
-        checked: lives.checked, ineligible: lives.flagged,
-        genomeMismatch: { count: lives.mismatched.length, rate: lives.checked > 0 ? lives.mismatched.length / lives.checked : 0, learnerIds: lives.mismatched },
-      },
-      unscored: lives.unscored,
+      perGenome: lives.perGenome.map(g => ({ genomeSha: g.genomeSha, rows: g.rows, failed: g.failedRows })),
+      // Rows kept on a logged genome that differs from the recomputed draw (spec §7.4).
+      genomeMismatch: mismatch(lives.mismatchedRows, lives.rows.length),
     },
     page: {
       eligibleLives: lives.rows.length, lastPromotion: null, calibrationLives: calibRows,
@@ -310,5 +340,11 @@ export async function buildMeta(input: MetaInput): Promise<MetaFiles> {
   const indexLine = changed
     ? JSON.stringify({ posteriorSha: await sha256Hex(new TextEncoder().encode(posteriorText)), sourceCommit: input.sourceCommit, builtAt: input.builtAt })
     : null
-  return { [POSTERIOR_PATH]: posteriorText, [CALIBRATION_PATH]: serialise(calibration), indexLine } as MetaFiles
+  const diagnostics = {
+    schemaVersion: 1, evaluator: config.search,
+    perGenome: lives.perGenome.map(g => ({ genomeSha: g.genomeSha, born: g.born, rows: g.rows, failed: g.failed, abandoned: g.abandoned })),
+    verify: { checked: lives.checked, ineligible: lives.flagged, genomeMismatch: mismatch(lives.mismatched, lives.checked) },
+    unscored: lives.unscored,
+  }
+  return { [POSTERIOR_PATH]: posteriorText, [CALIBRATION_PATH]: serialise(calibration), [DIAGNOSTICS_PATH]: serialise(diagnostics), indexLine } as MetaFiles
 }

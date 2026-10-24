@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -13,7 +14,8 @@ import { parseNewbornReference, SIGNAL_LOOKS, type NewbornReference } from "@bla
 import { CPU, checkup, endedLife, lid, scoredLife, typicalLife } from "../../../packages/evaluators/test/fixtures/build.ts"
 import { loadEvalConfig } from "../../eval/config.ts"
 import { collectLives } from "../../eval/lives.ts"
-import { buildMeta, parseCalibration, posteriorHistory, type CalibrationState, type MetaFiles, type MetaInput } from "../meta.ts"
+import { FIXTURE_ENV, makeFixture, type Fixture } from "./git-fixture.ts"
+import { buildMeta, parseCalibration, posteriorHistory, wantedPosteriors, type CalibrationState, type MetaFiles, type MetaInput } from "../meta.ts"
 
 const REPO = fileURLToPath(new URL("../../..", import.meta.url))
 const GOLDEN = fileURLToPath(new URL("./fixtures/meta/", import.meta.url))
@@ -26,6 +28,7 @@ const commit = (n: number) => n.toString(16).padStart(40, "0")
 const BUILT_AT = "2026-10-23T12:00:00.000Z"
 const POSTERIOR = "data/meta/posterior.json"
 const CALIBRATION = "data/meta/calibration.json"
+const DIAGNOSTICS = "data/meta/diagnostics.json"
 
 const shaOf = (text: string) => sha256Hex(new TextEncoder().encode(text))
 
@@ -59,7 +62,12 @@ const posteriorOf = (out: MetaFiles): Posterior => {
 }
 const calibrationOf = (out: MetaFiles): CalibrationState => parseCalibration(out[CALIBRATION])
 interface Verify { checked: number; ineligible: { learnerId: string; reason: string }[]; genomeMismatch: { count: number; rate: number; learnerIds: string[] } }
-const verifyOf = (out: MetaFiles) => (posteriorOf(out).diagnostics as { verify: Verify }).verify
+interface Diagnostics {
+  schemaVersion: 1; evaluator: string; verify: Verify; unscored: Record<string, number>
+  perGenome: { genomeSha: string; born: number; rows: number; failed: number; abandoned: number }[]
+}
+const diagOf = (out: MetaFiles) => JSON.parse(out[DIAGNOSTICS]) as Diagnostics
+const verifyOf = (out: MetaFiles) => diagOf(out).verify
 
 /** How a test life scores: its M2 measure and held-out ratio. */
 type Effect = (k: number, calibrationIndex: number | undefined) => { m2: number; ratio: number }
@@ -294,6 +302,46 @@ describe("buildMeta (spec §4.6, §7.2, §7.4)", () => {
     const p = posteriorOf(out)
     // Rows: the 10 honest calibration lives, the uniform life (kept on its logged genome) and the offline centre life.
     expect(p.page).toMatchObject({ eligibleLives: 12, calibrationLives: 10 })
+    // The posterior counts mismatches among its rows only; diagnostics.json among every life checked.
+    expect((p.diagnostics as { genomeMismatch: unknown }).genomeMismatch).toEqual({ count: 1, rate: 1 / 12, learnerIds: [uniform.learnerId] })
+  })
+
+  it("re-verification: an unreadable posterior and a mismatched drawSeed are flagged; a life of another genome schema is skipped", async () => {
+    const w = world()
+    const first = await build(w)
+    const garbage = "not a posterior\n"
+    const garbageSha = await shaOf(garbage)
+    w.history.set(garbageSha, garbage)
+    const unreadable = await bornLife(first[POSTERIOR], { alter: m => ({ ...m, posteriorSha: garbageSha }) })
+    const seed = await bornLife(first[POSTERIOR], { alter: m => ({ ...m, drawSeed: (m.drawSeed! + 1) >>> 0 }) })
+    const other = await bornLife(first[POSTERIOR], { alter: m => ({ ...m, genomeSchema: 2 }) })
+    expect(collectLives(runs).map(l => l.learnerId)).toContain(other.learnerId) // it parses, and is merged data
+    const v = verifyOf(await build(w))
+    expect(v.ineligible).toEqual([
+      { learnerId: unreadable.learnerId, reason: "posterior unreadable" },
+      { learnerId: seed.learnerId, reason: `drawSeed ${seed.meta.drawSeed}, recomputed ${seed.draw.drawSeed}` },
+    ])
+    expect(v.checked).toBe(2) // the other-schema life is neither checked nor a row
+    expect(posteriorOf(w.last!).page.eligibleLives).toBe(0)
+  })
+
+  it("a burst of merges cannot bring looks close together: each look needs the schedule's spacing since the last", async () => {
+    const w = world()
+    await build(w)
+    await grow(w, 40, noise) // 40 at once: look 1 runs at 40, not 30
+    let c = calibrationOf(await build(w))
+    expect(c.looks.map(l => [l.look, l.lives, l.output.score])).toEqual([[1, 40, 0]])
+    await grow(w, 14, noise) // 54 ≥ 45, but only 14 since look 1: it waits for 40 + 15
+    expect(calibrationOf(await build(w)).looks).toHaveLength(1)
+    await grow(w, 1, noise)
+    c = calibrationOf(await build(w))
+    expect(c.looks.map(l => [l.look, l.lives])).toEqual([[1, 40], [2, 55]])
+    await grow(w, 14, noise)
+    expect(calibrationOf(await build(w)).looks).toHaveLength(2) // 69 < 55 + 15
+    await grow(w, 1, noise)
+    c = calibrationOf(await build(w))
+    expect(c.looks.map(l => [l.look, l.lives, l.output.score])).toEqual([[1, 40, 0], [2, 55, 0], [3, 70, 0]])
+    expect(c.outcome).toBe("flat")
   })
 
   it("a newborn, legacy or cpu life is never a row", async () => {
@@ -342,19 +390,21 @@ describe("buildMeta (spec §4.6, §7.2, §7.4)", () => {
     const out = await build(w)
     const p = posteriorOf(out)
     expect(p.page).toMatchObject({ eligibleLives: 1, calibrationLives: 1 })
-    const per = (p.diagnostics as { perGenome: { genomeSha: string; born: number; rows: number; failed: number; abandoned: number }[] }).perGenome
+    const per = diagOf(out).perGenome
     const of = (sha: string) => per.find(g => g.genomeSha === sha)!
     expect(of(failed.meta.genomeSha)).toMatchObject({ failed: 1 })
     expect(of(orphan.meta.genomeSha)).toMatchObject({ abandoned: 1 })
     expect(per.reduce((s, g) => s + g.born, 0)).toBe(2)
     expect(per.reduce((s, g) => s + g.rows, 0)).toBe(1)
-    expect((p.diagnostics as { unscored: Record<string, number> }).unscored).toEqual({ abandoned: 1 })
+    expect(diagOf(out).unscored).toEqual({ abandoned: 1 })
+    // The posterior carries only what follows from the rows: the failed row, not the abandoned birth.
+    expect((p.diagnostics as { perGenome: unknown[] }).perGenome).toContainEqual({ genomeSha: failed.meta.genomeSha, rows: 1, failed: 1 })
     // A short life that ended at its budget is not abandoned, even when nothing can score it (no reference pinned).
     const short = await bornLife(first[POSTERIOR])
     const end = short.files[short.files.length - 1]!
     put({ ...end, final: true, meta: { ...end.meta!, end: "budget" } })
     const unscored = await build(w, { refs: {} })
-    const perNone = (posteriorOf(unscored).diagnostics as { perGenome: { born: number; rows: number; abandoned: number }[] }).perGenome
+    const perNone = diagOf(unscored).perGenome
     expect(perNone.reduce((s, g) => s + g.abandoned, 0)).toBe(1)
     expect(perNone.reduce((s, g) => s + g.born, 0)).toBe(3)
     expect(posteriorOf(unscored).page.eligibleLives).toBe(0)
@@ -379,6 +429,15 @@ describe("buildMeta (spec §4.6, §7.2, §7.4)", () => {
     const later = await build(w)
     expect(later.indexLine).toBeNull()
     expect(later[POSTERIOR]).toBe(before[POSTERIOR])
+    // A new birth that is not yet a row (its first file only) moves the diagnostics, never the posterior.
+    const fresh = await bornLife(w.previous.posteriorText, { effect: planted })
+    rmSync(join(runs, fresh.learnerId), { recursive: true })
+    put(fresh.files[0]!)
+    const born = await build(w)
+    expect(born[POSTERIOR]).toBe(before[POSTERIOR])
+    expect(born.indexLine).toBeNull()
+    expect(diagOf(born).verify.checked).toBe(diagOf(later).verify.checked + 1)
+    expect(diagOf(born).perGenome.reduce((s, g) => s + g.born, 0)).toBe(diagOf(later).perGenome.reduce((s, g) => s + g.born, 0) + 1)
     // A new row changes the posterior; its index line names the new commit.
     await bornLife(w.previous.posteriorText, { effect: planted })
     const changed = await build(w)
@@ -391,7 +450,7 @@ describe("buildMeta (spec §4.6, §7.2, §7.4)", () => {
     await build(w)
     await grow(w, 30, planted)
     const out = await build(w)
-    for (const text of [out[POSTERIOR], out[CALIBRATION]]) {
+    for (const text of [out[POSTERIOR], out[CALIBRATION], out[DIAGNOSTICS]]) {
       expect(text.endsWith("}\n")).toBe(true)
       expect(text.endsWith("\n\n")).toBe(false)
       expect(text.split("\n").filter(l => /[ \t]+$/.test(l))).toEqual([])
@@ -427,20 +486,81 @@ describe("buildMeta (spec §4.6, §7.2, §7.4)", () => {
 })
 
 describe("posteriorHistory", () => {
-  it("maps the sha256 of every committed posterior.json to its bytes, skipping commits that delete it", async () => {
-    const texts: Record<string, string> = { c1: '{"a":1}\n', c2: '{"a":2}\n' }
-    const calls: string[][] = []
+  it("resolves only the wanted shas, newest first, stopping once all are found; skips commits that delete the file", async () => {
+    const texts: Record<string, string> = { c1: '{"a":1}\n', c2: '{"a":2}\n', c3: '{"a":3}\n' }
+    const sha = Object.fromEntries(await Promise.all(Object.entries(texts).map(async ([c, t]) => [c, await shaOf(t)] as const)))
+    let calls: string[][] = []
     const git = (args: string[]) => {
       calls.push(args)
-      if (args[0] === "log") return "c2\nc1\n"
+      if (args[0] === "log") return "c3\nc2\nc1\n"
       if (args[0] === "show") return texts[args[1]!.split(":")[0]!]!
       throw new Error(`unexpected git ${args.join(" ")}`)
     }
-    const m = posteriorHistory(git)
-    expect([...m.values()].sort()).toEqual(['{"a":1}\n', '{"a":2}\n'])
-    for (const [sha, text] of m) expect(sha).toBe(await shaOf(text))
+    const shows = () => calls.filter(a => a[0] === "show").map(a => a[1])
+    const m = posteriorHistory(git, new Set([sha.c2!]))
+    expect([...m]).toEqual([[sha.c2, texts.c2]])
     expect(calls[0]).toEqual(["log", "--format=%H", "--diff-filter=d", "--", POSTERIOR])
-    expect(calls.slice(1)).toEqual([["show", `c2:${POSTERIOR}`], ["show", `c1:${POSTERIOR}`]])
-    expect(posteriorHistory(() => "").size).toBe(0)
+    expect(shows()).toEqual([`c3:${POSTERIOR}`, `c2:${POSTERIOR}`]) // c1 is never read
+    calls = []
+    const both = posteriorHistory(git, new Set([sha.c1!, sha.c3!]))
+    expect([...both.keys()].sort()).toEqual([sha.c1, sha.c3].sort())
+    calls = []
+    expect(posteriorHistory(git, new Set(["9".repeat(64)])).size).toBe(0) // walks it all, finds nothing
+    expect(shows()).toHaveLength(3)
+    calls = []
+    expect(posteriorHistory(git, new Set()).size).toBe(0)
+    expect(calls).toEqual([]) // nothing wanted: no git at all
   })
+
+  it("wantedPosteriors lists the posteriorShas lives were born with", async () => {
+    const w = world()
+    const first = await build(w)
+    await bornLife(first[POSTERIOR])
+    await bornLife(null)
+    expect([...wantedPosteriors(runs)]).toEqual([await shaOf(first[POSTERIOR])])
+  })
+})
+
+describe("meta-cli (a checkout of main in a temp git repo)", () => {
+  let fx: Fixture
+  beforeEach(() => { fx = makeFixture() })
+  afterEach(() => { fx.cleanup() })
+  const cli = () => execFileSync(join(REPO, "node_modules/.bin/tsx"), [join(REPO, "tools/gate/meta-cli.ts")], {
+    cwd: fx.work, encoding: "utf8", env: { ...process.env, ...FIXTURE_ENV }, stdio: ["ignore", "pipe", "pipe"],
+  }).trim()
+  const inWork = (rel: string) => readFileSync(join(fx.work, rel), "utf8")
+  const runFiles = (learnerId: string) => Object.fromEntries(
+    readdirSync(join(runs, learnerId)).map(n => [`data/runs/${learnerId}/${n}`, readFileSync(join(runs, learnerId, n), "utf8")]),
+  )
+
+  it("writes data/meta, resolves a life's posterior from history, and prints changed=true|false", async () => {
+    fx.commitMain({
+      "config/evaluation.json": readFileSync(join(REPO, "config/evaluation.json"), "utf8"),
+      "knowledge/genome.json": readFileSync(join(REPO, "knowledge/genome.json"), "utf8"),
+    })
+    const offline = await bornLife(null)
+    fx.commitMain(runFiles(offline.learnerId))
+    expect(cli()).toBe("changed=true")
+    const posterior = inWork(POSTERIOR)
+    expect(parsePosterior(posterior)?.mode).toBe("calibrate")
+    expect(JSON.parse(inWork(DIAGNOSTICS)).verify).toMatchObject({ checked: 1, ineligible: [] })
+    const index = inWork("data/meta/posterior-index.jsonl").split("\n").filter(Boolean)
+    expect(index).toHaveLength(1)
+    expect(JSON.parse(index[0]!).posteriorSha).toBe(await shaOf(posterior))
+    expect(cli()).toBe("changed=false")
+
+    // The gate commits data/meta (Task 11); a tab is born under that posterior and its log merges.
+    const meta = Object.fromEntries(["posterior.json", "calibration.json", "diagnostics.json", "posterior-index.jsonl"].map(n => [`data/meta/${n}`, inWork(`data/meta/${n}`)]))
+    rmSync(join(fx.work, "data/meta"), { recursive: true })
+    fx.commitMain(meta)
+    const calib = await bornLife(posterior)
+    expect(calib.meta.method).toBe("calibrate")
+    fx.commitMain(runFiles(calib.learnerId))
+    // No newborn reference in this checkout, so no row changes: the posterior keeps its bytes, the diagnostics move.
+    expect(cli()).toBe("changed=true")
+    expect(inWork(POSTERIOR)).toBe(posterior)
+    expect(JSON.parse(inWork(DIAGNOSTICS)).verify).toMatchObject({ checked: 2, ineligible: [] }) // its posterior was found
+    expect(inWork("data/meta/posterior-index.jsonl").split("\n").filter(Boolean)).toHaveLength(1)
+    expect(cli()).toBe("changed=false")
+  }, 60_000)
 })
