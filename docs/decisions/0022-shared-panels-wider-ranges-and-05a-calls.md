@@ -113,6 +113,18 @@ Plan 05a builds the meta-learner's foundations (0018, 0019; spec `docs/specs/202
 - **The reference file gains an optional, strict `provenance`**: `{ codeSha, browser, machine, date }`. No evaluator reads it, so no evaluator version changes. The codeSha must be one for all counted lives ("dev" is allowed with a warning). The date is the UTC date of the latest file. The browser and machine class are given on the command line, because a log cannot say them. `--check` takes them from the committed file.
 - **`rescore.ts`** scores only life evaluators. Its references are the pinned ones; a candidate that needs another reference finds it absent.
 
+### The gate's data/meta build (Task 10) [agent]
+
+- **Byte-stable files.** `posterior.json` and `calibration.json` are `JSON.stringify` with every object's keys sorted, a one-space indent and a final newline. Neither holds a time. `builtAt` is passed in by `meta-cli.ts` (its one clock read) and goes only into the `posterior-index.jsonl` line.
+- **Unchanged content keeps its bytes.** If the new posterior differs from the previous one only in `sourceCommit`, the previous bytes are kept, old `sourceCommit` included, and no index line is written. The posterior changes when its rows, its need, its mode or its diagnostics change (a new birth changes `perGenome.born`).
+- **A calibration built for other pins is refused, never restarted by the gate.** If `calibration.json` names another search evaluator, signal check or genome schema than main's, the build throws and nothing is written. Restarting calibration is a recorded decision that removes the file. The kept design genomes are re-checked against the space and their shas on every build.
+- **Looks.** At most one look per build, and only with more calibration rows than the previous look had. An ineligible signal-check result (too few genomes or lives) records nothing; the next build tries again.
+- **Re-verification goes slightly beyond the brief.** Besides an unknown `posteriorSha`, a mismatched `method` or `evalPanel`, and a calibrate genome outside the design, a row is also lost for a mismatched `drawSeed`, a posterior whose bytes do not parse, and a logged genome outside the space or not matching its `genomeSha` (spec §7.4 keeps a genome-mismatch row only when both hold). Flagged lives are listed in `diagnostics.verify.ineligible`, with the reason; their logs are kept.
+- **What the recomputation uses.** The learner's widths class comes from the widths its first meta-bearing file logged. The space and centre are main's current `knowledge/`. That is exact in 05a, where no promotion moves the centre; 05b, which promotes, must recompute each draw with the centre in force at that birth.
+- **Who is checked.** Every life whose first `meta` has role `search` at main's genome schema, CPU lives included (they are draws, though never rows). Other schemas cannot be recomputed against this space and are never rows of this fit.
+- **Counts.** `perGenome` has one entry per design genome, over verified `calibrate` lives that log it: `born`, `rows`, `failed` (final `end: "failed"`) and `abandoned` (final, not failed, without its budget checkup). `need` counts rows only, so lives still running are not subtracted. `diagnostics.unscored` counts why verified search lives are not rows (the search evaluator's reasons). `page.calibrationTarget` is the next look's size (30, 45, 60) while calibrating, and the deciding look's once decided.
+- **Cost if wrong:** each is a gate-side rule over merged data; changing one rebuilds `data/meta` from the same logs.
+
 ## Alternatives considered
 
 - **Keep today's spans.** The search would have almost nothing to explore.
