@@ -73,8 +73,11 @@ export type FromWorker =
   | { type: "meta"; meta: MetaBlock }
   /** This life logs no meta block, and why (no genome files, or the session refused every block: a test knob). */
   | { type: "unlabelled"; reason: string }
-  /** Newborn reference mode: newborn `k` (learner `learnerId`) has started, or its file is in the outbox (`done`). */
-  | { type: "newborn"; k: number; learnerId: string; done: boolean }
+  /**
+   * Newborn reference mode: newborn `k` (learner `learnerId`) has started, or its file is in the outbox (`done`, with
+   * the panel its file records).
+   */
+  | { type: "newborn"; k: number; learnerId: string; done: boolean; evalPanel?: number }
   /** Newborn reference mode: every newborn asked for is done. */
   | { type: "newbornsDone" }
   /** The life stopped at a forced save asked with `halt`: its checkpoint is current; the page reloads onto it. */

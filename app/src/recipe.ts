@@ -79,6 +79,10 @@ export function metaLineOf(k: Pick<Knowledge, "meta">): string {
   return metaStateText(k.meta.posteriorText === null ? null : parsePosterior(k.meta.posteriorText))
 }
 
+/** The meta-learner line in newborn reference mode (?newborns=a-b): no draw happens in this tab. */
+export const NEWBORN_RUN_TEXT =
+  "Newborn reference run: no draw here. Each newborn is the current recipe, untrained, checked once to set the baseline the score is measured against."
+
 /** The recipe line of a life that logs no meta block (no genome files, or a test knob contradicts its genome). */
 export const unlabelledText = (reason: string) => `the default settings, not counted (${reason})`
 

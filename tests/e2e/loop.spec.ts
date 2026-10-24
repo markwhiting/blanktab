@@ -698,6 +698,16 @@ async function expectFits(page: Page, sizes: { width: number; height: number }[]
       if (name === "Learner") {
         expect(f.bottomGap, at).toBeLessThanOrEqual(44) // only the footer's links under the panels
         expect(f.innerOverflow, at).toBe(0) // and neither column scrolls inside either
+        // The recipe's "settings" toggle, opened: its box scrolls on its own; the chart keeps room and nothing overflows.
+        await page.getByTestId("genome").locator("summary").click()
+        await expect(page.getByTestId("settings-box")).toBeVisible()
+        const open = await fit()
+        const curveHeight = await page.getByTestId("curve").evaluate(c => c.clientHeight)
+        expect(open.vScroll, `${at}, settings open`).toBeLessThanOrEqual(0)
+        expect(open.innerOverflow, `${at}, settings open`).toBe(0)
+        expect(curveHeight, `${at}, settings open: the curve's height`).toBeGreaterThanOrEqual(40)
+        await page.getByTestId("genome").locator("summary").click()
+        await expect(page.getByTestId("settings-box")).toBeHidden()
       }
     }
     await page.getByRole("tab", { name: "Learner" }).click()

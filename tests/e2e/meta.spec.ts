@@ -59,8 +59,9 @@ const fmtGenome = (g: Record<string, number | string>) => Object.entries(g).map(
 test("a calibrate posterior: the page shows 'a calibration life' and 'Calibrating: …'; the outbox's first file has meta.method calibrate and the genome the page shows", async ({ page }) => {
   const text = posteriorText("calibrate", { calibrationLives: 18, calibrationTarget: 30 })
   const { errors } = await serve(page, { "posterior.json": text })
-  // The GPU widths on the CPU: a "gpu" widths class draw (calibration lives are GPU-width only), in a life of a few steps.
-  await page.goto("/learner/?testBackend=cpu&testWidths=gpu&testLifetimeCU=0.2&testSleepInterval=2")
+  // The GPU widths on the CPU: a "gpu" widths class draw (calibration lives are GPU-width only), in a life of a step or
+  // two and no sleep (a sleep at these widths on the CPU, replaying up to 256 samples, can take minutes).
+  await page.goto("/learner/?testBackend=cpu&testWidths=gpu&testLifetimeCU=0.05&testSleepInterval=1000")
   const id = await learnerIdOf(page)
   await expect(page.getByTestId("meta-state")).toHaveText("Calibrating: 18 of 30 lives measured, to learn whether the score can tell recipes apart.")
   await expect(page.getByTestId("recipe-text")).toHaveText(/^a calibration life \(recipe \d+ of 10\)$/, { timeout: 30_000 })
@@ -224,7 +225,7 @@ test("with a test budget of 8 CU: switching short lives on past it asks first; o
   await box.click()
   await expect(box).not.toBeChecked() // dismissed: nothing changes
   expect(await page.evaluate(() => localStorage.getItem("blanktab:shortLives"))).toBeNull()
-  expect(asked).toEqual(["This learner is past its 8 CU budget, so it will end at its next sleep and a newborn will start. Go on?"])
+  expect(asked).toEqual(["This learner has had its 8 CU checkup, so it will end at its next sleep and a newborn will start. Go on?"])
   page.once("dialog", d => { asked.push(d.message()); void d.accept() })
   await box.click()
   await expect(box).toBeChecked()
@@ -253,8 +254,11 @@ test("?newborns=0-0 writes one newborn file that parses and validates", async ({
   page.on("request", r => { if (r.url().startsWith("https://api.github.com")) github.push(r.url()) })
   await page.goto("/learner/?newborns=0-0&testBackend=cpu&testWidths=tiny")
   await expect(page.getByTestId("life")).toContainText("Newborn reference 0 of 0–0")
-  await expect(page.getByTestId("recipe-text")).toHaveText("a newborn reference (panel 1)")
+  // No draw in this mode: the meta-learner line says so, and the switch (which ends lives) is not offered.
+  await expect(page.getByTestId("meta-state")).toHaveText(/^Newborn reference run: no draw here\./)
+  await expect(page.getByTestId("short-lives")).toBeHidden()
   await expect(page.getByTestId("life")).toContainText("Newborn references 0–0 are done", { timeout: 80_000 })
+  await expect(page.getByTestId("recipe-text")).toHaveText("a newborn reference (panel 1)") // its file's panel
   const rows = await outbox(page)
   expect(rows).toHaveLength(1)
   const { learnerId, file } = rows[0]!

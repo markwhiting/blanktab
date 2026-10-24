@@ -87,7 +87,8 @@ async function candidatesOf(m: StartMessage, widths: Widths): Promise<Candidate[
     try {
       const birth = await birthFromDraw(c, id, widthsClassOf(widths), budget)
       if (birth.reason !== undefined) console.warn(`blanktab: learner ${id}: the posterior gave the centre: ${birth.reason}`)
-      out.push({ name, birth, meta: sessionMetaOf(c, birth.meta, budget) })
+      const knobs = { ...(m.overrides?.maxStepsPerSec !== undefined ? { maxStepsPerSec: m.overrides.maxStepsPerSec } : {}), ...(m.overrides?.sleepInterval !== undefined ? { sleepInterval: m.overrides.sleepInterval } : {}) }
+      out.push({ name, birth, meta: sessionMetaOf(c, birth.meta, budget, knobs) })
     } catch (e) {
       console.warn(`blanktab: learner ${id}: no ${name} birth:`, e)
     }
@@ -280,14 +281,15 @@ async function newborns(m: StartMessage, range: { from: number; to: number }): P
     post({ type: "newborn", k, learnerId, done: false })
     await queue.setContribution({ learnerId, lastPr: 0, closedInARow: 0, localOnly: true })
     const centre = await birthFromDraw(withoutPosterior(ctx), learnerId, widthsClassOf(chosen.widths))
-    await runNewborn({
+    const file = await runNewborn({
       learnerId, k, codeSha: m.cfg.codeSha, knowledgeSha: m.cfg.knowledgeSha, hostSig: { ...m.cfg.hostSig, webgpu: chosen.kind === "webgpu" },
       widths: chosen.widths, settings: centre.learnerSettings, genome: { schema: ctx.space.schemaVersion, values: { ...ctx.centre }, sha: ctx.centreSha }, space: ctx.space,
     }, {
       createLearner: async init => learnerOn(chosen, init), checkupCanvas: () => new OffscreenCanvas(WORLD.width, WORLD.height),
       idb: indexedDB, now: () => new Date(),
     })
-    post({ type: "newborn", k, learnerId, done: true })
+    const evalPanel = file.meta?.evalPanel
+    post({ type: "newborn", k, learnerId, done: true, ...(typeof evalPanel === "number" ? { evalPanel } : {}) })
   }
   post({ type: "newbornsDone" })
 }

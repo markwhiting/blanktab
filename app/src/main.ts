@@ -1,7 +1,7 @@
 // The page's main thread: knowledge, identity, the GitHub contributor and the token live here.
 // The learner itself runs in ./worker.ts; this thread only starts it and shows what it reports.
 import {
-  DB_BLOCKED_MESSAGE, DEFAULT_MAX_STEPS_PER_SEC, LOCAL_ONLY_MESSAGE, MAX_EVAL_PANEL, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken,
+  DB_BLOCKED_MESSAGE, DEFAULT_MAX_STEPS_PER_SEC, LOCAL_ONLY_MESSAGE, PERMISSION_MESSAGE, REJECTED_MESSAGE, adoptLearnerId, checkToken,
   clampCaregiverSettings, clearToken, createContributor, getToken, hasCheckpoint, lifeBudget, loadKnowledge, loadManifest, newLearnerId, openQueue,
   setToken, storedLearnerId, sweepCheckpoints, waitLock, webLock, MAX_UNSENT,
   type Knowledge, type LogFile, type Queue, type SweepResult,
@@ -41,9 +41,12 @@ const overrides: NonNullable<StartMessage["overrides"]> = {
 /** The short-lives switch (decisions 0019, 0022): this browser's, off unless stored as "1". */
 const SHORT_LIVES_KEY = "blanktab:shortLives"
 const shortLivesOn = () => localStorage.getItem(SHORT_LIVES_KEY) === "1"
-/** Asked before switching short lives on for a life already past its budget (ruling A, decision 0022). */
+/**
+ * Asked before switching short lives on for a life that has already had its budget checkup (ruling A, decision 0022):
+ * the session ends such a life at its next clean sleep.
+ */
 const pastBudgetQuestion = (budgetCU: number) =>
-  `This learner is past its ${budgetCU.toLocaleString("en-US")} CU budget, so it will end at its next sleep and a newborn will start. Go on?`
+  `This learner has had its ${budgetCU.toLocaleString("en-US")} CU checkup, so it will end at its next sleep and a newborn will start. Go on?`
 
 const fetchFn: typeof fetch = (input, init) => fetch(input, init)
 
@@ -127,7 +130,10 @@ interface Life {
   halt(): void
   /** The short-lives switch changed. */
   shortLives(on: boolean): void
-  /** Whether switching short lives on would end it at its next sleep: it has a meta block and has lived its budget. */
+  /**
+   * Its budget (CU) if switching short lives on would end it at its next sleep: it has a meta block and its budget
+   * checkup is done (the session's end condition, session.ts); else null.
+   */
   pastBudget(): number | null
 }
 
@@ -168,9 +174,11 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   const visibility = () => worker.postMessage({ type: "visibility", hidden: document.hidden } satisfies ToWorker)
   document.addEventListener("visibilitychange", visibility)
   let over = false
-  /** What the switch's question needs: the CU lived (latest report) and the life's budget, once its meta block is known. */
-  let cuNow = 0
+  /** What the switch's question needs: the highest checkup level done, and the life's budget once its block is known. */
+  let checkedTo = 0
   let budgetCU: number | null = null
+  /** The knowledge this life is drawn from (the worker draws from `draw` below): its recipe line reads it, not a later refresh. */
+  const drawnFrom = drawContextOf(knowledge)
   let nextCheckpoint = 0
   const waiting = new Map<number, (saved: boolean) => void>()
   const life: Life = {
@@ -185,7 +193,7 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
     }),
     halt: () => worker.terminate(),
     shortLives: on => worker.postMessage({ type: "shortLives", on } satisfies ToWorker),
-    pastBudget: () => (budgetCU !== null && cuNow >= budgetCU ? budgetCU : null),
+    pastBudget: () => (budgetCU !== null && checkedTo >= budgetCU ? budgetCU : null),
   }
   ctx.life = life
   // Its logs were rejected too often (decision 0014): it lives on here, but no longer contributes.
@@ -211,21 +219,23 @@ async function live(id: string, ctx: Ctx, held?: () => void, record?: unknown): 
   worker.onmessage = (e: MessageEvent<FromWorker>) => {
     heard = true
     const m = e.data
-    if (m.type === "frame") { cuNow = m.cu; ui.frame(m) }
+    if (m.type === "frame") ui.frame(m)
     else if (m.type === "backend") ui.backend(m.label)
     else if (m.type === "learner") ui.settings(m.settings)
     else if (m.type === "curve") ui.curve(m.points, m.reset)
     else if (m.type === "status") ui.status(m.message)
-    else if (m.type === "checkups") ui.checkups(m.results, m.reset)
+    else if (m.type === "checkups") {
+      checkedTo = Math.max(m.reset ? 0 : checkedTo, ...m.results.map(r => r.level))
+      ui.checkups(m.results, m.reset)
+    }
     else if (m.type === "carried") ui.caregiver(caregiverText(m))
     else if (m.type === "meta") {
       budgetCU = lifeBudget(m.meta).budgetCU
       const meta = m.meta
-      void drawContextOf(ctx.knowledge).then(dc => { if (ctx.life === life) ui.recipe({ meta, ctx: dc }) })
+      void drawnFrom.then(dc => { if (ctx.life === life) ui.recipe({ meta, ctx: dc }) })
     }
     else if (m.type === "unlabelled") ui.recipe({ unlabelled: m.reason })
     else if (m.type === "queued") {
-      cuNow = m.cu
       ui.progress(m.steps, m.cu)
       // Without a token (or for a local-only learner) nothing is ever sent: keep each learner's unsent files bounded.
       void queue.capUnsent(MAX_UNSENT).catch(() => {}).then(() => queued(m.final))
@@ -351,6 +361,7 @@ async function runNewborns(ctx: Ctx, range: { from: number; to: number }): Promi
     hostSig: await hostSig(), seed: 0, learnerSettings: { ...DEFAULT_SETTINGS },
   }
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
+  ui.newbornMode()
   ui.notice(newbornText(range.from, range))
   let backend: string | null = null // shown again for each newborn (ui.learner resets the line)
   worker.onmessage = (e: MessageEvent<FromWorker>) => {
@@ -359,10 +370,14 @@ async function runNewborns(ctx: Ctx, range: { from: number; to: number }): Promi
     else if (m.type === "newborn" && !m.done) {
       ui.learner({ id: m.learnerId, sessionsBefore: 0 })
       if (backend !== null) ui.backend(backend)
-      ui.recipe({ newborn: `a newborn reference (panel ${1 + (m.k % MAX_EVAL_PANEL)})` })
+      ui.recipe({ newborn: "a newborn reference" })
       ui.status(`checking newborn ${m.k} (seed ${NEWBORN_SEED_BASE + m.k}) on its panel`)
       ui.notice(newbornText(m.k, range))
-    } else if (m.type === "newborn") ui.status(`newborn ${m.k}'s file is in this browser's outbox`)
+    } else if (m.type === "newborn") {
+      // Its panel as its file records it.
+      if (m.evalPanel !== undefined) ui.recipe({ newborn: `a newborn reference (panel ${m.evalPanel})` })
+      ui.status(`newborn ${m.k}'s file is in this browser's outbox`)
+    }
     else if (m.type === "newbornsDone") {
       worker.terminate()
       ui.notice(`Newborn references ${range.from}–${range.to} are done. Their files stay in this browser, for tools/eval/collect-newborns.ts.`)

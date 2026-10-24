@@ -1950,6 +1950,47 @@ describe("session v2", { timeout: 60_000 }, () => {
         await gateAccepts(logs)
       })
 
+      it("fix round 1 (Task 12): a resumed block-carrying life runs its block's speed cap and sleep interval (resumedHarness), not the config's", async () => {
+        const idb = new IDBFactory()
+        const a = await metaOf()
+        await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const before = (await logsOf(idb)).length
+        const seen: MetaBlock[] = []
+        const b: SessionMeta = { ...a, resumedHarness: block => { seen.push(block); return { maxStepsPerSec: 30, sleepInterval: 4 } } }
+        // A page whose defaults moved: the resumed life must not take them.
+        await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 7, maxStepsPerSec: 999, meta: b } })
+        const after = (await logsOf(idb)).slice(before)
+        expect(seen).toEqual([a.birth])
+        expect(after.length).toBeGreaterThan(0)
+        for (const f of after) expect(f.settings.maxStepsPerSec).toBe(30)
+        // Sleeps (curve points) every 4 steps after the resume; the final file's last point is the life's end, not a sleep.
+        const pts = after.flatMap(f => f.curve).filter(p => p.steps > 33).slice(0, -1)
+        expect(pts.map(p => p.steps)).toEqual(pts.map((_, i) => 36 + 4 * i))
+        // A newborn never asks: its own config is its genome's already.
+        const fresh = new IDBFactory()
+        const asked: MetaBlock[] = []
+        await growM(fresh, { cfg: { lifetimeCU: 20, sleepInterval: 10, meta: { ...a, resumedHarness: blk => { asked.push(blk); return {} } } } })
+        expect(asked).toEqual([])
+      })
+
+      it("fix round 1 (Task 12): a resumedHarness that throws or is out of range keeps the config's, with a warning", async () => {
+        const idb = new IDBFactory()
+        const a = await metaOf()
+        await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, meta: a }, deps: reload(s => s.steps === 33) })).rejects.toThrow("reload")
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          await expect(growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, maxStepsPerSec: 30, meta: { ...a, resumedHarness: () => ({ sleepInterval: 0 }) } }, deps: reload(s => s.steps === 50) })).rejects.toThrow("reload")
+          await growM(idb, { cfg: { lifetimeCU: 140, sleepInterval: 10, maxStepsPerSec: 30, meta: { ...a, resumedHarness: () => { throw new Error("page bug") } } } })
+          expect(warn).toHaveBeenCalledTimes(2)
+        } finally {
+          warn.mockRestore()
+        }
+        const logs = await logsOf(idb)
+        for (const f of logs) expect(f.settings.maxStepsPerSec).toBe(30)
+        const pts = logs.flatMap(f => f.curve).slice(0, -1)
+        for (const p of pts) expect(p.steps % 10).toBe(0)
+      })
+
       it("with evalPanel p, every checkup's variants are panelSeed(p, …)", async () => {
         const base = await birthBlock(ID)
         for (const p of [3, 16]) {

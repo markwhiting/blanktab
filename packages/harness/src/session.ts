@@ -50,6 +50,13 @@ export interface SessionMeta {
    * (decision 0022: it keeps checkupSeed). `flat` is the life's settings as its log files record them.
    */
   legacy(flat: Record<string, number | string>): Promise<MetaBlock>
+  /**
+   * The speed cap and sleep interval a life resumed from a checkpoint with block `block` runs: its genome's (the page
+   * decodes it, test knobs over it), so a resumed life never runs harness genes other than its own. A key left out
+   * keeps the config's (e.g. a legacy block's unrecorded gene). Absent: the config's. A result that throws or is out
+   * of range is said on console.warn and the config's are kept (a page bug never ends a forever life).
+   */
+  resumedHarness?(block: MetaBlock): { maxStepsPerSec?: number; sleepInterval?: number }
 }
 
 /** A newborn's cfg.meta.birth is not a block this life may write (runSession throws it before making a learner). */
@@ -355,8 +362,9 @@ export function curvePoint(
  */
 export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise<SessionResult> {
   const lifetimeCU = cfg.lifetimeCU ?? Number.POSITIVE_INFINITY // no lifetime: the life ends only by failure or the caller
-  const sleepInterval = cfg.sleepInterval ?? DEFAULT_SLEEP_INTERVAL
-  const maxStepsPerSec = cfg.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC
+  // A resumed life's block may set both (cfg.meta.resumedHarness, below), once its checkpoint is read.
+  let sleepInterval = cfg.sleepInterval ?? DEFAULT_SLEEP_INTERVAL
+  let maxStepsPerSec = cfg.maxStepsPerSec ?? DEFAULT_MAX_STEPS_PER_SEC
   if (cfg.lifetimeCU !== undefined && !(Number.isFinite(cfg.lifetimeCU) && cfg.lifetimeCU > 0)) throw new RangeError(`lifetimeCU must be finite and > 0, got ${cfg.lifetimeCU}`)
   if (!(Number.isInteger(sleepInterval) && sleepInterval >= 1)) throw new RangeError(`sleepInterval must be an integer >= 1, got ${sleepInterval}`)
   if (!(Number.isFinite(maxStepsPerSec) && maxStepsPerSec > 0)) throw new RangeError(`maxStepsPerSec must be finite and > 0, got ${maxStepsPerSec}`)
@@ -472,6 +480,17 @@ export async function runSession(cfg: SessionConfig, deps: SessionDeps): Promise
     // Every log file is queued with its checkpoint, so the checkpoint's seq is exactly the one after the latest file.
     if (cp && cp.seq !== (latest?.seq ?? -1) + 1) {
       throw new Error(`learner ${id}: the checkpoint's seq ${cp.seq} does not follow its latest log file (seq ${latest?.seq ?? "none"})`)
+    }
+    if (cp?.meta && cfg.meta?.resumedHarness) {
+      try {
+        const h = cfg.meta.resumedHarness(structuredClone(cp.meta))
+        const cap = h.maxStepsPerSec ?? maxStepsPerSec, every = h.sleepInterval ?? sleepInterval
+        if (!(Number.isFinite(cap) && cap > 0) || !(Number.isInteger(every) && every >= 1)) throw new RangeError(`maxStepsPerSec ${cap}, sleepInterval ${every}`)
+        maxStepsPerSec = cap
+        sleepInterval = every
+      } catch (e) {
+        console.warn(`learner ${id}: its block's speed cap and sleep interval could not be used (the config's are):`, e)
+      }
     }
     birth = cp ? birthOf(cp.learnerState, id) : { seed: cfg.seed, widths: cfg.widths, settings: clampSettings(cfg.learnerSettings) }
     const { seed, widths, settings } = birth

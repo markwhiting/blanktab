@@ -5,7 +5,7 @@ import evaluation from "../../config/evaluation.json" with { type: "json" }
 import type { DrawContext } from "./birth"
 import { appendPoints, fitCanvas, ownStreamText, ratioText, sparkline } from "./curve"
 import { appendCheckups, milestoneBars, milestoneText } from "./milestones"
-import { genomeHighlights, metaLineOf, missingText, recipeText, scoreText, unlabelledText } from "./recipe"
+import { NEWBORN_RUN_TEXT, genomeHighlights, metaLineOf, missingText, recipeText, scoreText, unlabelledText } from "./recipe"
 import { HISTORY_COLUMNS, buildLabel, fmt, fmtSettings, historyRows, siteLinks } from "./site"
 
 const $ = <T extends HTMLElement>(sel: string): T => {
@@ -189,6 +189,8 @@ export interface Ui {
   lifeComplete(id: string, ended?: "budget"): void
   /** The recipe line: how this life's genome was drawn, its furthest genes; its settings and full genome behind a toggle. */
   recipe(r: RecipeView): void
+  /** Newborn reference mode: the meta-learner line says so, and the short-lives switch (which ends lives) is hidden. */
+  newbornMode(): void
   /** The short-lives switch as stored. */
   shortLives(on: boolean): void
   /** The handler returns false to refuse the change (the box goes back). */
@@ -219,6 +221,7 @@ export function createUi(): Ui {
     byTest("score").hidden = byTest("score-label").hidden = text === null
   }
   const shortLivesBox = byTest("short-lives") as HTMLInputElement
+  let newborns = false
   let curve: CurvePoint[] = []
   let checkups: CheckupResult[] = []
   // Charts are not drawn while their tab is hidden (they have no size then): drawn again when it is shown.
@@ -242,7 +245,7 @@ export function createUi(): Ui {
       byTest("knowledge").textContent = k.offline
         ? "offline: the shared knowledge could not be loaded, so this learner starts from nothing."
         : `loaded (knowledgeSha ${k.manifest.knowledgeSha.slice(0, 12)}…)`
-      byTest("meta-state").textContent = metaLineOf(k)
+      if (!newborns) byTest("meta-state").textContent = metaLineOf(k)
       summary = k.summary
       showScore()
       renderHistory(k)
@@ -339,6 +342,11 @@ export function createUi(): Ui {
       byTest("genome-list").textContent = Object.entries(meta.genome).map(([k, v]) => `${k} = ${fmt(v)}`).join(", ")
       byTest("genome-shas").textContent = `genomeSha ${meta.genomeSha.slice(0, 8)} · posteriorSha ${meta.posteriorSha === null ? "none" : meta.posteriorSha.slice(0, 8)}`
       box.hidden = false
+    },
+    newbornMode() {
+      newborns = true
+      byTest("meta-state").textContent = NEWBORN_RUN_TEXT
+      byTest("short-lives-switch").hidden = true
     },
     shortLives(on) {
       shortLivesBox.checked = on

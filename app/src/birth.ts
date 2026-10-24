@@ -88,13 +88,35 @@ export async function birthFromDraw(ctx: DrawContext, learnerId: string, widthsC
 /** The same context without its posterior: what a birth falls back to (a centre draw). */
 export const withoutPosterior = (ctx: DrawContext): DrawContext => ({ ...ctx, posterior: null, posteriorText: null, posteriorSha: null })
 
+/** Test knobs that win over a genome's harness genes (the worker's StartMessage.overrides). */
+export interface HarnessKnobs { maxStepsPerSec?: number; sleepInterval?: number }
+
+/**
+ * SessionMeta.resumedHarness: a resumed life's speed cap and sleep interval from its checkpoint block's genome (decoded
+ * in `ctx`'s space; a block of another genome schema gives none), leaving out the genes a legacy block did not record
+ * (`missing`: the config's stand), with `knobs` over them.
+ */
+export function resumedHarnessOf(ctx: DrawContext, knobs: HarnessKnobs = {}): NonNullable<SessionMeta["resumedHarness"]> {
+  return block => {
+    const out: HarnessKnobs = {}
+    if (block.genomeSchema === ctx.space.schemaVersion) {
+      const h = decodeGenome(block.genome, ctx.space).harness
+      const missing = new Set(block.missing ?? [])
+      if (!missing.has("maxStepsPerSec")) out.maxStepsPerSec = h.maxStepsPerSec
+      if (!missing.has("sleepInterval")) out.sleepInterval = h.sleepInterval
+    }
+    return { ...out, ...knobs }
+  }
+}
+
 /**
  * The session's meta source (SessionMeta) for a life born with `birth` in `ctx`. A resumed pre-05a life gets a legacy
- * block (legacyGenome of its logged settings: role and method legacy, no panel, its unrecorded genes in `missing`).
+ * block (legacyGenome of its logged settings: role and method legacy, no panel, its unrecorded genes in `missing`). A
+ * resumed life with a block runs its genome's speed cap and sleep interval (resumedHarnessOf, `knobs` over them).
  */
-export function sessionMetaOf(ctx: DrawContext, birth: MetaBlock, budget: EvalBudget = CONFIG_BUDGET): SessionMeta {
+export function sessionMetaOf(ctx: DrawContext, birth: MetaBlock, budget: EvalBudget = CONFIG_BUDGET, knobs: HarnessKnobs = {}): SessionMeta {
   return {
-    space: ctx.space, birth, budget,
+    space: ctx.space, birth, budget, resumedHarness: resumedHarnessOf(ctx, knobs),
     async legacy(flat) {
       const { genome, missing } = legacyGenome(flat, ctx.space)
       // No budget: a legacy life runs under the v1 budget (lifeBudget), and the parser refuses one on it.

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { DEFAULT_SETTINGS } from "@blanktab/learner"
 import { CAREGIVER_DEFAULTS, CONFIG_BUDGET, DEFAULT_MAX_STEPS_PER_SEC, DEFAULT_SLEEP_INTERVAL, parseMeta } from "@blanktab/harness"
 import { birthDraw, decodeGenome, genomeSha, legacyGenome, parsePosterior } from "@blanktab/meta"
-import { birthFromDraw, drawContextOf, sessionMetaOf } from "../src/birth"
+import { birthFromDraw, drawContextOf, resumedHarnessOf, sessionMetaOf } from "../src/birth"
 import { CENTRE, CENTRE_SHA, GENOME_JSON, SPACE, SPACE_JSON, posteriorText } from "./posteriors"
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex")
@@ -89,6 +89,7 @@ describe("sessionMetaOf", () => {
     expect(m.space).toBe(ctx.space)
     expect(m.birth).toBe(b.meta)
     expect(m.budget).toEqual(CONFIG_BUDGET)
+    expect(m.resumedHarness!(b.meta)).toEqual({ maxStepsPerSec: DEFAULT_MAX_STEPS_PER_SEC, sleepInterval: DEFAULT_SLEEP_INTERVAL })
     const flat = { lr: 1e-3, entropyWeight: 0.002, curiosityWeight: 1, bufferSize: 500, replayPerSleep: 16, headLrScale: 0.1, exploreEpsilon: 0.1, residualDecay: 1e-3, maxStepsPerSec: 30, seed: 5 }
     const block = await m.legacy(flat)
     const { genome, missing } = legacyGenome(flat, SPACE)
@@ -101,5 +102,23 @@ describe("sessionMetaOf", () => {
     // Every gene recorded: no `missing` key at all.
     const all = await m.legacy({ ...flat, ...CAREGIVER_DEFAULTS, sleepInterval: 250 })
     expect(all).not.toHaveProperty("missing")
+  })
+})
+
+describe("resumedHarnessOf (fix round 1)", () => {
+  it("a resumed block's genome gives the cap and sleep interval; a legacy block's unrecorded genes are left to the config; knobs win", async () => {
+    const ctx = (await drawContextOf(knowledge(null)))!
+    // A space where both harness genes are searched: a resume must run the block's values, not today's centre.
+    const space = JSON.parse(JSON.stringify(SPACE_JSON)) as { genes: Record<string, unknown>[] }
+    for (const g of space.genes) {
+      if (g.name === "maxStepsPerSec") Object.assign(g, { min: 10, max: 60, owner: "gp" })
+      if (g.name === "sleepInterval") Object.assign(g, { min: 100, max: 500, owner: "gp", scale: "log" })
+    }
+    const wide = { ...ctx, ...(await drawContextOf(knowledge(null, space)))! }
+    const block = { ...(await birthFromDraw(ctx, "lrn_0123456789abcdef", "gpu")).meta, genome: { ...CENTRE, maxStepsPerSec: 45, sleepInterval: 400 } }
+    expect(resumedHarnessOf(wide)(block)).toEqual({ maxStepsPerSec: 45, sleepInterval: 400 })
+    expect(resumedHarnessOf(wide, { sleepInterval: 5 })(block)).toEqual({ maxStepsPerSec: 45, sleepInterval: 5 })
+    expect(resumedHarnessOf(wide)({ ...block, role: "legacy", method: "legacy", missing: ["sleepInterval"] })).toEqual({ maxStepsPerSec: 45 })
+    expect(resumedHarnessOf(wide, { maxStepsPerSec: 9 })({ ...block, genomeSchema: 2 })).toEqual({ maxStepsPerSec: 9 })
   })
 })
